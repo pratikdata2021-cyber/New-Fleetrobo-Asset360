@@ -1,0 +1,8 @@
+{
+  "name": "Updated FleetRobo Asset Store 360",
+  "description": "A high-fidelity administrative dashboard prototype for company details and management, featuring sidebar navigation, status monitoring, and profile editing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

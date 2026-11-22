@@ -1,0 +1,1833 @@
+export interface RouteMapping {
+  id: string;
+  client: string;
+  transporter: string;
+  route: string;
+  route_type: string;
+  overspeed_rule_enabled?: boolean;
+  overspeed_limit?: string | number;
+  overspeed_duration?: string | number;
+}
+
+export interface SharedAccess {
+  id: string;
+  shared_company: string;
+  is_shared: boolean;
+}
+
+export interface OutboundPlan {
+  id: string;
+  route: string;
+  etd: string;
+  rta_part1: number;
+  rta_part2: number;
+  lead_time_part1: number;
+  lead_time_part2: number;
+  route_type?: string;
+}
+
+export interface ClientAllocation {
+  id: string;
+  hub: string;
+  client: string;
+  client_location: string;
+  route_type: string;
+  allocation_date: string;
+  trip_sequence_number: number;
+}
+
+export interface BreakdownEvent {
+  id: string;
+  breakdown_date_time: string;
+  breakdown_remarks: string;
+}
+
+export interface AlertPreference {
+  id: string;
+  alert_type: string;
+  sms_recipient?: string;
+  email_recipient?: string;
+  ivrs_recipient?: string;
+  whatsapp_recipient?: string;
+}
+
+export interface PetroCardSettings {
+  mileage?: string | number;
+  child_id?: string;
+  opening_diesel_quantity?: string | number;
+  created_at?: string;
+}
+
+export interface ComplianceDocuments {
+  fitness?: { last_record?: string; due_date?: string; due?: string };
+  permit?: { last_record?: string; due_date?: string; due?: string };
+  state_tax?: { last_record?: string; due_date?: string; due?: string };
+  insurance?: { last_record?: string; due_date?: string; due?: string };
+  pollution?: { last_record?: string; due_date?: string; due?: string };
+}
+
+export interface DocumentAttachment {
+  name: string;
+  size: string;
+  type?: string;
+  uploaded_at?: string;
+  dataUrl?: string;
+}
+
+export interface Vehicle {
+  id: string;
+  public_id: string;
+  company: string;
+  registration_number: string;
+  name: string;
+  internal_id?: string;
+  vin?: string;
+  make?: string;
+  model?: string;
+  year?: number | string;
+  trim?: string;
+  color?: string;
+  serial_number?: string;
+  fuel_card_number?: string;
+  class?: string;
+  status: 'Available' | 'In Use' | 'Maintenance' | 'Out of Service' | 'Reserved' | 'Inactive' | 'Accident / Damage' | 'Compliance Hold' | 'Stolen';
+  call_sign?: string;
+
+  // Section 1 — Basic Vehicle Details
+  vehicle_model_id?: string;
+  machine_model?: string;
+  vehicle_segment?: string;
+  chassis_number?: string;
+  registration_date?: string;
+  engine_number?: string;
+  machine_owner?: string;
+  active_status?: boolean;
+
+  // Section 2 — Vehicle & Operational Settings
+  overspeed_limit?: number | string;
+  fuel_theft_limit?: number | string;
+  fuel_refill?: number | string;
+  fuel_calibration_type?: string;
+  fuel_type?: string;
+  fuel_tank_capacity?: number | string;
+  zone?: string;
+  location?: string;
+  mobile_number?: string;
+  packager_number?: string;
+
+  // Section 3 — Insurance Details
+  insurance_company?: string;
+  insurance_from?: string;
+  insurance_to?: string;
+  policy_number?: string;
+
+  // Section 4 — Purchase & Warranty
+  purchase_date?: string;
+  warranty_from?: string;
+  warranty_to?: string;
+  extended_warranty_from?: string;
+  extended_warranty_to?: string;
+
+  // Section 5 — Documents & Verification
+  aadhar_number?: string;
+  aadhar_document?: DocumentAttachment | null;
+  rc_document?: DocumentAttachment | null;
+  upload_document?: DocumentAttachment | null;
+  extended_warranty_document?: DocumentAttachment | null;
+
+  // Additional catalogue keys
+  category?: string;
+  type?: string;
+  model_type?: string;
+  measurement_system?: string;
+  fuel_volume_unit?: string;
+  odometer?: number;
+  odometer_unit?: string;
+  body_type?: string;
+  body_sub_type?: string;
+  usage_type?: string;
+  ownership_type?: string;
+  transmission?: string;
+  emission_standard?: string;
+  dpf_equipped?: boolean;
+  scr_equipped?: boolean;
+  currency?: string;
+  purchased_at?: string;
+  lease_expires_at?: string;
+  warranty?: string;
+  loan_first_payment?: string;
+  financing_status?: string;
+
+  // Business & Resource Relationships
+  hub?: string;
+  client?: string;
+  client_location?: string;
+  transporter?: string;
+  transporterVendorId?: string;
+  vendor?: string;
+  driver?: string;
+  fleets?: string[];
+  trailers?: string[];
+  skills?: string[];
+
+  // Linked arrays
+  routes?: RouteMapping[];
+  outbound?: OutboundPlan[];
+  allocations?: ClientAllocation[];
+  sharing?: SharedAccess[];
+  breakdowns?: BreakdownEvent[];
+  alerts?: AlertPreference[];
+  documents?: ComplianceDocuments;
+  petro?: PetroCardSettings;
+
+  // Operational Context & System
+  online?: boolean;
+  speed?: number;
+  heading?: number;
+  altitude?: number;
+  assigned_orders_count?: number;
+  current_order_reference?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const INITIAL_VEHICLES: Vehicle[] = [
+  {
+    id: 'veh-001',
+    public_id: 'VH-100291',
+    company: 'Adani Port',
+    registration_number: 'MH12AB1234',
+    name: 'Tata Signa 5530',
+    internal_id: 'TRK-0019',
+    vin: 'MA3FJEB1S00654321',
+    make: 'Tata Motors',
+    model: 'Signa 5530',
+    machine_model: 'Tata Signa 5530',
+    chassis_number: 'MA3FJEB1S00654321',
+    registration_date: '2023-04-15',
+    client: 'Adani Logistics',
+    engine_number: 'ENG-TT-99401',
+    transporter: 'Western Logistics',
+    year: 2023,
+    machine_owner: 'Adani Logistics Services',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_theft_limit: 15,
+    fuel_refill: 20,
+    fuel_calibration_type: 'Linear',
+    fuel_tank_capacity: 360,
+    zone: 'West Zone',
+    location: 'Mundra Terminal',
+    mobile_number: '+91 98200 12345',
+    packager_number: 'PKG-9921',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2024-01-15',
+    insurance_to: '2027-01-15',
+    policy_number: 'POL-ICICI-49201',
+    purchase_date: '2023-03-20',
+    warranty_from: '2023-03-20',
+    warranty_to: '2026-03-19',
+    extended_warranty_from: '2026-03-20',
+    extended_warranty_to: '2028-03-19',
+    aadhar_number: '8839 2019 4481',
+    aadhar_document: { name: 'aadhar_card_reg.pdf', size: '1.2 MB' },
+    rc_document: { name: 'rc_smart_card.png', size: '2.1 MB' },
+    upload_document: { name: 'fitness_certificate.pdf', size: '850 KB' },
+    extended_warranty_document: { name: 'extended_warranty_policy.pdf', size: '1.4 MB' },
+    trim: 'LXI',
+    color: 'Pure White',
+    serial_number: 'SER-99402',
+    fuel_card_number: 'FC-99210-A',
+    class: 'HMV',
+    status: 'Available',
+    call_sign: 'CT2-HAUL-01',
+    vendor: 'FleetCare Services',
+    driver: 'Aman Jha',
+    fleets: ['Mundra Fleet'],
+    trailers: ['TRL-102'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 48210,
+    odometer_unit: 'km',
+    type: 'Truck',
+    routes: [
+      {
+        id: 'rt-1',
+        client: 'Adani Logistics',
+        transporter: 'Western Logistics',
+        route: 'Mundra–Hazira',
+        route_type: 'Inbound',
+        overspeed_rule_enabled: true,
+        overspeed_limit: '60',
+        overspeed_duration: '10'
+      }
+    ],
+    sharing: [
+      { id: 'sh-1', shared_company: 'Binary Semantics Ltd', is_shared: true }
+    ],
+    documents: {
+      fitness: { last_record: 'FIT-2023-01', due_date: '2027-05-14', due: 'Valid' },
+      permit: { last_record: 'PRM-8821', due_date: '2026-12-01', due: 'Valid' },
+      state_tax: { last_record: 'TAX-GJ-99', due_date: '2026-10-30', due: 'Due Soon' },
+      insurance: { last_record: 'POL-ICICI-49', due_date: '2027-01-15', due: 'Valid' },
+      pollution: { last_record: 'PUC-99120', due_date: '2026-11-20', due: 'Valid' }
+    },
+    alerts: [
+      { id: 'alt-1', alert_type: 'Overspeed', sms_recipient: '+91 98765 43210', email_recipient: 'ops@adaniport.example' },
+      { id: 'alt-2', alert_type: 'Route Deviation', whatsapp_recipient: '+91 98765 43210' }
+    ],
+    petro: {
+      mileage: '3.8',
+      child_id: 'PETRO-MN-01',
+      opening_diesel_quantity: '340',
+      created_at: '2024-01-10'
+    },
+    created_at: '2024-01-15',
+    updated_at: '2024-09-12'
+  },
+  {
+    id: 'veh-002',
+    public_id: 'VH-100292',
+    company: 'Adani Port',
+    registration_number: 'RJ05GC0206',
+    name: 'Ashok Leyland 2820',
+    internal_id: 'TRK-0024',
+    vin: 'MB1AJEB2S00918231',
+    make: 'Ashok Leyland',
+    model: '2820',
+    machine_model: 'Ashok Leyland 2820',
+    chassis_number: 'MB1AJEB2S00918231',
+    registration_date: '2022-08-10',
+    client: 'Godrej',
+    engine_number: 'ENG-AL-88124',
+    transporter: 'TMS Transporter',
+    year: 2022,
+    machine_owner: 'Godrej Logistics Corp',
+    active_status: true,
+    overspeed_limit: 65,
+    fuel_theft_limit: 10,
+    fuel_refill: 15,
+    fuel_calibration_type: 'Standard',
+    fuel_tank_capacity: 300,
+    zone: 'West Zone',
+    location: 'Hazira Plant',
+    mobile_number: '+91 98201 54321',
+    packager_number: 'PKG-8810',
+    insurance_company: 'HDFC ERGO General Insurance',
+    insurance_from: '2023-11-20',
+    insurance_to: '2026-11-19',
+    policy_number: 'POL-HDFC-99102',
+    purchase_date: '2022-07-15',
+    warranty_from: '2022-07-15',
+    warranty_to: '2025-07-14',
+    extended_warranty_from: '2025-07-15',
+    extended_warranty_to: '2027-07-14',
+    aadhar_number: '7721 9912 3041',
+    aadhar_document: { name: 'aadhar_copy.pdf', size: '1.1 MB' },
+    rc_document: { name: 'rc_doc_rj05.png', size: '2.4 MB' },
+    upload_document: { name: 'puc_certificate.pdf', size: '520 KB' },
+    extended_warranty_document: null,
+    trim: 'Standard',
+    color: 'Silver Grey',
+    serial_number: 'SER-88120',
+    fuel_card_number: 'FC-88102-B',
+    class: 'HMV',
+    status: 'In Use',
+    call_sign: 'EXP-CARGO-04',
+    vendor: 'Roadway Partners',
+    driver: 'Rohit Patil',
+    fleets: ['Mundra Fleet', 'Western Fleet'],
+    trailers: ['TRL-205'],
+    hub: 'Hazira Plant',
+    client_location: 'Hazira',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 89300,
+    odometer_unit: 'km',
+    type: 'Truck',
+    routes: [
+      {
+        id: 'rt-2',
+        client: 'Godrej',
+        transporter: 'TMS Transporter',
+        route: 'Mundra–Ahmedabad',
+        route_type: 'Regular',
+        overspeed_rule_enabled: true,
+        overspeed_limit: '65',
+        overspeed_duration: '15'
+      }
+    ],
+    sharing: [],
+    created_at: '2023-11-20',
+    updated_at: '2024-10-01'
+  },
+  {
+    id: 'veh-003',
+    public_id: 'VH-100293',
+    company: 'Adani Port',
+    registration_number: 'GJ12AZ9811',
+    name: 'BharatBenz 3528C',
+    internal_id: 'TRK-0031',
+    vin: 'BB3M28C881902918',
+    make: 'BharatBenz',
+    model: '3528C',
+    machine_model: 'BharatBenz 3528C',
+    chassis_number: 'BB3M28C881902918',
+    registration_date: '2023-06-18',
+    client: 'AMNS',
+    engine_number: 'ENG-BB-35281',
+    transporter: 'Western Logistics',
+    year: 2023,
+    machine_owner: 'AMNS India Fleet',
+    active_status: true,
+    overspeed_limit: 55,
+    fuel_theft_limit: 12,
+    fuel_refill: 25,
+    fuel_calibration_type: 'Multipoint',
+    fuel_tank_capacity: 400,
+    zone: 'West Zone',
+    location: 'Mundra Terminal',
+    mobile_number: '+91 98202 87654',
+    packager_number: 'PKG-3528',
+    insurance_company: 'The New India Assurance',
+    insurance_from: '2024-02-10',
+    insurance_to: '2027-02-09',
+    policy_number: 'POL-NEWIND-8821',
+    purchase_date: '2023-05-10',
+    warranty_from: '2023-05-10',
+    warranty_to: '2026-05-09',
+    extended_warranty_from: '2026-05-10',
+    extended_warranty_to: '2028-05-09',
+    aadhar_number: '9920 1823 4452',
+    aadhar_document: { name: 'aadhar_card_arjun.pdf', size: '1.3 MB' },
+    rc_document: { name: 'rc_smart_card_gj12.png', size: '2.0 MB' },
+    upload_document: { name: 'insurance_endorsement.pdf', size: '780 KB' },
+    extended_warranty_document: { name: 'ext_warranty_bharatbenz.pdf', size: '1.1 MB' },
+    trim: 'Tipper',
+    color: 'Deep Blue',
+    serial_number: 'BB-00129',
+    fuel_card_number: 'FC-11209-C',
+    class: 'Heavy Goods Vehicle',
+    status: 'Maintenance',
+    call_sign: 'MINING-02',
+    vendor: 'Vishal Trucks',
+    driver: 'Arjun Mehta',
+    fleets: ['Western Fleet'],
+    trailers: [],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 34100,
+    odometer_unit: 'km',
+    type: 'Truck',
+    breakdowns: [
+      {
+        id: 'bd-1',
+        breakdown_date_time: '2024-10-18T14:30',
+        breakdown_remarks: 'Hydraulic fluid pressure drop. Scheduled for seal replacement.'
+      }
+    ],
+    created_at: '2024-02-10',
+    updated_at: '2024-10-18'
+  },
+  {
+    id: 'veh-004',
+    public_id: 'VH-100294',
+    company: 'Adani Port',
+    registration_number: 'DL01AB4492',
+    name: 'Eicher Pro 3015',
+    internal_id: 'TRK-0048',
+    vin: 'EICHERP3015998124',
+    make: 'Eicher',
+    model: 'Pro 3015',
+    machine_model: 'Eicher Pro 3015',
+    chassis_number: 'EICHERP3015998124',
+    registration_date: '2021-09-12',
+    client: 'Adani Logistics',
+    engine_number: 'ENG-EICH-3015',
+    transporter: 'Coastal Transport',
+    year: 2021,
+    machine_owner: 'Adani Port Terminal Operations',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_theft_limit: 10,
+    fuel_refill: 15,
+    fuel_calibration_type: 'Linear',
+    fuel_tank_capacity: 190,
+    zone: 'South Zone',
+    location: 'Chennai Terminal',
+    mobile_number: '+91 98203 11223',
+    packager_number: 'PKG-3015',
+    insurance_company: 'Tata AIG General Insurance',
+    insurance_from: '2023-08-12',
+    insurance_to: '2026-08-11',
+    policy_number: 'POL-TATA-30158',
+    purchase_date: '2021-08-01',
+    warranty_from: '2021-08-01',
+    warranty_to: '2024-07-31',
+    extended_warranty_from: '2024-08-01',
+    extended_warranty_to: '2026-07-31',
+    aadhar_number: '6610 4421 9901',
+    aadhar_document: { name: 'aadhar_card_dl01.pdf', size: '1.0 MB' },
+    rc_document: { name: 'rc_doc_dl01.png', size: '1.9 MB' },
+    upload_document: null,
+    extended_warranty_document: null,
+    trim: 'Ecomax',
+    color: 'Golden Yellow',
+    serial_number: 'SER-44910',
+    fuel_card_number: 'FC-4492-X',
+    class: 'MCV',
+    status: 'Out of Service',
+    call_sign: 'DIST-09',
+    vendor: 'FleetCare Services',
+    driver: 'Neha Sharma',
+    fleets: ['Chennai Fleet'],
+    trailers: ['TRL-408'],
+    hub: 'Chennai Terminal',
+    client_location: 'Chennai',
+    online: false,
+    fuel_type: 'CNG',
+    odometer: 112000,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2023-08-12',
+    updated_at: '2024-08-25'
+  },
+  {
+    id: 'veh-005',
+    public_id: 'VH-100295',
+    company: 'Adani Port',
+    registration_number: 'KA04MN7711',
+    name: 'Mahindra Bolero Pickup',
+    internal_id: 'LCV-0012',
+    vin: 'MAHINDRABOL771109',
+    make: 'Mahindra',
+    model: 'Bolero Pickup',
+    machine_model: 'Mahindra Bolero Pickup',
+    chassis_number: 'MAHINDRABOL771109',
+    registration_date: '2024-03-01',
+    client: 'Godrej',
+    engine_number: 'ENG-MHD-77119',
+    transporter: 'Western Logistics',
+    year: 2024,
+    machine_owner: 'Godrej Consumer Goods Logistics',
+    active_status: true,
+    overspeed_limit: 70,
+    fuel_theft_limit: 8,
+    fuel_refill: 10,
+    fuel_calibration_type: 'Standard',
+    fuel_tank_capacity: 60,
+    zone: 'West Zone',
+    location: 'Mundra Terminal',
+    mobile_number: '+91 98204 99887',
+    packager_number: 'PKG-7711',
+    insurance_company: 'Bajaj Allianz General Insurance',
+    insurance_from: '2024-03-01',
+    insurance_to: '2027-02-28',
+    policy_number: 'POL-BAJAJ-77112',
+    purchase_date: '2024-02-20',
+    warranty_from: '2024-02-20',
+    warranty_to: '2027-02-19',
+    extended_warranty_from: '2027-02-20',
+    extended_warranty_to: '2029-02-19',
+    aadhar_number: '5521 8832 1109',
+    aadhar_document: { name: 'aadhar_suresh.pdf', size: '1.1 MB' },
+    rc_document: { name: 'rc_ka04_smart.png', size: '2.2 MB' },
+    upload_document: { name: 'tax_token.pdf', size: '490 KB' },
+    extended_warranty_document: { name: 'mahindra_shield_cert.pdf', size: '1.3 MB' },
+    trim: 'Extra Long',
+    color: 'White',
+    serial_number: 'MBL-7711',
+    fuel_card_number: 'FC-7711-K',
+    class: 'LCV',
+    status: 'Available',
+    call_sign: 'PILOT-01',
+    vendor: 'Roadway Partners',
+    driver: 'Suresh Kumar',
+    fleets: ['Mundra Fleet'],
+    trailers: [],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 14200,
+    odometer_unit: 'km',
+    type: 'Light Commercial Vehicle',
+    created_at: '2024-03-01',
+    updated_at: '2024-09-10'
+  },
+  {
+    id: 'veh-006',
+    public_id: 'VH-100296',
+    company: 'Adani Port',
+    registration_number: 'TN09CB8833',
+    name: 'Volvo FM420',
+    internal_id: 'VOL-0081',
+    vin: 'VOLVOFM420993182',
+    make: 'Volvo',
+    model: 'FM420',
+    machine_model: 'Volvo FM420',
+    chassis_number: 'VOLVOFM420993182',
+    registration_date: '2022-07-20',
+    client: 'AMNS',
+    engine_number: 'ENG-VOL-42091',
+    transporter: 'Coastal Transport',
+    year: 2022,
+    machine_owner: 'Coastal Heavy Haulers Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_theft_limit: 15,
+    fuel_refill: 20,
+    fuel_calibration_type: 'Volumetric',
+    fuel_tank_capacity: 450,
+    zone: 'South Zone',
+    location: 'Chennai Terminal',
+    mobile_number: '+91 98205 33445',
+    packager_number: 'PKG-8833',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2023-07-19',
+    insurance_to: '2026-07-18',
+    policy_number: 'POL-ICICI-88330',
+    purchase_date: '2022-06-30',
+    warranty_from: '2022-06-30',
+    warranty_to: '2025-06-29',
+    extended_warranty_from: '2025-06-30',
+    extended_warranty_to: '2027-06-29',
+    aadhar_number: '4410 7729 0012',
+    aadhar_document: { name: 'aadhar_aman.pdf', size: '1.2 MB' },
+    rc_document: { name: 'rc_volvo_tn09.png', size: '2.5 MB' },
+    upload_document: { name: 'hazardous_material_permit.pdf', size: '1.1 MB' },
+    extended_warranty_document: { name: 'volvo_action_service.pdf', size: '1.5 MB' },
+    trim: 'Prime Mover',
+    color: 'Crimson Red',
+    serial_number: 'VFM-8833',
+    fuel_card_number: 'FC-8833-T',
+    class: 'HMV',
+    status: 'Reserved',
+    call_sign: 'PORT-HEAVY-03',
+    vendor: 'Vishal Trucks',
+    driver: 'Aman Jha',
+    fleets: ['Chennai Fleet'],
+    trailers: ['TRL-102'],
+    hub: 'Chennai Terminal',
+    client_location: 'Chennai',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 64900,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2023-07-19',
+    updated_at: '2024-10-05'
+  },
+  {
+    id: 'veh-007',
+    public_id: 'VH-100297',
+    company: 'Adani Port',
+    registration_number: 'MH04XY5566',
+    name: 'Scania R500',
+    internal_id: 'SCN-0010',
+    vin: 'SCANIAR500994102',
+    make: 'Scania',
+    model: 'R500',
+    machine_model: 'Scania R500',
+    chassis_number: 'SCANIAR500994102',
+    registration_date: '2021-05-15',
+    client: 'Adani Logistics',
+    engine_number: 'ENG-SCN-50012',
+    transporter: 'Western Logistics',
+    year: 2021,
+    machine_owner: 'Adani Port Logistics',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_theft_limit: 12,
+    fuel_refill: 20,
+    fuel_calibration_type: 'Linear',
+    fuel_tank_capacity: 500,
+    zone: 'West Zone',
+    location: 'Hazira Plant',
+    mobile_number: '+91 98206 77665',
+    packager_number: 'PKG-5566',
+    insurance_company: 'The New India Assurance',
+    insurance_from: '2023-05-11',
+    insurance_to: '2026-05-10',
+    policy_number: 'POL-NEWIND-0199',
+    purchase_date: '2021-04-20',
+    warranty_from: '2021-04-20',
+    warranty_to: '2024-04-19',
+    extended_warranty_from: '2024-04-20',
+    extended_warranty_to: '2026-04-19',
+    aadhar_number: '3319 8840 5512',
+    aadhar_document: { name: 'aadhar_rohit.pdf', size: '1.2 MB' },
+    rc_document: { name: 'rc_scania_mh04.png', size: '2.3 MB' },
+    upload_document: null,
+    extended_warranty_document: null,
+    trim: 'V8 Highline',
+    color: 'Silver Grey',
+    serial_number: 'SCN-5566',
+    fuel_card_number: 'FC-5566-M',
+    class: 'HMV',
+    status: 'Compliance Hold',
+    call_sign: 'INTERSTATE-07',
+    vendor: 'FleetCare Services',
+    driver: 'Rohit Patil',
+    fleets: ['Western Fleet'],
+    trailers: [],
+    hub: 'Hazira Plant',
+    client_location: 'Hazira',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 145000,
+    odometer_unit: 'km',
+    type: 'Truck',
+    documents: {
+      fitness: { last_record: 'FIT-2021-99', due_date: '2024-08-01', due: 'Expired' },
+      insurance: { last_record: 'POL-NEWIND-01', due_date: '2024-09-15', due: 'Expired' }
+    },
+    created_at: '2023-05-11',
+    updated_at: '2024-09-18'
+  },
+  {
+    id: 'veh-008',
+    public_id: 'VH-100298',
+    company: 'Adani Port',
+    registration_number: 'HR26DK9920',
+    name: 'Tata Signa 2823',
+    internal_id: 'TRK-0099',
+    vin: 'TATASIGNA2823001',
+    make: 'Tata Motors',
+    model: 'Signa 5530',
+    machine_model: 'Tata Signa 5530',
+    chassis_number: 'TATASIGNA2823001',
+    registration_date: '2020-12-05',
+    client: 'Godrej',
+    engine_number: 'ENG-TT-28231',
+    transporter: 'TMS Transporter',
+    year: 2020,
+    machine_owner: 'North India Trans Solutions',
+    active_status: false,
+    overspeed_limit: 60,
+    fuel_theft_limit: 10,
+    fuel_refill: 15,
+    fuel_calibration_type: 'Standard',
+    fuel_tank_capacity: 360,
+    zone: 'North Zone',
+    location: 'Delhi NCR Depot',
+    mobile_number: '+91 98207 22119',
+    packager_number: 'PKG-9920',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2022-12-01',
+    insurance_to: '2025-11-30',
+    policy_number: 'POL-ICICI-9920',
+    purchase_date: '2020-11-15',
+    warranty_from: '2020-11-15',
+    warranty_to: '2023-11-14',
+    extended_warranty_from: null as any,
+    extended_warranty_to: null as any,
+    aadhar_number: '2219 4401 8832',
+    aadhar_document: { name: 'aadhar_card_hr26.pdf', size: '1.0 MB' },
+    rc_document: { name: 'rc_hr26_smart.png', size: '1.9 MB' },
+    upload_document: null,
+    extended_warranty_document: null,
+    trim: 'HD Cabin',
+    color: 'White',
+    serial_number: 'SER-99201',
+    fuel_card_number: 'FC-9920-H',
+    class: 'HMV',
+    status: 'Inactive',
+    call_sign: 'YARD-05',
+    vendor: 'Roadway Partners',
+    driver: '',
+    fleets: ['Mundra Fleet'],
+    trailers: [],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 198000,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2022-12-01',
+    updated_at: '2024-06-30'
+  },
+  {
+    id: 'veh-009',
+    public_id: 'VH-100299',
+    company: 'Adani Port',
+    registration_number: 'WB19EF3344',
+    name: 'Ashok Leyland 3520',
+    internal_id: 'AL-3520-X',
+    vin: 'ASHOKLEY35209931',
+    make: 'Ashok Leyland',
+    model: '2820',
+    machine_model: 'Ashok Leyland 2820',
+    chassis_number: 'ASHOKLEY35209931',
+    registration_date: '2023-10-18',
+    client: 'AMNS',
+    engine_number: 'ENG-AL-35209',
+    transporter: 'Coastal Transport',
+    year: 2023,
+    machine_owner: 'AMNS Eastern Supply Lines',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_theft_limit: 12,
+    fuel_refill: 20,
+    fuel_calibration_type: 'Linear',
+    fuel_tank_capacity: 375,
+    zone: 'East Zone',
+    location: 'Hazira Plant',
+    mobile_number: '+91 98208 44556',
+    packager_number: 'PKG-3344',
+    insurance_company: 'HDFC ERGO General Insurance',
+    insurance_from: '2023-10-14',
+    insurance_to: '2026-10-13',
+    policy_number: 'POL-HDFC-33440',
+    purchase_date: '2023-09-20',
+    warranty_from: '2023-09-20',
+    warranty_to: '2026-09-19',
+    extended_warranty_from: '2026-09-20',
+    extended_warranty_to: '2028-09-19',
+    aadhar_number: '1120 7719 3341',
+    aadhar_document: { name: 'aadhar_wb19.pdf', size: '1.2 MB' },
+    rc_document: { name: 'rc_ashok_wb19.png', size: '2.1 MB' },
+    upload_document: { name: 'damage_assessment_report.pdf', size: '1.6 MB' },
+    extended_warranty_document: { name: 'al_extended_warranty.pdf', size: '1.2 MB' },
+    trim: 'Twin Axle',
+    color: 'Forest Green',
+    serial_number: 'AL-3344',
+    fuel_card_number: 'FC-3344-W',
+    class: 'HMV',
+    status: 'Accident / Damage',
+    call_sign: 'RECOVERY-01',
+    vendor: 'Vishal Trucks',
+    driver: 'Neha Sharma',
+    fleets: ['Western Fleet'],
+    trailers: [],
+    hub: 'Hazira Plant',
+    client_location: 'Hazira',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 52100,
+    odometer_unit: 'km',
+    type: 'Truck',
+    breakdowns: [
+      {
+        id: 'bd-2',
+        breakdown_date_time: '2024-09-29T11:15',
+        breakdown_remarks: 'Collision with stationary gantry at dock B. Front axle alignment damaged.'
+      }
+    ],
+    created_at: '2023-10-14',
+    updated_at: '2024-09-29'
+  },
+  {
+    id: 'veh-010',
+    public_id: 'VH-100300',
+    company: 'Adani Port',
+    registration_number: 'UP32MN1102',
+    name: 'Tata Signa 4825',
+    internal_id: 'TRK-0112',
+    vin: 'TATASIGNA4825110',
+    make: 'Tata Motors',
+    model: 'Signa 5530',
+    machine_model: 'Tata Signa 5530',
+    chassis_number: 'TATASIGNA4825110',
+    registration_date: '2024-04-12',
+    client: 'Adani Logistics',
+    engine_number: 'ENG-TT-48250',
+    transporter: 'Western Logistics',
+    year: 2024,
+    machine_owner: 'Adani Port Transport',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_theft_limit: 15,
+    fuel_refill: 20,
+    fuel_calibration_type: 'Linear',
+    fuel_tank_capacity: 360,
+    zone: 'North Zone',
+    location: 'Mundra Terminal',
+    mobile_number: '+91 98209 88776',
+    packager_number: 'PKG-1102',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2024-04-10',
+    insurance_to: '2027-04-09',
+    policy_number: 'POL-ICICI-11021',
+    purchase_date: '2024-03-25',
+    warranty_from: '2024-03-25',
+    warranty_to: '2027-03-24',
+    extended_warranty_from: '2027-03-25',
+    extended_warranty_to: '2029-03-24',
+    aadhar_number: '9910 2231 7740',
+    aadhar_document: { name: 'aadhar_up32.pdf', size: '1.2 MB' },
+    rc_document: { name: 'rc_tata_up32.png', size: '2.0 MB' },
+    upload_document: { name: 'police_fir_theft.pdf', size: '890 KB' },
+    extended_warranty_document: null,
+    trim: 'Multi Axle',
+    color: 'White',
+    serial_number: 'SER-11020',
+    fuel_card_number: 'FC-1102-U',
+    class: 'Heavy Goods Vehicle',
+    status: 'Stolen',
+    call_sign: 'ALERT-SEC-01',
+    vendor: 'FleetCare Services',
+    driver: '',
+    fleets: ['Mundra Fleet'],
+    trailers: [],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 18200,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-04-10',
+    updated_at: '2024-10-20'
+  },
+  {
+    id: 'veh-mundra-01',
+    public_id: 'VH-200101',
+    company: 'Adani Mundra',
+    registration_number: 'MH26AH1192',
+    name: 'Tata Prima 5530.S · Mundra Prime Mover',
+    internal_id: 'MN-PM-01',
+    vin: 'MAT448120P1K00101',
+    make: 'Tata Motors',
+    model: 'Signa 5530',
+    machine_model: 'Tata Signa 5530',
+    chassis_number: 'MAT448120P1K00101',
+    registration_date: '2024-06-15',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-55301',
+    transporter: 'Western Logistics',
+    year: 2024,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 55,
+    fuel_tank_capacity: 400,
+    zone: 'Port Operational Zone',
+    location: 'Mundra CT2',
+    mobile_number: '+91 98765 43210',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2025-01-01',
+    insurance_to: '2027-01-01',
+    class: 'HMV',
+    status: 'In Use',
+    driver: 'Ramesh Singh',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 28420,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-06-15',
+    updated_at: '2026-11-12'
+  },
+  {
+    id: 'veh-mundra-02',
+    public_id: 'VH-200102',
+    company: 'Adani Mundra',
+    registration_number: 'GJ12AB1234',
+    name: 'BharatBenz 3528C · Fuel Tanker',
+    internal_id: 'MN-TK-02',
+    vin: 'MEC203120P1K00202',
+    make: 'BharatBenz',
+    model: '3528C',
+    machine_model: 'BharatBenz 3528C',
+    chassis_number: 'MEC203120P1K00202',
+    registration_date: '2024-08-10',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-35282',
+    transporter: 'Coastal Transport',
+    year: 2024,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 50,
+    fuel_tank_capacity: 500,
+    zone: 'Port Operational Zone',
+    location: 'Mundra South Basin',
+    insurance_company: 'HDFC ERGO General Insurance',
+    insurance_from: '2025-03-01',
+    insurance_to: '2027-03-01',
+    class: 'HMV',
+    status: 'In Use',
+    driver: 'Sukhwinder Gill',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 19450,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-08-10',
+    updated_at: '2026-11-12'
+  },
+  {
+    id: 'veh-mundra-03',
+    public_id: 'VH-200103',
+    company: 'Adani Mundra',
+    registration_number: 'GJ12CU9456',
+    name: 'Volvo FM420 · Container Tractor',
+    internal_id: 'MN-CT-03',
+    vin: 'YV2RT40A8PB009456',
+    make: 'Volvo',
+    model: 'FM420',
+    machine_model: 'Volvo FM420',
+    chassis_number: 'YV2RT40A8PB009456',
+    registration_date: '2025-01-20',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-42096',
+    transporter: 'Western Logistics',
+    year: 2025,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 55,
+    fuel_tank_capacity: 450,
+    zone: 'Port Operational Zone',
+    location: 'Mundra CT2',
+    insurance_company: 'Tata AIG General Insurance',
+    insurance_from: '2025-01-20',
+    insurance_to: '2027-01-20',
+    class: 'HMV',
+    status: 'Available',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 11200,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2025-01-20',
+    updated_at: '2026-11-13'
+  },
+  {
+    id: 'veh-mundra-04',
+    public_id: 'VH-200104',
+    company: 'Adani Mundra',
+    registration_number: 'MH12AB1234',
+    name: 'Tata Signa 5530 · Mundra Scheduled Unit',
+    internal_id: 'MN-SC-04',
+    vin: 'MA3FJEB1S00659999',
+    make: 'Tata Motors',
+    model: 'Signa 5530',
+    machine_model: 'Tata Signa 5530',
+    chassis_number: 'MA3FJEB1S00659999',
+    registration_date: '2024-09-12',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-55999',
+    transporter: 'Western Logistics',
+    year: 2024,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 360,
+    zone: 'West Zone',
+    location: 'Mundra CT2',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2025-01-01',
+    insurance_to: '2027-01-01',
+    class: 'HMV',
+    status: 'Available',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 16400,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-09-12',
+    updated_at: '2026-11-13'
+  },
+  {
+    id: 'veh-sis-01',
+    public_id: 'VH-300101',
+    company: 'SIS Cash',
+    registration_number: 'DL01VA4410',
+    name: 'Force Traveller 3350 · Armored Cash Van',
+    internal_id: 'SIS-CV-01',
+    vin: 'MC1E4BFA1PP004410',
+    make: 'Force Motors',
+    model: 'Force Traveller 3350',
+    machine_model: 'Force Traveller 3350',
+    chassis_number: 'MC1E4BFA1PP004410',
+    registration_date: '2024-05-10',
+    client: 'SIS Cash',
+    engine_number: 'ENG-SIS-4410',
+    transporter: 'SIS Armored Fleet',
+    year: 2024,
+    machine_owner: 'SIS Cash Services Pvt Ltd',
+    active_status: true,
+    overspeed_limit: 65,
+    fuel_tank_capacity: 90,
+    zone: 'North Zone',
+    location: 'Delhi NCR Depot',
+    insurance_company: 'SBI General Insurance',
+    insurance_from: '2025-05-10',
+    insurance_to: '2027-05-10',
+    class: 'LCV',
+    status: 'In Use',
+    fleets: ['Northern Express'],
+    hub: 'Delhi NCR Depot',
+    client_location: 'Delhi NCR',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 32100,
+    odometer_unit: 'km',
+    type: 'Van',
+    created_at: '2024-05-10',
+    updated_at: '2026-11-11'
+  },
+  {
+    id: 'veh-ak-01',
+    public_id: 'VH-400101',
+    company: 'Akshaykalpa',
+    registration_number: 'KA01AG7782',
+    name: 'Eicher Pro 3015 · Cold Chain Reefer',
+    internal_id: 'AK-RF-01',
+    vin: 'MC2F2ERC0PD007782',
+    make: 'Eicher',
+    model: 'Eicher Pro 3015',
+    machine_model: 'Eicher Pro 3015',
+    chassis_number: 'MC2F2ERC0PD007782',
+    registration_date: '2024-07-01',
+    client: 'Akshaykalpa',
+    engine_number: 'ENG-AK-7782',
+    transporter: 'Dairy Cold Express',
+    year: 2024,
+    machine_owner: 'Akshaykalpa Farms & Foods Pvt Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 220,
+    zone: 'South Zone',
+    location: 'Bengaluru Cold Hub',
+    insurance_company: 'Bajaj Allianz General Insurance',
+    insurance_from: '2025-07-01',
+    insurance_to: '2027-07-01',
+    class: 'MCV',
+    status: 'In Use',
+    fleets: ['South Reefer Fleet'],
+    hub: 'Bengaluru Hub',
+    client_location: 'Bengaluru',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 24500,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-07-01',
+    updated_at: '2026-11-10'
+  },
+  {
+    id: 'veh-akpl-01',
+    public_id: 'VH-500101',
+    company: 'AKPL',
+    registration_number: 'MH04JK8812',
+    name: 'Ashok Leyland 2820 · Bulk Carrier',
+    internal_id: 'AKPL-BC-01',
+    vin: 'MB1AKPL2S0088120',
+    make: 'Ashok Leyland',
+    model: 'Ashok Leyland 2820',
+    machine_model: 'Ashok Leyland 2820',
+    chassis_number: 'MB1AKPL2S0088120',
+    registration_date: '2024-03-14',
+    client: 'AKPL',
+    engine_number: 'ENG-AKPL-8812',
+    transporter: 'AKPL Logistics',
+    year: 2024,
+    machine_owner: 'AKPL Logistics Pvt Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 350,
+    zone: 'West Zone',
+    location: 'Mumbai Yard',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2025-03-14',
+    insurance_to: '2027-03-14',
+    class: 'HMV',
+    status: 'Available',
+    fleets: ['Western Fleet'],
+    hub: 'Mumbai Yard',
+    client_location: 'Mumbai',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 41200,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-03-14',
+    updated_at: '2026-11-09'
+  },
+  {
+    id: 'veh-mundra-05',
+    public_id: 'VH-200105',
+    company: 'Adani Mundra',
+    registration_number: 'GJ12BV4821',
+    name: 'Ashok Leyland 2820 · Container Hauler',
+    internal_id: 'MN-CH-05',
+    vin: 'MB1CT2820P1K00505',
+    make: 'Ashok Leyland',
+    model: '2820',
+    machine_model: 'Ashok Leyland 2820',
+    chassis_number: 'MB1CT2820P1K00505',
+    registration_date: '2024-11-04',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-28205',
+    transporter: 'Western Logistics',
+    year: 2024,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 55,
+    fuel_tank_capacity: 380,
+    zone: 'Port Operational Zone',
+    location: 'Mundra CT3 Berth',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2025-11-04',
+    insurance_to: '2027-11-03',
+    class: 'HMV',
+    status: 'Available',
+    driver: 'Vikram Solanki',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 14820,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-11-04',
+    updated_at: '2026-11-12'
+  },
+  {
+    id: 'veh-mundra-06',
+    public_id: 'VH-200106',
+    company: 'Adani Mundra',
+    registration_number: 'GJ12DZ7104',
+    name: 'Eicher Pro 6048 · Port Yard Tractor',
+    internal_id: 'MN-YT-06',
+    vin: 'MC2E60480P1K00606',
+    make: 'Eicher',
+    model: 'Pro 6048',
+    machine_model: 'Eicher Pro 6048',
+    chassis_number: 'MC2E60480P1K00606',
+    registration_date: '2023-09-18',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-60486',
+    transporter: 'Coastal Transport',
+    year: 2023,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 50,
+    fuel_tank_capacity: 425,
+    zone: 'Port Operational Zone',
+    location: 'Mundra West Gate',
+    insurance_company: 'Tata AIG General Insurance',
+    insurance_from: '2025-09-18',
+    insurance_to: '2027-09-17',
+    class: 'HMV',
+    status: 'Maintenance',
+    driver: 'Mahesh Jadeja',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 54300,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2023-09-18',
+    updated_at: '2026-11-11'
+  },
+  {
+    id: 'veh-mundra-07',
+    public_id: 'VH-200107',
+    company: 'Adani Mundra',
+    registration_number: 'GJ03AZ6390',
+    name: 'Tata Ultra T.16 · Electric Yard Shuttle',
+    internal_id: 'MN-EV-07',
+    vin: 'MAT778120P1E00707',
+    make: 'Tata Motors',
+    model: 'Ultra T.16 EV',
+    machine_model: 'Tata Ultra T.16 EV',
+    chassis_number: 'MAT778120P1E00707',
+    registration_date: '2025-04-22',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-EV707',
+    transporter: 'Western Logistics',
+    year: 2025,
+    machine_owner: 'Adani Mundra Green Fleet',
+    active_status: true,
+    overspeed_limit: 45,
+    fuel_tank_capacity: 0,
+    zone: 'Port Operational Zone',
+    location: 'Mundra CT1 Solar Hub',
+    insurance_company: 'HDFC ERGO General Insurance',
+    insurance_from: '2025-04-22',
+    insurance_to: '2028-04-21',
+    class: 'MCV',
+    status: 'Available',
+    driver: 'Karan Patel',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Electric',
+    odometer: 6850,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2025-04-22',
+    updated_at: '2026-11-13'
+  },
+  {
+    id: 'veh-mundra-08',
+    public_id: 'VH-200108',
+    company: 'Adani Mundra',
+    registration_number: 'GJ12FX3319',
+    name: 'Scania R500 · Heavy Coal Tipper',
+    internal_id: 'MN-TP-08',
+    vin: 'YS2R500A0P1K00808',
+    make: 'Scania',
+    model: 'R500',
+    machine_model: 'Scania R500',
+    chassis_number: 'YS2R500A0P1K00808',
+    registration_date: '2022-12-11',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-50088',
+    transporter: 'Coastal Transport',
+    year: 2022,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 55,
+    fuel_tank_capacity: 500,
+    zone: 'Coal Terminal Zone',
+    location: 'Mundra Coal Berth',
+    insurance_company: 'Bajaj Allianz General Insurance',
+    insurance_from: '2024-12-11',
+    insurance_to: '2026-12-10',
+    class: 'HMV',
+    status: 'In Use',
+    driver: 'Harish Chauhan',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 78120,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2022-12-11',
+    updated_at: '2026-11-13'
+  },
+  {
+    id: 'veh-mundra-09',
+    public_id: 'VH-200109',
+    company: 'Adani Mundra',
+    registration_number: 'GJ12CE1982',
+    name: 'Mahindra Blazo X 49 · Flatbed Carrier',
+    internal_id: 'MN-FB-09',
+    vin: 'MA1BLZ490P1K00909',
+    make: 'Mahindra',
+    model: 'Blazo X 49',
+    machine_model: 'Mahindra Blazo X 49',
+    chassis_number: 'MA1BLZ490P1K00909',
+    registration_date: '2023-05-09',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-49099',
+    transporter: 'TMS Transporter',
+    year: 2023,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 415,
+    zone: 'Port Operational Zone',
+    location: 'Mundra Liquid Terminal',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2025-05-09',
+    insurance_to: '2027-05-08',
+    class: 'HMV',
+    status: 'Out of Service',
+    driver: 'Deepak Verma',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 94200,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2023-05-09',
+    updated_at: '2026-11-10'
+  },
+  {
+    id: 'veh-mundra-10',
+    public_id: 'VH-200110',
+    company: 'Adani Mundra',
+    registration_number: 'GJ12AT8420',
+    name: 'Tata Signa 1923.K · CNG Utility Truck',
+    internal_id: 'MN-UT-10',
+    vin: 'MAT1923K0P1C01010',
+    make: 'Tata Motors',
+    model: 'Signa 1923.K CNG',
+    machine_model: 'Tata Signa 1923.K CNG',
+    chassis_number: 'MAT1923K0P1C01010',
+    registration_date: '2024-02-28',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-19230',
+    transporter: 'Western Logistics',
+    year: 2024,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 240,
+    zone: 'West Zone',
+    location: 'Mundra SEZ Gate 4',
+    insurance_company: 'The New India Assurance',
+    insurance_from: '2025-02-28',
+    insurance_to: '2027-02-27',
+    class: 'MCV',
+    status: 'Available',
+    driver: 'Sanjay Parmar',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'CNG',
+    odometer: 21600,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-02-28',
+    updated_at: '2026-11-12'
+  },
+  {
+    id: 'veh-mundra-11',
+    public_id: 'VH-200111',
+    company: 'Adani Mundra',
+    registration_number: 'GJ01KL5044',
+    name: 'Force Traveller 3350 · Port Crew Van',
+    internal_id: 'MN-CV-11',
+    vin: 'MC1E4BFA1PP005044',
+    make: 'Force Motors',
+    model: 'Traveller 3350',
+    machine_model: 'Force Traveller 3350',
+    chassis_number: 'MC1E4BFA1PP005044',
+    registration_date: '2021-11-15',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-5044',
+    transporter: 'Western Logistics',
+    year: 2021,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: false,
+    overspeed_limit: 65,
+    fuel_tank_capacity: 90,
+    zone: 'Port Operational Zone',
+    location: 'Mundra Admin Block',
+    insurance_company: 'SBI General Insurance',
+    insurance_from: '2024-11-15',
+    insurance_to: '2026-11-14',
+    class: 'LCV',
+    status: 'Inactive',
+    fleets: ['Mundra Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: false,
+    fuel_type: 'Diesel',
+    odometer: 118400,
+    odometer_unit: 'km',
+    type: 'Van',
+    created_at: '2021-11-15',
+    updated_at: '2026-10-30'
+  },
+  {
+    id: 'veh-mundra-12',
+    public_id: 'VH-200112',
+    company: 'Adani Mundra',
+    registration_number: 'MH46BM7729',
+    name: 'BharatBenz 5228TT · Long Haul Tractor',
+    internal_id: 'MN-LH-12',
+    vin: 'MEC5228TTP1K01212',
+    make: 'BharatBenz',
+    model: '5228TT',
+    machine_model: 'BharatBenz 5228TT',
+    chassis_number: 'MEC5228TTP1K01212',
+    registration_date: '2025-02-14',
+    client: 'Adani Mundra',
+    engine_number: 'ENG-MN-52281',
+    transporter: 'Coastal Transport',
+    year: 2025,
+    machine_owner: 'Adani Mundra Port & SEZ Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 460,
+    zone: 'West Zone',
+    location: 'Mundra–Ahmedabad Corridor',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2025-02-14',
+    insurance_to: '2028-02-13',
+    class: 'HMV',
+    status: 'In Use',
+    driver: 'Prakash Yadav',
+    fleets: ['Mundra Fleet', 'Western Fleet'],
+    hub: 'Mundra Yard',
+    client_location: 'Mundra',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 15900,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2025-02-14',
+    updated_at: '2026-11-14'
+  },
+  {
+    id: 'veh-011',
+    public_id: 'VH-100301',
+    company: 'Adani Port',
+    registration_number: 'GJ05BX4412',
+    name: 'Tata Ultra T.12 EV · Hazira Shuttle',
+    internal_id: 'TRK-0115',
+    vin: 'TATULT12EV004412',
+    make: 'Tata Motors',
+    model: 'Ultra T.12 EV',
+    machine_model: 'Tata Ultra T.12 EV',
+    chassis_number: 'TATULT12EV004412',
+    registration_date: '2025-03-01',
+    client: 'Adani Logistics',
+    engine_number: 'ENG-EV-44120',
+    transporter: 'Western Logistics',
+    year: 2025,
+    machine_owner: 'Adani Green Logistics',
+    active_status: true,
+    overspeed_limit: 55,
+    fuel_tank_capacity: 0,
+    zone: 'West Zone',
+    location: 'Hazira Plant',
+    insurance_company: 'Tata AIG General Insurance',
+    insurance_from: '2025-03-01',
+    insurance_to: '2028-02-28',
+    class: 'MCV',
+    status: 'Available',
+    driver: 'Ramesh Singh',
+    fleets: ['Western Fleet'],
+    hub: 'Hazira Plant',
+    client_location: 'Hazira',
+    online: true,
+    fuel_type: 'Electric',
+    odometer: 9420,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2025-03-01',
+    updated_at: '2026-11-10'
+  },
+  {
+    id: 'veh-012',
+    public_id: 'VH-100302',
+    company: 'Adani Port',
+    registration_number: 'MH43AT9081',
+    name: 'Mahindra Blazo X 46 · Port Tractor',
+    internal_id: 'TRK-0118',
+    vin: 'MAHBLZ46X009081',
+    make: 'Mahindra',
+    model: 'Blazo X 46',
+    machine_model: 'Mahindra Blazo X 46',
+    chassis_number: 'MAHBLZ46X009081',
+    registration_date: '2024-07-19',
+    client: 'Godrej',
+    engine_number: 'ENG-MH-90811',
+    transporter: 'TMS Transporter',
+    year: 2024,
+    machine_owner: 'Godrej Heavy Transport',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 415,
+    zone: 'West Zone',
+    location: 'Nhava Sheva Terminal',
+    insurance_company: 'HDFC ERGO General Insurance',
+    insurance_from: '2024-07-19',
+    insurance_to: '2027-07-18',
+    class: 'HMV',
+    status: 'In Use',
+    driver: 'Suresh Kumar',
+    fleets: ['Western Fleet'],
+    hub: 'Hazira Plant',
+    client_location: 'Hazira',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 36780,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-07-19',
+    updated_at: '2026-11-11'
+  },
+  {
+    id: 'veh-sis-02',
+    public_id: 'VH-300102',
+    company: 'SIS Cash',
+    registration_number: 'MH02EP9102',
+    name: 'Tata Winger Cargo · Express Vault Van',
+    internal_id: 'SIS-CV-02',
+    vin: 'MATWNG9102P100202',
+    make: 'Tata Motors',
+    model: 'Winger Cargo',
+    machine_model: 'Tata Winger Cargo',
+    chassis_number: 'MATWNG9102P100202',
+    registration_date: '2024-09-21',
+    client: 'SIS Cash',
+    engine_number: 'ENG-SIS-9102',
+    transporter: 'SIS Armored Fleet',
+    year: 2024,
+    machine_owner: 'SIS Cash Services Pvt Ltd',
+    active_status: true,
+    overspeed_limit: 65,
+    fuel_tank_capacity: 60,
+    zone: 'West Zone',
+    location: 'Mumbai Andheri Vault',
+    insurance_company: 'SBI General Insurance',
+    insurance_from: '2025-09-21',
+    insurance_to: '2027-09-20',
+    class: 'LCV',
+    status: 'Available',
+    fleets: ['Western Express'],
+    hub: 'Mumbai Hub',
+    client_location: 'Mumbai',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 18400,
+    odometer_unit: 'km',
+    type: 'Van',
+    created_at: '2024-09-21',
+    updated_at: '2026-11-12'
+  },
+  {
+    id: 'veh-ak-02',
+    public_id: 'VH-400102',
+    company: 'Akshaykalpa',
+    registration_number: 'KA53MJ4029',
+    name: 'BharatBenz 1617R · Milk Chiller Van',
+    internal_id: 'AK-RF-02',
+    vin: 'MEC1617R0P1004029',
+    make: 'BharatBenz',
+    model: '1617R Reefer',
+    machine_model: 'BharatBenz 1617R Reefer',
+    chassis_number: 'MEC1617R0P1004029',
+    registration_date: '2024-10-12',
+    client: 'Akshaykalpa',
+    engine_number: 'ENG-AK-4029',
+    transporter: 'Dairy Cold Express',
+    year: 2024,
+    machine_owner: 'Akshaykalpa Farms & Foods Pvt Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 215,
+    zone: 'South Zone',
+    location: 'Tiptur Dairy Plant',
+    insurance_company: 'Bajaj Allianz General Insurance',
+    insurance_from: '2025-10-12',
+    insurance_to: '2027-10-11',
+    class: 'MCV',
+    status: 'Available',
+    fleets: ['South Reefer Fleet'],
+    hub: 'Bengaluru Hub',
+    client_location: 'Bengaluru',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 14900,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2024-10-12',
+    updated_at: '2026-11-12'
+  },
+  {
+    id: 'veh-akpl-02',
+    public_id: 'VH-500102',
+    company: 'AKPL',
+    registration_number: 'MH46AR3210',
+    name: 'Tata Signa 4225.T · Industrial Hauler',
+    internal_id: 'AKPL-IH-02',
+    vin: 'MAT4225T0P1K03210',
+    make: 'Tata Motors',
+    model: 'Signa 4225.T',
+    machine_model: 'Tata Signa 4225.T',
+    chassis_number: 'MAT4225T0P1K03210',
+    registration_date: '2025-01-08',
+    client: 'AKPL',
+    engine_number: 'ENG-AKPL-3210',
+    transporter: 'AKPL Logistics',
+    year: 2025,
+    machine_owner: 'AKPL Logistics Pvt Ltd',
+    active_status: true,
+    overspeed_limit: 60,
+    fuel_tank_capacity: 365,
+    zone: 'West Zone',
+    location: 'Panvel Yard',
+    insurance_company: 'ICICI Lombard',
+    insurance_from: '2025-01-08',
+    insurance_to: '2027-01-07',
+    class: 'HMV',
+    status: 'In Use',
+    fleets: ['Western Fleet'],
+    hub: 'Mumbai Yard',
+    client_location: 'Mumbai',
+    online: true,
+    fuel_type: 'Diesel',
+    odometer: 22800,
+    odometer_unit: 'km',
+    type: 'Truck',
+    created_at: '2025-01-08',
+    updated_at: '2026-11-13'
+  }
+];
+
+export const VEHICLE_MASTER_STORAGE_KEY = 'fleetrobo_vehicle_master_v3';
+
+export function loadVehicleMasterStore(): Vehicle[] {
+  try {
+    const raw = localStorage.getItem(VEHICLE_MASTER_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Ensure Adani Mundra & other client seed vehicles exist if user had older seed cache
+        const existingIds = new Set(parsed.map((v: Vehicle) => v.id));
+        const missingSeeds = INITIAL_VEHICLES.filter((v) => !existingIds.has(v.id));
+        if (missingSeeds.length > 0) {
+          const merged = [...parsed, ...missingSeeds];
+          localStorage.setItem(VEHICLE_MASTER_STORAGE_KEY, JSON.stringify(merged));
+          return merged;
+        }
+        return parsed;
+      }
+    }
+  } catch {
+    // fallback
+  }
+  return INITIAL_VEHICLES;
+}
+
+export function saveVehicleMasterStore(vehicles: Vehicle[]) {
+  try {
+    localStorage.setItem(VEHICLE_MASTER_STORAGE_KEY, JSON.stringify(vehicles));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('fleetrobo:resources-updated'));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+export const DEMO_LOOKUPS = {
+  companies: ['Adani Port', 'Adani Mundra', 'SIS Cash', 'Akshaykalpa', 'AKPL', 'Binary Semantics Ltd', 'FleetRobo Demo Company'],
+  transporters: ['Western Logistics', 'TMS Transporter', 'Coastal Transport', 'Interstate Logistics', 'SpeedHaul Carriers'],
+  vendors: ['FleetCare Services', 'Roadway Partners', 'Vishal Trucks', 'Reliable AutoCorp'],
+  drivers: ['Aman Jha', 'Rohit Patil', 'Arjun Mehta', 'Neha Sharma', 'Suresh Kumar'],
+  fleets: ['Mundra Fleet', 'Chennai Fleet', 'Western Fleet', 'Northern Express'],
+  trailers: ['TRL-102', 'TRL-205', 'TRL-408'],
+  hubs: ['Mundra Yard', 'Hazira Plant', 'Chennai Terminal', 'Ahmedabad Hub'],
+  clients: ['Adani Port', 'Adani Mundra', 'Adani Logistics', 'Godrej', 'AMNS', 'Akshaykalpa', 'SIS Cash', 'AKPL Logistics'],
+  clientLocations: ['Mundra', 'Hazira', 'Chennai', 'Ahmedabad', 'Mumbai', 'Delhi NCR'],
+  routes: ['Mundra–Hazira', 'Mundra–Ahmedabad', 'Chennai–Bengaluru', 'Delhi–Jaipur', 'Mumbai–Pune'],
+  routeTypes: ['Inbound', 'Outbound', 'Return', 'Regular'],
+  fuelTypes: ['Diesel', 'Petrol', 'CNG', 'Electric', 'Hybrid', 'LPG'],
+  fuelCalibrationTypes: ['Standard', 'Linear', 'Multipoint', 'Volumetric', 'Tank Sensor Dip'],
+  machineModels: [
+    'Tata Signa 5530',
+    'Ashok Leyland 2820',
+    'BharatBenz 3528C',
+    'Eicher Pro 3015',
+    'Mahindra Bolero Pickup',
+    'Volvo FM420',
+    'Scania R500',
+    'Force Traveller 3350',
+    'Tata Ace Gold',
+    'SML Isuzu Sartaj 5252'
+  ],
+  insuranceCompanies: [
+    'ICICI Lombard',
+    'HDFC ERGO General Insurance',
+    'The New India Assurance',
+    'Tata AIG General Insurance',
+    'Bajaj Allianz General Insurance',
+    'SBI General Insurance'
+  ],
+  zones: ['West Zone', 'North Zone', 'East Zone', 'South Zone', 'Central Zone', 'Port Operational Zone'],
+  locations: ['Mundra Terminal', 'Hazira Plant', 'Ahmedabad Hub', 'Chennai Terminal', 'Mumbai Yard', 'Delhi NCR Depot'],
+  categories: ['Heavy Goods', 'Light Vehicle', 'Passenger', 'Special Purpose'],
+  vehicleTypes: ['Truck', 'Light Commercial Vehicle', 'Bus', 'Car', 'Trailer', 'Van', 'Locomotive'],
+  vehicleClasses: ['LMV', 'HMV', 'MCV', 'LCV', 'Heavy Goods Vehicle', 'Passenger Vehicle'],
+  makes: ['Tata Motors', 'Ashok Leyland', 'Mahindra', 'BharatBenz', 'Eicher', 'Volvo', 'Scania', 'Force Motors'],
+  models: [
+    'Tata Signa 5530',
+    'Ashok Leyland 2820',
+    'BharatBenz 3528C',
+    'Eicher Pro 3015',
+    'Mahindra Bolero Pickup',
+    'Volvo FM420',
+    'Scania R500',
+    'Force Traveller 3350',
+    'Tata Ace Gold',
+    'SML Isuzu Sartaj 5252'
+  ],
+  measurementSystems: ['metric', 'imperial'],
+  odometerUnits: ['km', 'mile'],
+  alertTypes: ['Overspeed', 'Harsh Braking', 'Driver Fatigue', 'Route Deviation', 'Breakdown'],
+  operationalStatuses: [
+    'Available',
+    'In Use',
+    'Maintenance',
+    'Out of Service',
+    'Reserved',
+    'Inactive',
+    'Accident / Damage',
+    'Compliance Hold',
+    'Stolen'
+  ] as const,
+  vehicleSkills: [
+    'Reefer',
+    'Cold Chain',
+    'Heavy Duty',
+    'Hazmat / Dangerous Goods',
+    'Container Haulage',
+    'Tanker / Liquid Bulk',
+    'Flatbed / ODC',
+    'Tipper / Mining',
+    'Temperature Controlled',
+    'Long Haul / Intercity',
+    'Last Mile Delivery',
+    'Port / Terminal Authorized',
+    'GPS & E-Lock Enabled',
+    'ADAS / DMS Equipped'
+  ]
+};
+
+const CUSTOM_VEHICLE_SKILLS_KEY = 'fleetrobo_custom_vehicle_skills_v1';
+
+export function loadCustomVehicleSkills(): string[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_VEHICLE_SKILLS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((s): s is string => typeof s === 'string' && s.trim().length > 0);
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+export function saveCustomVehicleSkill(skill: string): string[] {
+  const trimmed = skill.trim();
+  const existing = loadCustomVehicleSkills();
+  if (!trimmed) return existing;
+  if (existing.some((s) => s.toLowerCase() === trimmed.toLowerCase())) {
+    return existing;
+  }
+  const next = [...existing, trimmed];
+  try {
+    localStorage.setItem(CUSTOM_VEHICLE_SKILLS_KEY, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
+  return next;
+}
