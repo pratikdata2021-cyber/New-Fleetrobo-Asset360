@@ -66,6 +66,8 @@ import { DeleteConfirmationModal } from './common/DeleteConfirmationModal';
 
 interface VehiclesPageContentProps {
   companyContext?: string;
+  readOnly?: boolean;
+  showOrganisationColumn?: boolean;
 }
 
 const SAVED_VIEWS_STORAGE_KEY = 'fleetrobo_vehicle_saved_views_v1';
@@ -133,7 +135,11 @@ const normalizeVehicle = (v: any): Vehicle => {
   };
 };
 
-export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ companyContext }) => {
+export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({
+  companyContext,
+  readOnly = false,
+  showOrganisationColumn = false,
+}) => {
   // Master Vehicles State
   const [vehicles, setVehicles] = useState<Vehicle[]>(() =>
     loadVehicleMasterStore().map((item) => normalizeVehicle(item))
@@ -221,6 +227,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
   const [isFilterOpen, setIsFilterOpen] = useState<boolean>(false);
   const [appliedFilters, setAppliedFilters] = useState<Record<string, any>>({});
   const [filterMode, setFilterMode] = useState<'basic' | 'advanced'>('basic');
+  const [organisationFilter, setOrganisationFilter] = useState<string>('');
 
   // Saved Views State
   const [showSavedViewsPopover, setShowSavedViewsPopover] = useState<boolean>(false);
@@ -318,13 +325,22 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
     return counts;
   }, [scopedVehicles]);
 
+  const organisationOptions = useMemo(() => {
+    const set = new Set<string>();
+    scopedVehicles.forEach((v) => {
+      const org = (v.company || v.client || '').trim();
+      if (org) set.add(org);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [scopedVehicles]);
+
   const sanitizedAppliedFilters = useMemo(
     () => sanitizeVehicleFilters(appliedFilters),
     [appliedFilters]
   );
   const activeFilterCount = useMemo(
-    () => countActiveVehicleFilters(sanitizedAppliedFilters),
-    [sanitizedAppliedFilters]
+    () => countActiveVehicleFilters(sanitizedAppliedFilters) + (organisationFilter ? 1 : 0),
+    [sanitizedAppliedFilters, organisationFilter]
   );
 
   // Outer-constrained vehicles (Tenant scope + Quick status tab + Global search)
@@ -375,11 +391,18 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
 
   // Filtering Logic (Basic AND / Advanced OR intersected with baseMatchedVehicles)
   const filteredVehicles = useMemo(() => {
-    if (activeFilterCount === 0) return baseMatchedVehicles;
-    return baseMatchedVehicles.filter((veh) =>
+    const orgMatched = organisationFilter
+      ? baseMatchedVehicles.filter(
+          (veh) =>
+            (veh.company || veh.client || '').trim().toLowerCase() ===
+            organisationFilter.trim().toLowerCase()
+        )
+      : baseMatchedVehicles;
+    if (countActiveVehicleFilters(sanitizedAppliedFilters) === 0) return orgMatched;
+    return orgMatched.filter((veh) =>
       evaluateVehicleFilters(veh, sanitizedAppliedFilters, filterMode)
     );
-  }, [baseMatchedVehicles, activeFilterCount, sanitizedAppliedFilters, filterMode]);
+  }, [baseMatchedVehicles, organisationFilter, sanitizedAppliedFilters, filterMode]);
 
   // Sorting Logic
   const sortedVehicles = useMemo(() => {
@@ -706,25 +729,29 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
 
           {/* Quick Header CTA Actions */}
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleResetDemo}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
-              title="Restore sample vehicles"
-            >
-              <RefreshCw size={13} className="text-slate-500" />
-              <span>Sample vehicles</span>
-            </button>
+            {!readOnly && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleResetDemo}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
+                  title="Restore sample vehicles"
+                >
+                  <RefreshCw size={13} className="text-slate-500" />
+                  <span>Sample vehicles</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={() => setIsImportOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
-              title="Import Vehicles from CSV"
-            >
-              <Upload size={14} className="text-slate-500" />
-              <span>Import</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => setIsImportOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
+                  title="Import Vehicles from CSV"
+                >
+                  <Upload size={14} className="text-slate-500" />
+                  <span>Import</span>
+                </button>
+              </>
+            )}
 
             <button
               type="button"
@@ -736,14 +763,16 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
               <span>Export</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setVehicleDrawerState({ isOpen: true, mode: 'create', vehicle: null })}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
-            >
-              <Plus size={14} strokeWidth={2.5} />
-              <span>Create vehicle</span>
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setVehicleDrawerState({ isOpen: true, mode: 'create', vehicle: null })}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+              >
+                <Plus size={14} strokeWidth={2.5} />
+                <span>Create vehicle</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -838,6 +867,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
               type="button"
               onClick={() => {
                 setAppliedFilters({});
+                setOrganisationFilter('');
                 setCurrentPage(1);
               }}
               className="text-[11px] text-slate-500 hover:text-red-600 font-semibold underline cursor-pointer"
@@ -916,29 +946,31 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         {/* Right Toolbar Group: Bulk Actions, Customize Columns, View Switcher, Refresh */}
         <div className="flex items-center gap-2">
           {/* Bulk Operations CTA */}
-          <button
-            type="button"
-            disabled={selectedIds.size === 0}
-            onClick={() => setIsBulkOpen(true)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
-              selectedIds.size > 0
-                ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs cursor-pointer'
-                : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
-            }`}
-            title={
-              selectedIds.size === 0
-                ? 'Select one or more vehicles to perform bulk actions'
-                : `Apply bulk operations to ${selectedIds.size} vehicles`
-            }
-          >
-            <SlidersHorizontal size={13} />
-            <span>Bulk actions</span>
-            {selectedIds.size > 0 && (
-              <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
-                {selectedIds.size}
-              </span>
-            )}
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              disabled={selectedIds.size === 0}
+              onClick={() => setIsBulkOpen(true)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                selectedIds.size > 0
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs cursor-pointer'
+                  : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+              }`}
+              title={
+                selectedIds.size === 0
+                  ? 'Select one or more vehicles to perform bulk actions'
+                  : `Apply bulk operations to ${selectedIds.size} vehicles`
+              }
+            >
+              <SlidersHorizontal size={13} />
+              <span>Bulk actions</span>
+              {selectedIds.size > 0 && (
+                <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
+                  {selectedIds.size}
+                </span>
+              )}
+            </button>
+          )}
 
           {/* Column Catalogue Popover */}
           <ColumnCataloguePopover
@@ -998,6 +1030,21 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
             <span className="font-bold text-slate-600 uppercase text-[10px] tracking-wider">
               Applied Filters ({filterMode === 'basic' ? 'AND' : 'OR'}):
             </span>
+            {organisationFilter && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-orange-200 text-[#FA8A63] font-semibold text-[11px] shadow-2xs">
+                <span>Organisation Name: {organisationFilter}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOrganisationFilter('');
+                    setCurrentPage(1);
+                  }}
+                  className="hover:text-red-600 cursor-pointer"
+                >
+                  <X size={11} />
+                </button>
+              </span>
+            )}
             {Object.entries(sanitizedAppliedFilters).map(([k, val]) => (
               <span
                 key={k}
@@ -1026,6 +1073,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
             type="button"
             onClick={() => {
               setAppliedFilters({});
+              setOrganisationFilter('');
               setCurrentPage(1);
             }}
             className="text-[11px] font-semibold text-[#FA8A63] hover:underline shrink-0 cursor-pointer"
@@ -1097,31 +1145,37 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
               <Truck size={30} />
             </div>
             <div className="max-w-md">
-              <h3 className="text-base font-bold text-slate-900">Add your first vehicle</h3>
+              <h3 className="text-base font-bold text-slate-900">
+                {readOnly ? 'No vehicles in this organisation' : 'Add your first vehicle'}
+              </h3>
               <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                Your vehicle directory is currently empty. Create a canonical record, import your fleet CSV, or restore sample demo vehicles.
+                {readOnly
+                  ? 'There are currently no vehicles registered under the selected organisation.'
+                  : 'Your vehicle directory is currently empty. Create a canonical record, import your fleet CSV, or restore sample demo vehicles.'}
               </p>
             </div>
-            <div className="flex items-center gap-3 pt-2">
-              <button
-                onClick={() => setVehicleDrawerState({ isOpen: true, mode: 'create', vehicle: null })}
-                className="px-4 py-2 bg-[#FA8A63] hover:bg-[#e77a54] text-white text-xs font-bold rounded-lg shadow-sm"
-              >
-                + New vehicle
-              </button>
-              <button
-                onClick={() => setIsImportOpen(true)}
-                className="px-4 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg"
-              >
-                Import CSV
-              </button>
-              <button
-                onClick={handleResetDemo}
-                className="px-4 py-2 text-[#FA8A63] hover:underline text-xs font-semibold"
-              >
-                Use sample vehicles
-              </button>
-            </div>
+            {!readOnly && (
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  onClick={() => setVehicleDrawerState({ isOpen: true, mode: 'create', vehicle: null })}
+                  className="px-4 py-2 bg-[#FA8A63] hover:bg-[#e77a54] text-white text-xs font-bold rounded-lg shadow-sm"
+                >
+                  + New vehicle
+                </button>
+                <button
+                  onClick={() => setIsImportOpen(true)}
+                  className="px-4 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg"
+                >
+                  Import CSV
+                </button>
+                <button
+                  onClick={handleResetDemo}
+                  className="px-4 py-2 text-[#FA8A63] hover:underline text-xs font-semibold"
+                >
+                  Use sample vehicles
+                </button>
+              </div>
+            )}
           </div>
         ) : filteredVehicles.length === 0 ? (
           /* State: No Search / Filter Matches */
@@ -1139,6 +1193,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
               onClick={() => {
                 setSearchQuery('');
                 setAppliedFilters({});
+                setOrganisationFilter('');
                 setActiveStatusTab('All vehicles');
                 setCurrentPage(1);
               }}
@@ -1154,19 +1209,21 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
               <thead className="bg-[#F8FAFC] sticky top-0 z-10 border-b border-slate-200 text-slate-700 text-[11px] font-bold">
                 <tr>
                   {/* Fixed Selection Column */}
-                  <th className="sticky left-0 z-20 bg-[#F8FAFC] px-3 py-3 border-r border-slate-100 w-10 text-center">
-                    <button
-                      type="button"
-                      onClick={toggleSelectAllCurrentPage}
-                      className="text-slate-500 hover:text-slate-900 cursor-pointer"
-                    >
-                      {isAllCurrentPageSelected ? (
-                        <CheckSquare size={15} className="text-[#FA8A63]" />
-                      ) : (
-                        <Square size={15} />
-                      )}
-                    </button>
-                  </th>
+                  {!readOnly && (
+                    <th className="sticky left-0 z-20 bg-[#F8FAFC] px-3 py-3 border-r border-slate-100 w-10 text-center">
+                      <button
+                        type="button"
+                        onClick={toggleSelectAllCurrentPage}
+                        className="text-slate-500 hover:text-slate-900 cursor-pointer"
+                      >
+                        {isAllCurrentPageSelected ? (
+                          <CheckSquare size={15} className="text-[#FA8A63]" />
+                        ) : (
+                          <Square size={15} />
+                        )}
+                      </button>
+                    </th>
+                  )}
 
                   {/* Render visible columns in strict primary order (1-9) then optional */}
                   {visibleColumns.includes('registration_number') && (
@@ -1178,6 +1235,12 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                         <span>Registration No.</span>
                         {sortKey === 'registration_number' && (sortDirection === 'asc' ? <ChevronUp size={12} className="text-[#FA8A63]" /> : <ChevronDown size={12} className="text-[#FA8A63]" />)}
                       </div>
+                    </th>
+                  )}
+
+                  {showOrganisationColumn && (
+                    <th className="px-4 py-3 font-bold text-slate-700 border-r border-slate-100 whitespace-nowrap">
+                      Organisation Name
                     </th>
                   )}
 
@@ -1465,19 +1528,21 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                       }`}
                     >
                       {/* Fixed Selection Cell */}
-                      <td className="sticky left-0 z-10 bg-inherit px-3 py-3 border-r border-slate-100 text-center">
-                        <button
-                          type="button"
-                          onClick={() => toggleSelectRow(vehicle.id)}
-                          className="text-slate-400 hover:text-slate-700 cursor-pointer"
-                        >
-                          {isSelected ? (
-                            <CheckSquare size={15} className="text-[#FA8A63]" />
-                          ) : (
-                            <Square size={15} />
-                          )}
-                        </button>
-                      </td>
+                      {!readOnly && (
+                        <td className="sticky left-0 z-10 bg-inherit px-3 py-3 border-r border-slate-100 text-center">
+                          <button
+                            type="button"
+                            onClick={() => toggleSelectRow(vehicle.id)}
+                            className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                          >
+                            {isSelected ? (
+                              <CheckSquare size={15} className="text-[#FA8A63]" />
+                            ) : (
+                              <Square size={15} />
+                            )}
+                          </button>
+                        </td>
+                      )}
 
                       {/* 1. Registration No. Cell (Click opens View) */}
                       {visibleColumns.includes('registration_number') && (
@@ -1495,6 +1560,12 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                               {vehicle.class}
                             </div>
                           )}
+                        </td>
+                      )}
+
+                      {showOrganisationColumn && (
+                        <td className="px-4 py-3 text-slate-700 font-medium whitespace-nowrap">
+                          {vehicle.company || vehicle.client || '—'}
                         </td>
                       )}
 
@@ -1765,55 +1836,81 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                         <div className="inline-flex items-center justify-end">
                           <RowActionMenu
                             ariaLabel={`Actions for ${vehicle.registration_number}`}
-                            items={[
-                              {
-                                id: 'view',
-                                label: 'View details',
-                                icon: <Eye size={13} className="text-slate-400" />,
-                                onClick: () => setVehicleDrawerState({ isOpen: true, mode: 'view', vehicle }),
-                              },
-                              {
-                                id: 'edit',
-                                label: 'Edit vehicle',
-                                icon: <Edit2 size={13} className="text-slate-400" />,
-                                onClick: () => setVehicleDrawerState({ isOpen: true, mode: 'edit', vehicle }),
-                              },
-                              {
-                                id: 'relationships',
-                                label: 'Relationships',
-                                icon: <Truck size={13} className="text-slate-400" />,
-                                onClick: () =>
-                                  setContextualModalState({
-                                    isOpen: true,
-                                    vehicle,
-                                    targetView: 'relationships',
-                                  }),
-                              },
-                              {
-                                id: 'routes',
-                                label: 'Routes & Allocations',
-                                icon: <Radio size={13} className="text-slate-400" />,
-                                onClick: () => setVehicleDrawerState({ isOpen: true, mode: 'edit', vehicle }),
-                              },
-                              {
-                                id: 'status',
-                                label: 'Change status',
-                                icon: <Tag size={13} className="text-[#FA8A63]" />,
-                                tone: 'accent',
-                                onClick: () => {
-                                  setSelectedIds(new Set([vehicle.id]));
-                                  setIsBulkOpen(true);
-                                },
-                              },
-                              {
-                                id: 'delete',
-                                label: 'Delete vehicle',
-                                icon: <Trash2 size={13} />,
-                                tone: 'danger',
-                                dividerBefore: true,
-                                onClick: () => setVehicleToDelete(vehicle),
-                              },
-                            ]}
+                            items={
+                              readOnly
+                                ? [
+                                    {
+                                      id: 'view',
+                                      label: 'View details',
+                                      icon: <Eye size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setVehicleDrawerState({ isOpen: true, mode: 'view', vehicle }),
+                                    },
+                                    {
+                                      id: 'relationships',
+                                      label: 'Relationships',
+                                      icon: <Truck size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setContextualModalState({
+                                          isOpen: true,
+                                          vehicle,
+                                          targetView: 'relationships',
+                                        }),
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      id: 'view',
+                                      label: 'View details',
+                                      icon: <Eye size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setVehicleDrawerState({ isOpen: true, mode: 'view', vehicle }),
+                                    },
+                                    {
+                                      id: 'edit',
+                                      label: 'Edit vehicle',
+                                      icon: <Edit2 size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setVehicleDrawerState({ isOpen: true, mode: 'edit', vehicle }),
+                                    },
+                                    {
+                                      id: 'relationships',
+                                      label: 'Relationships',
+                                      icon: <Truck size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setContextualModalState({
+                                          isOpen: true,
+                                          vehicle,
+                                          targetView: 'relationships',
+                                        }),
+                                    },
+                                    {
+                                      id: 'routes',
+                                      label: 'Routes & Allocations',
+                                      icon: <Radio size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setVehicleDrawerState({ isOpen: true, mode: 'edit', vehicle }),
+                                    },
+                                    {
+                                      id: 'status',
+                                      label: 'Change status',
+                                      icon: <Tag size={13} className="text-[#FA8A63]" />,
+                                      tone: 'accent',
+                                      onClick: () => {
+                                        setSelectedIds(new Set([vehicle.id]));
+                                        setIsBulkOpen(true);
+                                      },
+                                    },
+                                    {
+                                      id: 'delete',
+                                      label: 'Delete vehicle',
+                                      icon: <Trash2 size={13} />,
+                                      tone: 'danger',
+                                      dividerBefore: true,
+                                      onClick: () => setVehicleToDelete(vehicle),
+                                    },
+                                  ]
+                            }
                           />
                         </div>
                       </td>
@@ -1837,13 +1934,15 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                 >
                   <div className="flex items-start justify-between">
                     <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => toggleSelectRow(vehicle.id)}
-                        className="text-slate-400 hover:text-slate-700"
-                      >
-                        {isSelected ? <CheckSquare size={15} className="text-[#FA8A63]" /> : <Square size={15} />}
-                      </button>
+                      {!readOnly && (
+                        <button
+                          type="button"
+                          onClick={() => toggleSelectRow(vehicle.id)}
+                          className="text-slate-400 hover:text-slate-700"
+                        >
+                          {isSelected ? <CheckSquare size={15} className="text-[#FA8A63]" /> : <Square size={15} />}
+                        </button>
+                      )}
                       <div>
                         <div className="font-bold text-slate-900 text-sm">{vehicle.registration_number}</div>
                         <div className="text-[11px] text-slate-500">{vehicle.machine_model || vehicle.model || vehicle.name}</div>
@@ -1853,6 +1952,9 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                   </div>
 
                   <div className="text-xs space-y-1 text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                    {showOrganisationColumn && (
+                      <div>Organisation Name: <span className="text-slate-800 font-medium">{vehicle.company || vehicle.client || '—'}</span></div>
+                    )}
                     <div>Chassis No.: <span className="text-slate-800 font-mono text-[11px]">{vehicle.chassis_number || vehicle.vin || '—'}</span></div>
                     <div>Fuel Type: <span className="text-slate-800">{vehicle.fuel_type || '—'}</span></div>
                   </div>
@@ -1979,6 +2081,13 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         scopedVehicles={scopedVehicles}
         baseMatchedVehicles={baseMatchedVehicles}
         companyContext={companyContext}
+        showOrganisationFilter={showOrganisationColumn}
+        organisationFilter={organisationFilter}
+        organisationOptions={organisationOptions}
+        onOrganisationFilterChange={(org) => {
+          setOrganisationFilter(org);
+          setCurrentPage(1);
+        }}
       />
 
       {/* 675px Bulk Operations Drawer */}
@@ -2021,7 +2130,11 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         mode={vehicleDrawerState.mode}
         initialVehicle={vehicleDrawerState.vehicle}
         onSaveVehicle={handleSaveVehicle}
-        onSwitchToEdit={() => setVehicleDrawerState((prev) => ({ ...prev, mode: 'edit' }))}
+        onSwitchToEdit={
+          readOnly
+            ? undefined
+            : () => setVehicleDrawerState((prev) => ({ ...prev, mode: 'edit' }))
+        }
         existingVehicles={vehicles}
         companyContext={companyContext}
       />

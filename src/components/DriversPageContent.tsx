@@ -144,12 +144,19 @@ function loadInitialSavedViews(): SavedView[] {
 
 interface DriversPageContentProps {
   companyContext?: string;
+  readOnly?: boolean;
+  showOrganisationColumn?: boolean;
 }
 
-export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyContext }) => {
+export const DriversPageContent: React.FC<DriversPageContentProps> = ({
+  companyContext,
+  readOnly = false,
+  showOrganisationColumn = false,
+}) => {
   // Master driver data & live Asset Mapping store
   const [drivers, setDriversState] = useState<Driver[]>(() => loadDriverMasterStore());
   const [modalStore, setModalStore] = useState<ModalMasterStore>(() => loadModalMasterStore());
+  const [organisationFilter, setOrganisationFilter] = useState<string>('');
 
   useEffect(() => {
     const syncDrivers = () => setDriversState(loadDriverMasterStore());
@@ -330,8 +337,20 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
     return counts;
   }, [scopedDrivers]);
 
+  // Unique organisation options for Platform Admin filter
+  const organisationOptions = useMemo(() => {
+    const set = new Set<string>();
+    scopedDrivers.forEach((d) => {
+      if (d.company && d.company.trim()) set.add(d.company.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [scopedDrivers]);
+
   // Applied filter count calculation
-  const appliedFilterCount = useMemo(() => countActiveDriverFilters(activeFilters), [activeFilters]);
+  const appliedFilterCount = useMemo(
+    () => countActiveDriverFilters(activeFilters) + (organisationFilter ? 1 : 0),
+    [activeFilters, organisationFilter]
+  );
 
   // Pre-filter drivers matching outer tenant, status tab & search (used by FilterDrawer live preview & filteredDrivers)
   const baseMatchedDrivers = useMemo(() => {
@@ -366,12 +385,18 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
   // Filtered & Sorted Drivers List
   const filteredDrivers = useMemo(() => {
     const mode = filterLogic === 'OR' ? 'advanced' : 'basic';
-    let list = baseMatchedDrivers.filter((driver) =>
-      evaluateDriverFilters(driver, activeFilters, mode, {
+    let list = baseMatchedDrivers.filter((driver) => {
+      if (
+        organisationFilter &&
+        (driver.company || '').trim().toLowerCase() !== organisationFilter.trim().toLowerCase()
+      ) {
+        return false;
+      }
+      return evaluateDriverFilters(driver, activeFilters, mode, {
         modalStore,
         allDriverIds
-      })
-    );
+      });
+    });
 
     // Sorting
     if (sortField) {
@@ -410,6 +435,7 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
   }, [
     baseMatchedDrivers,
     activeFilters,
+    organisationFilter,
     filterLogic,
     sortField,
     sortDirection,
@@ -624,16 +650,18 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
               )}
             </button>
 
-            <button
-              type="button"
-              onClick={() => setIsImportDrawerOpen(true)}
-              disabled={qaScreenState === 'restricted'}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
-              title="Import Drivers from CSV"
-            >
-              <Upload size={14} className="text-slate-500" />
-              <span>Import</span>
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setIsImportDrawerOpen(true)}
+                disabled={qaScreenState === 'restricted'}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+                title="Import Drivers from CSV"
+              >
+                <Upload size={14} className="text-slate-500" />
+                <span>Import</span>
+              </button>
+            )}
 
             <button
               type="button"
@@ -645,15 +673,17 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
               <span>Export</span>
             </button>
 
-            <button
-              type="button"
-              disabled={qaScreenState === 'restricted'}
-              onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white font-semibold rounded-lg shadow-xs transition-colors disabled:opacity-50 cursor-pointer"
-            >
-              <Plus size={14} strokeWidth={2.5} />
-              <span>Create driver</span>
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                disabled={qaScreenState === 'restricted'}
+                onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white font-semibold rounded-lg shadow-xs transition-colors disabled:opacity-50 cursor-pointer"
+              >
+                <Plus size={14} strokeWidth={2.5} />
+                <span>Create driver</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -765,6 +795,7 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
               type="button"
               onClick={() => {
                 setActiveFilters({});
+                setOrganisationFilter('');
                 setCurrentPage(1);
               }}
               className="text-[11px] text-slate-500 hover:text-red-600 font-semibold underline cursor-pointer"
@@ -866,29 +897,31 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         {/* Right: Column Catalogue, View Switcher, Bulk trigger, Refresh */}
         <div className="flex items-center gap-2">
           {/* Bulk Operations CTA (enabled when >= 1 selected) */}
-          <button
-            type="button"
-            disabled={selectedDriverIds.size === 0 || qaScreenState === 'restricted'}
-            onClick={() => setIsBulkDrawerOpen(true)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-              selectedDriverIds.size > 0
-                ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs'
-                : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
-            }`}
-            title={
-              selectedDriverIds.size === 0
-                ? 'Select one or more drivers to perform bulk actions'
-                : `Apply bulk operations to ${selectedDriverIds.size} drivers`
-            }
-          >
-            <SlidersHorizontal size={13} />
-            <span>Bulk actions</span>
-            {selectedDriverIds.size > 0 && (
-              <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
-                {selectedDriverIds.size}
-              </span>
-            )}
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              disabled={selectedDriverIds.size === 0 || qaScreenState === 'restricted'}
+              onClick={() => setIsBulkDrawerOpen(true)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                selectedDriverIds.size > 0
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs'
+                  : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+              }`}
+              title={
+                selectedDriverIds.size === 0
+                  ? 'Select one or more drivers to perform bulk actions'
+                  : `Apply bulk operations to ${selectedDriverIds.size} drivers`
+              }
+            >
+              <SlidersHorizontal size={13} />
+              <span>Bulk actions</span>
+              {selectedDriverIds.size > 0 && (
+                <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
+                  {selectedDriverIds.size}
+                </span>
+              )}
+            </button>
+          )}
 
           {/* Column Catalogue Popover */}
           <ColumnCataloguePopover
@@ -1039,6 +1072,7 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
                 onClick={() => {
                   setSearchQuery('');
                   setActiveFilters({});
+                  setOrganisationFilter('');
                   setActiveStatusTab('all');
                   setQaScreenState('normal');
                 }}
@@ -1046,13 +1080,15 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
               >
                 Clear all filters
               </button>
-              <button
-                type="button"
-                onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
-                className="px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white rounded-lg font-semibold text-xs"
-              >
-                Create new driver
-              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
+                  className="px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white rounded-lg font-semibold text-xs"
+                >
+                  Create new driver
+                </button>
+              )}
             </div>
           </div>
         ) : viewMode === 'grid' ? (
@@ -1181,14 +1217,16 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
                       >
                         <Eye size={14} />
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setDrawerState({ isOpen: true, mode: 'edit', driver })}
-                        className="p-1 text-slate-500 hover:text-[#FA8A63] rounded hover:bg-slate-100"
-                        title="Edit"
-                      >
-                        <Edit2 size={14} />
-                      </button>
+                      {!readOnly && (
+                        <button
+                          type="button"
+                          onClick={() => setDrawerState({ isOpen: true, mode: 'edit', driver })}
+                          className="p-1 text-slate-500 hover:text-[#FA8A63] rounded hover:bg-slate-100"
+                          title="Edit"
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1202,17 +1240,25 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
               <thead className="bg-[#F8FAFC] sticky top-0 z-10 border-b border-slate-200 text-slate-700 text-[11px] font-bold">
                 <tr>
                   {/* Master Checkbox Column */}
-                  <th className="w-10 px-3.5 py-3 text-center border-r border-slate-100 bg-[#F8FAFC]">
-                    <input
-                      type="checkbox"
-                      checked={isAllPageSelected}
-                      ref={(el) => {
-                        if (el) el.indeterminate = isSomePageSelected;
-                      }}
-                      onChange={toggleSelectPage}
-                      className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
-                    />
-                  </th>
+                  {!readOnly && (
+                    <th className="w-10 px-3.5 py-3 text-center border-r border-slate-100 bg-[#F8FAFC]">
+                      <input
+                        type="checkbox"
+                        checked={isAllPageSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = isSomePageSelected;
+                        }}
+                        onChange={toggleSelectPage}
+                        className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
+                      />
+                    </th>
+                  )}
+
+                  {showOrganisationColumn && (
+                    <th className="px-3 py-3 border-r border-slate-100 whitespace-nowrap min-w-[160px]">
+                      Organisation Name
+                    </th>
+                  )}
 
                   {/* Rendered Columns */}
                   {orderedVisibleColumns.map((col) => {
@@ -1270,14 +1316,22 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
                       }`}
                     >
                       {/* Checkbox */}
-                      <td className="w-10 px-3.5 py-2.5 text-center border-r border-slate-100">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSelectDriver(driver.id)}
-                          className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
-                        />
-                      </td>
+                      {!readOnly && (
+                        <td className="w-10 px-3.5 py-2.5 text-center border-r border-slate-100">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelectDriver(driver.id)}
+                            className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
+                          />
+                        </td>
+                      )}
+
+                      {showOrganisationColumn && (
+                        <td className="px-3 py-2.5 border-r border-slate-100 whitespace-nowrap text-slate-700 font-medium">
+                          {driver.company || '—'}
+                        </td>
+                      )}
 
                       {/* Render Cell according to orderedVisibleColumns */}
                       {orderedVisibleColumns.map((col) => {
@@ -1503,54 +1557,81 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
                         <div className="inline-flex items-center justify-end">
                           <RowActionMenu
                             ariaLabel={`Actions for ${driver.name}`}
-                            items={[
-                              {
-                                id: 'view',
-                                label: 'View driver details',
-                                icon: <Eye size={13} className="text-slate-400" />,
-                                onClick: () => setDrawerState({ isOpen: true, mode: 'view', driver }),
-                              },
-                              {
-                                id: 'edit',
-                                label: 'Edit driver profile',
-                                icon: <Edit2 size={13} className="text-slate-400" />,
-                                onClick: () => setDrawerState({ isOpen: true, mode: 'edit', driver }),
-                              },
-                              {
-                                id: 'account',
-                                label: 'Manage user account',
-                                icon: <UserCheck size={13} className="text-blue-500" />,
-                                onClick: () =>
-                                  setDrawerState({ isOpen: true, mode: 'edit', driver, initialTab: 0 }),
-                              },
-                              {
-                                id: 'docs',
-                                label: 'Upload compliance docs',
-                                icon: <FileText size={13} className="text-emerald-500" />,
-                                onClick: () =>
-                                  setDrawerState({ isOpen: true, mode: 'edit', driver, initialTab: 6 }),
-                              },
-                              {
-                                id: 'toggle-status',
-                                label: driver.status === 'Active' ? 'Deactivate driver' : 'Activate driver',
-                                icon:
-                                  driver.status === 'Active' ? (
-                                    <AlertCircle size={13} className="text-amber-500" />
-                                  ) : (
-                                    <CheckCircle2 size={13} className="text-emerald-500" />
-                                  ),
-                                dividerBefore: true,
-                                onClick: () => handleToggleDriverStatus(driver),
-                              },
-                              {
-                                id: 'delete',
-                                label: 'Delete driver',
-                                icon: <Trash2 size={13} />,
-                                tone: 'danger',
-                                dividerBefore: true,
-                                onClick: () => setDriverToDelete(driver),
-                              },
-                            ]}
+                            items={
+                              readOnly
+                                ? [
+                                    {
+                                      id: 'view',
+                                      label: 'View driver details',
+                                      icon: <Eye size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setDrawerState({ isOpen: true, mode: 'view', driver }),
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      id: 'view',
+                                      label: 'View driver details',
+                                      icon: <Eye size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setDrawerState({ isOpen: true, mode: 'view', driver }),
+                                    },
+                                    {
+                                      id: 'edit',
+                                      label: 'Edit driver profile',
+                                      icon: <Edit2 size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setDrawerState({ isOpen: true, mode: 'edit', driver }),
+                                    },
+                                    {
+                                      id: 'account',
+                                      label: 'Manage user account',
+                                      icon: <UserCheck size={13} className="text-blue-500" />,
+                                      onClick: () =>
+                                        setDrawerState({
+                                          isOpen: true,
+                                          mode: 'edit',
+                                          driver,
+                                          initialTab: 0,
+                                        }),
+                                    },
+                                    {
+                                      id: 'docs',
+                                      label: 'Upload compliance docs',
+                                      icon: <FileText size={13} className="text-emerald-500" />,
+                                      onClick: () =>
+                                        setDrawerState({
+                                          isOpen: true,
+                                          mode: 'edit',
+                                          driver,
+                                          initialTab: 6,
+                                        }),
+                                    },
+                                    {
+                                      id: 'toggle-status',
+                                      label:
+                                        driver.status === 'Active'
+                                          ? 'Deactivate driver'
+                                          : 'Activate driver',
+                                      icon:
+                                        driver.status === 'Active' ? (
+                                          <AlertCircle size={13} className="text-amber-500" />
+                                        ) : (
+                                          <CheckCircle2 size={13} className="text-emerald-500" />
+                                        ),
+                                      dividerBefore: true,
+                                      onClick: () => handleToggleDriverStatus(driver),
+                                    },
+                                    {
+                                      id: 'delete',
+                                      label: 'Delete driver',
+                                      icon: <Trash2 size={13} />,
+                                      tone: 'danger',
+                                      dividerBefore: true,
+                                      onClick: () => setDriverToDelete(driver),
+                                    },
+                                  ]
+                            }
                           />
                         </div>
                       </td>
@@ -1674,6 +1755,13 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         baseMatchedDrivers={baseMatchedDrivers}
         companyContext={companyContext}
         modalStore={modalStore}
+        showOrganisationFilter={showOrganisationColumn}
+        organisationFilter={organisationFilter}
+        organisationOptions={organisationOptions}
+        onOrganisationFilterChange={(org) => {
+          setOrganisationFilter(org);
+          setCurrentPage(1);
+        }}
         onApplyFilters={(filters: Record<string, any>, mode: 'basic' | 'advanced') => {
           setActiveFilters(sanitizeDriverFilters(filters));
           setFilterLogic(mode === 'advanced' ? 'OR' : 'AND');

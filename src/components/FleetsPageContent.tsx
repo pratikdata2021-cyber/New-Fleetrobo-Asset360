@@ -91,7 +91,17 @@ const DEFAULT_SAVED_FLEET_VIEWS: SavedFleetView[] = [
   }
 ];
 
-export const FleetsPageContent: React.FC = () => {
+interface FleetsPageContentProps {
+  companyContext?: string;
+  readOnly?: boolean;
+  showOrganisationColumn?: boolean;
+}
+
+export const FleetsPageContent: React.FC<FleetsPageContentProps> = ({
+  companyContext,
+  readOnly = false,
+  showOrganisationColumn = false,
+}) => {
   // Master Fleet state initialized with the 16 demo fleets
   const [fleets, setFleets] = useState<Fleet[]>(INITIAL_DEMO_FLEETS);
 
@@ -106,6 +116,7 @@ export const FleetsPageContent: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [appliedFilters, setAppliedFilters] = useState<Record<string, any>>({});
   const [filterMode, setFilterMode] = useState<'basic' | 'advanced'>('basic');
+  const [organisationFilter, setOrganisationFilter] = useState<string>('');
 
   // Column visibility & Pinning state
   const [visibleColumnKeys, setVisibleColumnKeys] = useState<string[]>(DEFAULT_FLEET_VISIBLE_COLUMNS);
@@ -161,10 +172,23 @@ export const FleetsPageContent: React.FC = () => {
     return map;
   }, [fleets]);
 
+  const scopedFleets = useMemo(() => {
+    if (
+      !companyContext ||
+      companyContext === 'Platform Admin' ||
+      companyContext === 'Binary' ||
+      companyContext === 'All Organisations'
+    ) {
+      return fleets;
+    }
+    const target = companyContext.trim().toLowerCase();
+    return fleets.filter((f) => (f.company || '').trim().toLowerCase() === target);
+  }, [fleets, companyContext]);
+
   // Status Tab Counts
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = {
-      all: fleets.length,
+      all: scopedFleets.length,
       active: 0,
       inactive: 0,
       on_hold: 0,
@@ -174,17 +198,25 @@ export const FleetsPageContent: React.FC = () => {
       pilot: 0,
       decommissioning: 0
     };
-    fleets.forEach((f) => {
+    scopedFleets.forEach((f) => {
       if (counts[f.status] !== undefined) {
         counts[f.status]++;
       }
     });
     return counts;
-  }, [fleets]);
+  }, [scopedFleets]);
+
+  const organisationOptions = useMemo(() => {
+    const set = new Set<string>();
+    scopedFleets.forEach((f) => {
+      if (f.company && f.company.trim()) set.add(f.company.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [scopedFleets]);
 
   // Applied filter count
   const appliedFilterCount = useMemo(() => {
-    return Object.keys(appliedFilters).filter((k) => {
+    const count = Object.keys(appliedFilters).filter((k) => {
       const val = appliedFilters[k];
       if (Array.isArray(val)) return val.length > 0;
       if (typeof val === 'string') return val.trim().length > 0;
@@ -193,11 +225,17 @@ export const FleetsPageContent: React.FC = () => {
       }
       return Boolean(val);
     }).length;
-  }, [appliedFilters]);
+    return count + (organisationFilter ? 1 : 0);
+  }, [appliedFilters, organisationFilter]);
 
   // Filtered and Sorted Fleets List
   const filteredFleets = useMemo(() => {
-    let list = [...fleets];
+    let list = [...scopedFleets];
+
+    if (organisationFilter) {
+      const targetOrg = organisationFilter.trim().toLowerCase();
+      list = list.filter((f) => (f.company || '').trim().toLowerCase() === targetOrg);
+    }
 
     // Status Tab filter
     if (activeStatusTab !== 'all') {
@@ -316,7 +354,7 @@ export const FleetsPageContent: React.FC = () => {
     }
 
     return list;
-  }, [fleets, activeStatusTab, searchQuery, appliedFilters, filterMode, sortField, sortDirection, fleetMap]);
+  }, [scopedFleets, organisationFilter, activeStatusTab, searchQuery, appliedFilters, filterMode, sortField, sortDirection, fleetMap]);
 
   // Paginated Fleets
   const paginatedFleets = useMemo(() => {
@@ -500,25 +538,29 @@ export const FleetsPageContent: React.FC = () => {
 
           {/* Quick Header CTA Actions */}
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleResetSampleFleets}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
-              title="Reset to 16 canonical sample fleets"
-            >
-              <RefreshCw size={13} className="text-slate-500" />
-              <span>Sample fleets</span>
-            </button>
+            {!readOnly && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleResetSampleFleets}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
+                  title="Reset to 16 canonical sample fleets"
+                >
+                  <RefreshCw size={13} className="text-slate-500" />
+                  <span>Sample fleets</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={() => setIsImportModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
-              title="Import Fleets from CSV (Fleet Name-only contract)"
-            >
-              <Upload size={14} className="text-slate-500" />
-              <span>Import</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => setIsImportModalOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
+                  title="Import Fleets from CSV (Fleet Name-only contract)"
+                >
+                  <Upload size={14} className="text-slate-500" />
+                  <span>Import</span>
+                </button>
+              </>
+            )}
 
             <button
               type="button"
@@ -530,14 +572,16 @@ export const FleetsPageContent: React.FC = () => {
               <span>Export</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
-            >
-              <Plus size={14} strokeWidth={2.5} />
-              <span>Create fleet</span>
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white font-semibold rounded-lg shadow-xs transition-colors cursor-pointer"
+              >
+                <Plus size={14} strokeWidth={2.5} />
+                <span>Create fleet</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -635,7 +679,10 @@ export const FleetsPageContent: React.FC = () => {
           {appliedFilterCount > 0 && (
             <button
               type="button"
-              onClick={() => setAppliedFilters({})}
+              onClick={() => {
+                setAppliedFilters({});
+                setOrganisationFilter('');
+              }}
               className="text-[11px] text-slate-500 hover:text-red-600 font-semibold underline cursor-pointer"
             >
               Reset
@@ -723,28 +770,30 @@ export const FleetsPageContent: React.FC = () => {
         {/* Right: Columns Catalogue, Directory/Hierarchy Switcher, Bulk Trigger, Refresh */}
         <div className="flex items-center gap-2">
           {/* Bulk Operations Trigger */}
-          <button
-            type="button"
-            disabled={selectedFleetIds.size === 0}
-            onClick={() => setIsBulkDrawerOpen(true)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-              selectedFleetIds.size > 0
-                ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs'
-                : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
-            }`}
-            title={
-              selectedFleetIds.size === 0
-                ? 'Select one or more fleets to perform bulk operations'
-                : `Apply bulk operations to ${selectedFleetIds.size} fleets`
-            }
-          >
-            <span>Bulk actions</span>
-            {selectedFleetIds.size > 0 && (
-              <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
-                {selectedFleetIds.size}
-              </span>
-            )}
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              disabled={selectedFleetIds.size === 0}
+              onClick={() => setIsBulkDrawerOpen(true)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                selectedFleetIds.size > 0
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs'
+                  : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+              }`}
+              title={
+                selectedFleetIds.size === 0
+                  ? 'Select one or more fleets to perform bulk operations'
+                  : `Apply bulk operations to ${selectedFleetIds.size} fleets`
+              }
+            >
+              <span>Bulk actions</span>
+              {selectedFleetIds.size > 0 && (
+                <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
+                  {selectedFleetIds.size}
+                </span>
+              )}
+            </button>
+          )}
 
           {/* Column Catalogue Popover */}
           <ColumnCataloguePopover
@@ -808,6 +857,19 @@ export const FleetsPageContent: React.FC = () => {
       {appliedFilterCount > 0 && (
         <div className="px-6 py-2 bg-slate-50/80 border-b border-slate-200 flex items-center gap-2 flex-wrap text-[11px]">
           <span className="font-bold text-slate-500">Active filters:</span>
+          {organisationFilter && (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white border border-slate-200 text-slate-700 shadow-2xs">
+              <span className="font-semibold">Organisation Name:</span>
+              <span className="text-slate-900 max-w-[150px] truncate">{organisationFilter}</span>
+              <button
+                type="button"
+                onClick={() => setOrganisationFilter('')}
+                className="p-0.5 hover:text-red-600 cursor-pointer"
+              >
+                <X size={11} />
+              </button>
+            </span>
+          )}
           {Object.entries(appliedFilters).map(([k, val]) => {
             if (!val || (Array.isArray(val) && val.length === 0)) return null;
             const labelStr = Array.isArray(val)
@@ -839,7 +901,10 @@ export const FleetsPageContent: React.FC = () => {
           })}
           <button
             type="button"
-            onClick={() => setAppliedFilters({})}
+            onClick={() => {
+              setAppliedFilters({});
+              setOrganisationFilter('');
+            }}
             className="text-[11px] text-red-600 hover:underline font-semibold ml-1 cursor-pointer"
           >
             Clear all
@@ -902,7 +967,7 @@ export const FleetsPageContent: React.FC = () => {
         {viewMode === 'hierarchy' ? (
           /* Hierarchy Tree View */
           <FleetHierarchyView
-            fleets={fleets}
+            fleets={scopedFleets}
             expandedFleetId={highlightedHierarchyFleetId}
             onViewFleet={(fleet) => setDrawerState({ isOpen: true, mode: 'view', fleet })}
           />
@@ -913,37 +978,46 @@ export const FleetsPageContent: React.FC = () => {
               <Layers size={28} />
             </div>
             <h3 className="text-sm font-bold text-slate-800">
-              {fleets.length === 0 ? 'Add your first fleet' : 'No matching fleets'}
+              {scopedFleets.length === 0
+                ? readOnly
+                  ? 'No fleets in this organisation'
+                  : 'Add your first fleet'
+                : 'No matching fleets'}
             </h3>
             <p className="text-xs text-slate-500 max-w-xs mx-auto">
-              {fleets.length === 0
-                ? 'Create a fleet grouping or restore sample data to organize drivers and vehicles.'
+              {scopedFleets.length === 0
+                ? readOnly
+                  ? 'No fleet records exist under the selected organisation.'
+                  : 'Create a fleet grouping or restore sample data to organize drivers and vehicles.'
                 : 'No fleets match your current search terms, status tabs, or applied filters.'}
             </p>
             <div className="flex items-center justify-center gap-2">
-              {fleets.length === 0 ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
-                    className="px-4 py-1.5 bg-[#FA8A63] text-white rounded-lg font-semibold text-xs shadow-xs"
-                  >
-                    Create fleet
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleResetSampleFleets}
-                    className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-semibold text-xs"
-                  >
-                    Use sample fleets
-                  </button>
-                </>
+              {scopedFleets.length === 0 ? (
+                !readOnly && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setDrawerState({ isOpen: true, mode: 'create' })}
+                      className="px-4 py-1.5 bg-[#FA8A63] text-white rounded-lg font-semibold text-xs shadow-xs"
+                    >
+                      Create fleet
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetSampleFleets}
+                      className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-semibold text-xs"
+                    >
+                      Use sample fleets
+                    </button>
+                  </>
+                )
               ) : (
                 <button
                   type="button"
                   onClick={() => {
                     setSearchQuery('');
                     setAppliedFilters({});
+                    setOrganisationFilter('');
                     setActiveStatusTab('all');
                   }}
                   className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-semibold text-xs"
@@ -960,17 +1034,25 @@ export const FleetsPageContent: React.FC = () => {
               <thead className="bg-[#F8FAFC] sticky top-0 z-10 border-b border-slate-200 text-slate-700 text-[11px] font-bold">
                 <tr>
                   {/* Master Checkbox */}
-                  <th className="w-10 px-3.5 py-3 text-center border-r border-slate-100 bg-[#F8FAFC]">
-                    <input
-                      type="checkbox"
-                      checked={isAllPageSelected}
-                      ref={(el) => {
-                        if (el) el.indeterminate = isSomePageSelected;
-                      }}
-                      onChange={toggleSelectPage}
-                      className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
-                    />
-                  </th>
+                  {!readOnly && (
+                    <th className="w-10 px-3.5 py-3 text-center border-r border-slate-100 bg-[#F8FAFC]">
+                      <input
+                        type="checkbox"
+                        checked={isAllPageSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = isSomePageSelected;
+                        }}
+                        onChange={toggleSelectPage}
+                        className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
+                      />
+                    </th>
+                  )}
+
+                  {showOrganisationColumn && (
+                    <th className="px-3 py-3 border-r border-slate-100 whitespace-nowrap min-w-[160px]">
+                      Organisation Name
+                    </th>
+                  )}
 
                   {/* Rendered Columns */}
                   {orderedVisibleColumns.map((col) => {
@@ -1031,14 +1113,22 @@ export const FleetsPageContent: React.FC = () => {
                       }`}
                     >
                       {/* Checkbox */}
-                      <td className="w-10 px-3.5 py-2.5 text-center border-r border-slate-100">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSelectFleet(fleet.id)}
-                          className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
-                        />
-                      </td>
+                      {!readOnly && (
+                        <td className="w-10 px-3.5 py-2.5 text-center border-r border-slate-100">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelectFleet(fleet.id)}
+                            className="w-3.5 h-3.5 text-[#FA8A63] rounded border-slate-300 focus:ring-0 cursor-pointer"
+                          />
+                        </td>
+                      )}
+
+                      {showOrganisationColumn && (
+                        <td className="px-3 py-2.5 border-r border-slate-100 whitespace-nowrap text-slate-700 font-medium">
+                          {fleet.company || '—'}
+                        </td>
+                      )}
 
                       {/* Render Visible Columns */}
                       {orderedVisibleColumns.map((col) => {
@@ -1150,61 +1240,84 @@ export const FleetsPageContent: React.FC = () => {
                         <div className="inline-flex items-center justify-end">
                           <RowActionMenu
                             ariaLabel={`Actions for ${fleet.name}`}
-                            items={[
-                              {
-                                id: 'view',
-                                label: 'View fleet',
-                                icon: <Eye size={13} className="text-slate-400" />,
-                                onClick: () => setDrawerState({ isOpen: true, mode: 'view', fleet }),
-                              },
-                              {
-                                id: 'edit',
-                                label: 'Edit fleet',
-                                icon: <Edit2 size={13} className="text-slate-400" />,
-                                onClick: () => setDrawerState({ isOpen: true, mode: 'edit', fleet }),
-                              },
-                              {
-                                id: 'drivers',
-                                label: 'Assign / remove drivers',
-                                icon: <Users size={13} className="text-blue-500" />,
-                                onClick: () =>
-                                  setDrawerState({
-                                    isOpen: true,
-                                    mode: 'edit',
-                                    fleet,
-                                    initialTab: 'drivers',
-                                  }),
-                              },
-                              {
-                                id: 'vehicles',
-                                label: 'Assign / remove vehicles',
-                                icon: <Truck size={13} className="text-orange-500" />,
-                                onClick: () =>
-                                  setDrawerState({
-                                    isOpen: true,
-                                    mode: 'edit',
-                                    fleet,
-                                    initialTab: 'vehicles',
-                                  }),
-                              },
-                              {
-                                id: 'hierarchy',
-                                label: 'View hierarchy',
-                                icon: <GitFork size={13} className="text-purple-500" />,
-                                onClick: () => {
-                                  setHighlightedHierarchyFleetId(fleet.id);
-                                  setViewMode('hierarchy');
-                                },
-                              },
-                              {
-                                id: 'delete',
-                                label: 'Delete fleet',
-                                icon: <Trash2 size={13} />,
-                                tone: 'danger',
-                                dividerBefore: true,
-                                onClick: () => handleInitiateSingleDelete(fleet),
-                              },
-                            ]}
+                            items={
+                              readOnly
+                                ? [
+                                    {
+                                      id: 'view',
+                                      label: 'View fleet',
+                                      icon: <Eye size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setDrawerState({ isOpen: true, mode: 'view', fleet }),
+                                    },
+                                    {
+                                      id: 'hierarchy',
+                                      label: 'View hierarchy',
+                                      icon: <GitFork size={13} className="text-purple-500" />,
+                                      onClick: () => {
+                                        setHighlightedHierarchyFleetId(fleet.id);
+                                        setViewMode('hierarchy');
+                                      },
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      id: 'view',
+                                      label: 'View fleet',
+                                      icon: <Eye size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setDrawerState({ isOpen: true, mode: 'view', fleet }),
+                                    },
+                                    {
+                                      id: 'edit',
+                                      label: 'Edit fleet',
+                                      icon: <Edit2 size={13} className="text-slate-400" />,
+                                      onClick: () =>
+                                        setDrawerState({ isOpen: true, mode: 'edit', fleet }),
+                                    },
+                                    {
+                                      id: 'drivers',
+                                      label: 'Assign / remove drivers',
+                                      icon: <Users size={13} className="text-blue-500" />,
+                                      onClick: () =>
+                                        setDrawerState({
+                                          isOpen: true,
+                                          mode: 'edit',
+                                          fleet,
+                                          initialTab: 'drivers',
+                                        }),
+                                    },
+                                    {
+                                      id: 'vehicles',
+                                      label: 'Assign / remove vehicles',
+                                      icon: <Truck size={13} className="text-orange-500" />,
+                                      onClick: () =>
+                                        setDrawerState({
+                                          isOpen: true,
+                                          mode: 'edit',
+                                          fleet,
+                                          initialTab: 'vehicles',
+                                        }),
+                                    },
+                                    {
+                                      id: 'hierarchy',
+                                      label: 'View hierarchy',
+                                      icon: <GitFork size={13} className="text-purple-500" />,
+                                      onClick: () => {
+                                        setHighlightedHierarchyFleetId(fleet.id);
+                                        setViewMode('hierarchy');
+                                      },
+                                    },
+                                    {
+                                      id: 'delete',
+                                      label: 'Delete fleet',
+                                      icon: <Trash2 size={13} />,
+                                      tone: 'danger',
+                                      dividerBefore: true,
+                                      onClick: () => handleInitiateSingleDelete(fleet),
+                                    },
+                                  ]
+                            }
                           />
                         </div>
                       </td>
@@ -1408,8 +1521,10 @@ export const FleetsPageContent: React.FC = () => {
             showToast(`Fleet "${savedFleet.name}" updated successfully`);
           }
         }}
-        onSwitchToEdit={() =>
-          setDrawerState((prev) => ({ ...prev, mode: 'edit' }))
+        onSwitchToEdit={
+          readOnly
+            ? undefined
+            : () => setDrawerState((prev) => ({ ...prev, mode: 'edit' }))
         }
       />
 
@@ -1421,6 +1536,13 @@ export const FleetsPageContent: React.FC = () => {
         filterMode={filterMode}
         allFleets={fleets}
         totalMatchedCount={filteredFleets.length}
+        showOrganisationFilter={showOrganisationColumn}
+        organisationFilter={organisationFilter}
+        organisationOptions={organisationOptions}
+        onOrganisationFilterChange={(org) => {
+          setOrganisationFilter(org);
+          setCurrentPage(1);
+        }}
         onApplyFilters={(filters, mode) => {
           setAppliedFilters(filters);
           setFilterMode(mode);

@@ -33,6 +33,10 @@ interface FilterDrawerProps {
   scopedVehicles?: Vehicle[];
   baseMatchedVehicles?: Vehicle[];
   companyContext?: string;
+  showOrganisationFilter?: boolean;
+  organisationFilter?: string;
+  organisationOptions?: string[];
+  onOrganisationFilterChange?: (org: string) => void;
 }
 
 export const FilterDrawer: React.FC<FilterDrawerProps> = ({
@@ -44,12 +48,17 @@ export const FilterDrawer: React.FC<FilterDrawerProps> = ({
   totalMatchedCount,
   scopedVehicles = [],
   baseMatchedVehicles,
-  companyContext
+  companyContext,
+  showOrganisationFilter = false,
+  organisationFilter = '',
+  organisationOptions = [],
+  onOrganisationFilterChange
 }) => {
   const [mode, setMode] = useState<'basic' | 'advanced'>(initialMode);
   const [draftFilters, setDraftFilters] = useState<Record<string, any>>(() =>
     sanitizeVehicleFilters(appliedFilters)
   );
+  const [draftOrg, setDraftOrg] = useState<string>(organisationFilter);
   const [searchFilterQuery, setSearchFilterQuery] = useState('');
   const [showAllAdvanced, setShowAllAdvanced] = useState(false);
   const [rangeErrors, setRangeErrors] = useState<Record<string, string>>({});
@@ -69,34 +78,38 @@ export const FilterDrawer: React.FC<FilterDrawerProps> = ({
     if (isOpen) {
       setMode(initialMode);
       setDraftFilters(sanitizeVehicleFilters(appliedFilters));
+      setDraftOrg(organisationFilter);
       setRangeErrors({});
       setShowDiscardConfirm(false);
       setSearchFilterQuery('');
     }
-  }, [isOpen, appliedFilters, initialMode]);
+  }, [isOpen, appliedFilters, initialMode, organisationFilter]);
 
   const sanitizedDraft = useMemo(() => sanitizeVehicleFilters(draftFilters), [draftFilters]);
   const sanitizedApplied = useMemo(() => sanitizeVehicleFilters(appliedFilters), [appliedFilters]);
 
   const liveMatchedCount = useMemo(() => {
+    const matchesOrg = (v: Vehicle) =>
+      !draftOrg || (v.company || v.client || '').trim().toLowerCase() === draftOrg.trim().toLowerCase();
     if (baseMatchedVehicles) {
-      return baseMatchedVehicles.filter((v) =>
-        evaluateVehicleFilters(v, sanitizedDraft, mode)
+      return baseMatchedVehicles.filter(
+        (v) => matchesOrg(v) && evaluateVehicleFilters(v, sanitizedDraft, mode)
       ).length;
     }
     if (scopedVehicles.length > 0) {
-      return scopedVehicles.filter((v) =>
-        evaluateVehicleFilters(v, sanitizedDraft, mode)
+      return scopedVehicles.filter(
+        (v) => matchesOrg(v) && evaluateVehicleFilters(v, sanitizedDraft, mode)
       ).length;
     }
     return totalMatchedCount;
-  }, [baseMatchedVehicles, scopedVehicles, sanitizedDraft, mode, totalMatchedCount]);
+  }, [baseMatchedVehicles, scopedVehicles, sanitizedDraft, mode, totalMatchedCount, draftOrg]);
 
   if (!isOpen) return null;
 
   const isDirty =
     JSON.stringify(sanitizedDraft) !== JSON.stringify(sanitizedApplied) ||
-    mode !== initialMode;
+    mode !== initialMode ||
+    draftOrg !== organisationFilter;
 
   const handleCloseAttempt = () => {
     if (isDirty) {
@@ -123,12 +136,14 @@ export const FilterDrawer: React.FC<FilterDrawerProps> = ({
     }
 
     setRangeErrors({});
+    onOrganisationFilterChange?.(draftOrg);
     onApplyFilters(sanitizedDraft, mode);
     onClose();
   };
 
   const handleClearAll = () => {
     setDraftFilters({});
+    setDraftOrg('');
     setRangeErrors({});
     setMultiOptionSearch({});
   };
@@ -201,7 +216,7 @@ export const FilterDrawer: React.FC<FilterDrawerProps> = ({
     {}
   );
 
-  const activeCount = countActiveVehicleFilters(sanitizedDraft);
+  const activeCount = countActiveVehicleFilters(sanitizedDraft) + (draftOrg ? 1 : 0);
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden flex justify-end">
@@ -320,6 +335,26 @@ export const FilterDrawer: React.FC<FilterDrawerProps> = ({
 
         {/* Scrollable Sectional Filters List */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {showOrganisationFilter && (
+            <div className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-1.5">
+              <label className="text-xs font-semibold text-slate-700 block">
+                Organisation Name
+              </label>
+              <select
+                value={draftOrg}
+                onChange={(e) => setDraftOrg(e.target.value)}
+                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-[#FA8A63] cursor-pointer"
+              >
+                <option value="">All Organisations</option>
+                {organisationOptions.map((org) => (
+                  <option key={org} value={org}>
+                    {org}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {Object.keys(rangeErrors).length > 0 && (
             <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium flex items-center gap-2">
               <AlertCircle size={14} className="shrink-0" />

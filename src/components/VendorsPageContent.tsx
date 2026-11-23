@@ -87,6 +87,8 @@ const STORAGE_KEY = 'fleetrobo-vendor-master-v1';
 
 export interface VendorsPageContentProps {
   companyContext?: string;
+  readOnly?: boolean;
+  showOrganisationColumn?: boolean;
 }
 
 interface StoredVendorMasterState {
@@ -229,7 +231,11 @@ function parseCsvContent(rawText: string): { headers: string[]; rows: string[][]
   return { headers, rows };
 }
 
-export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyContext = 'Adani Port' }) => {
+export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({
+  companyContext = 'Adani Port',
+  readOnly = false,
+  showOrganisationColumn = false,
+}) => {
   // Load initial state from localStorage or fall back to canonical demo vendors
   const loadInitialState = (): StoredVendorMasterState => {
     try {
@@ -307,6 +313,8 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
   const [filterMode, setFilterMode] = useState<'ALL' | 'ANY'>(initialState.filterMode);
   const [filterDraft, setFilterDraft] = useState<Record<string, any>>({});
   const [filterDraftMode, setFilterDraftMode] = useState<'ALL' | 'ANY'>('ALL');
+  const [organisationFilter, setOrganisationFilter] = useState<string>('');
+  const [draftOrganisationFilter, setDraftOrganisationFilter] = useState<string>('');
   const [filterSearchQuery, setFilterSearchQuery] = useState('');
   const [showAllFilters, setShowAllFilters] = useState(false);
   const [activeFilterFieldPopover, setActiveFilterFieldPopover] = useState<string | null>(null);
@@ -602,21 +610,56 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
     }
   };
 
-  // Top status tab counts (always from full vendors dataset per Section 2)
+  // Scoped vendors when impersonating a specific organisation
+  const scopedVendors = useMemo(() => {
+    if (
+      !showOrganisationColumn ||
+      !companyContext ||
+      companyContext === 'Platform Admin' ||
+      companyContext === 'Binary' ||
+      companyContext === 'All Organisations'
+    ) {
+      return vendors;
+    }
+    const target = companyContext.trim().toLowerCase();
+    return vendors.filter(
+      v => (v.company_name || v.company || '').trim().toLowerCase() === target
+    );
+  }, [vendors, companyContext, showOrganisationColumn]);
+
+  const organisationOptions = useMemo(() => {
+    const set = new Set<string>();
+    scopedVendors.forEach(v => {
+      const org = (v.company_name || v.company || '').trim();
+      if (org) set.add(org);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [scopedVendors]);
+
+  // Top status tab counts (always from scoped vendors dataset per Section 2)
   const tabCounts = useMemo(() => {
     return {
-      all: vendors.length,
-      active: vendors.filter(v => v.status === 'active').length,
-      inactive: vendors.filter(v => v.status === 'inactive').length,
-      suspended: vendors.filter(v => v.status === 'suspended').length,
-      integrated: vendors.filter(v => v.type === 'integrated_vendor').length,
+      all: scopedVendors.length,
+      active: scopedVendors.filter(v => v.status === 'active').length,
+      inactive: scopedVendors.filter(v => v.status === 'inactive').length,
+      suspended: scopedVendors.filter(v => v.status === 'suspended').length,
+      integrated: scopedVendors.filter(v => v.type === 'integrated_vendor').length,
     };
-  }, [vendors]);
+  }, [scopedVendors]);
 
   // Filtered and sorted vendors
   const filteredVendors = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const list = vendors.filter(v => {
+    const list = scopedVendors.filter(v => {
+      // 0. Organisation Name filter (Platform Admin Resources impersonation)
+      if (
+        organisationFilter &&
+        (v.company_name || v.company || '').trim().toLowerCase() !==
+          organisationFilter.trim().toLowerCase()
+      ) {
+        return false;
+      }
+
       // 1. Top status tab
       if (statusTab === 'active' && v.status !== 'active') return false;
       if (statusTab === 'inactive' && v.status !== 'inactive') return false;
@@ -664,12 +707,19 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
       if (av > bv) return 1 * sortDir;
       return 0;
     });
-  }, [vendors, statusTab, query, appliedFilters, filterMode, sortKey, sortDir, placeMap, accountMap]);
+  }, [scopedVendors, organisationFilter, statusTab, query, appliedFilters, filterMode, sortKey, sortDir, placeMap, accountMap]);
 
   // Live draft match count inside Filter Drawer
   const draftMatchCount = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return vendors.filter(v => {
+    return scopedVendors.filter(v => {
+      if (
+        draftOrganisationFilter &&
+        (v.company_name || v.company || '').trim().toLowerCase() !==
+          draftOrganisationFilter.trim().toLowerCase()
+      ) {
+        return false;
+      }
       if (statusTab === 'active' && v.status !== 'active') return false;
       if (statusTab === 'inactive' && v.status !== 'inactive') return false;
       if (statusTab === 'suspended' && v.status !== 'suspended') return false;
@@ -700,17 +750,18 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
       }
       return matchesFilterSet(v, filterDraft, filterDraftMode);
     }).length;
-  }, [vendors, statusTab, query, filterDraft, filterDraftMode, placeMap, accountMap]);
+  }, [scopedVendors, draftOrganisationFilter, statusTab, query, filterDraft, filterDraftMode, placeMap, accountMap]);
 
   // Count of populated applied filters
   const appliedFilterCount = useMemo(() => {
-    return Object.values(appliedFilters).filter(val => {
+    const count = Object.values(appliedFilters).filter(val => {
       if (val === undefined || val === null || val === '') return false;
       if (Array.isArray(val)) return val.length > 0;
       if (typeof val === 'object') return Boolean(val.from || val.to);
       return String(val).trim().length > 0;
     }).length;
-  }, [appliedFilters]);
+    return count + (organisationFilter ? 1 : 0);
+  }, [appliedFilters, organisationFilter]);
 
   // Pagination slice
   const totalPages = Math.max(1, Math.ceil(filteredVendors.length / pageSize));
@@ -1703,6 +1754,7 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
   const openFilterDrawer = () => {
     setFilterDraft(JSON.parse(JSON.stringify(appliedFilters)));
     setFilterDraftMode(filterMode);
+    setDraftOrganisationFilter(organisationFilter);
     setFilterSearchQuery('');
     setActiveFilterFieldPopover(null);
     setActiveDrawer('filter');
@@ -1711,9 +1763,10 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
   const isFilterDraftChanged = useMemo(() => {
     return (
       JSON.stringify(filterDraft) !== JSON.stringify(appliedFilters) ||
-      filterDraftMode !== filterMode
+      filterDraftMode !== filterMode ||
+      draftOrganisationFilter !== organisationFilter
     );
-  }, [filterDraft, appliedFilters, filterDraftMode, filterMode]);
+  }, [filterDraft, appliedFilters, filterDraftMode, filterMode, draftOrganisationFilter, organisationFilter]);
 
   const attemptCloseFilterDrawer = () => {
     if (isFilterDraftChanged) {
@@ -1737,6 +1790,7 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
     if (hasInvalidDateFilter) return;
     setAppliedFilters(JSON.parse(JSON.stringify(filterDraft)));
     setFilterMode(filterDraftMode);
+    setOrganisationFilter(draftOrganisationFilter);
     setPage(1);
     setActiveDrawer(null);
     showToast('Filters applied', 'info');
@@ -2167,25 +2221,29 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={handleSeedDemoVendors}
-              title="Restore sample vendors"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <RefreshCw size={13} className="text-slate-500" />
-              <span>Sample vendors</span>
-            </button>
+            {!readOnly && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleSeedDemoVendors}
+                  title="Restore sample vendors"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <RefreshCw size={13} className="text-slate-500" />
+                  <span>Sample vendors</span>
+                </button>
 
-            <button
-              type="button"
-              onClick={openImportDrawer}
-              title="Import Vendors from CSV"
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Upload size={14} className="text-slate-500" />
-              <span>Import</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={openImportDrawer}
+                  title="Import Vendors from CSV"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <Upload size={14} className="text-slate-500" />
+                  <span>Import</span>
+                </button>
+              </>
+            )}
 
             <button
               type="button"
@@ -2197,14 +2255,16 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
               <span>Export</span>
             </button>
 
-            <button
-              type="button"
-              onClick={openCreateVendorDrawer}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white text-xs font-semibold rounded-lg shadow-xs transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Plus size={14} strokeWidth={2.5} />
-              <span>Create vendor</span>
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={openCreateVendorDrawer}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#FA8A63] hover:bg-[#e77a54] text-white text-xs font-semibold rounded-lg shadow-xs transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Plus size={14} strokeWidth={2.5} />
+                <span>Create vendor</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -2309,6 +2369,7 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
               type="button"
               onClick={() => {
                 setAppliedFilters({});
+                setOrganisationFilter('');
                 setPage(1);
               }}
               className="text-[11px] text-slate-500 hover:text-red-600 font-semibold underline whitespace-nowrap shrink-0 cursor-pointer"
@@ -2394,25 +2455,27 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
 
         {/* Right Toolbar Group: Bulk Actions, Customize Columns, View Switcher, Refresh */}
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            disabled={selectedVendorIds.size === 0}
-            onClick={() => openBulkDeleteDrawer(Array.from(selectedVendorIds))}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
-              selectedVendorIds.size > 0
-                ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs cursor-pointer'
-                : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
-            }`}
-            title="Apply bulk actions to selected vendors"
-          >
-            <SlidersHorizontal size={13} />
-            <span>Bulk actions</span>
-            {selectedVendorIds.size > 0 && (
-              <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
-                {selectedVendorIds.size}
-              </span>
-            )}
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              disabled={selectedVendorIds.size === 0}
+              onClick={() => openBulkDeleteDrawer(Array.from(selectedVendorIds))}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
+                selectedVendorIds.size > 0
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs cursor-pointer'
+                  : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+              }`}
+              title="Apply bulk actions to selected vendors"
+            >
+              <SlidersHorizontal size={13} />
+              <span>Bulk actions</span>
+              {selectedVendorIds.size > 0 && (
+                <span className="w-4 h-4 rounded-full bg-white text-purple-700 text-[10px] font-bold flex items-center justify-center">
+                  {selectedVendorIds.size}
+                </span>
+              )}
+            </button>
+          )}
 
           {/* Column Catalogue Popover */}
           <ColumnCataloguePopover
@@ -2478,6 +2541,22 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
           <span className="text-[11px] font-semibold text-slate-500">
             Active filters ({filterMode === 'ALL' ? 'Basic: Match ALL' : 'Advanced: Match ANY + Status AND'}):
           </span>
+          {organisationFilter && (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-white border border-slate-200 text-[11px] text-slate-700 shadow-2xs">
+              <span className="font-semibold text-slate-900">Organisation Name:</span>
+              <span className="truncate max-w-[180px]">{organisationFilter}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setOrganisationFilter('');
+                  setPage(1);
+                }}
+                className="text-slate-400 hover:text-rose-600 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          )}
           {Object.entries(appliedFilters).map(([key, val]) => {
             if (!val) return null;
             if (Array.isArray(val) && val.length === 0) return null;
@@ -2524,6 +2603,7 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
             type="button"
             onClick={() => {
               setAppliedFilters({});
+              setOrganisationFilter('');
               setQuery('');
               setStatusTab('all');
               setPage(1);
@@ -2573,39 +2653,45 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
 
       {/* 6. Scrollable Table or Grid Directory (Matches Drivers & Vehicles) */}
       <div className="flex-1 min-h-0 overflow-auto bg-white">
-        {vendors.length === 0 ? (
+        {scopedVendors.length === 0 ? (
           /* V-001 Empty Database State */
           <div className="h-full flex flex-col items-center justify-center p-10 text-center">
             <div className="w-12 h-12 rounded-2xl bg-[#FFF3EE] text-[#FA8A63] flex items-center justify-center mb-3">
               <Building2 className="w-6 h-6" />
             </div>
-            <h2 className="text-sm font-bold text-slate-900">Add your first vendor</h2>
+            <h2 className="text-sm font-bold text-slate-900">
+              {readOnly ? 'No vendors in this organisation' : 'Add your first vendor'}
+            </h2>
             <p className="text-xs text-slate-500 max-w-md mt-1 mb-5">
-              Your Vendor Master directory is currently empty. Create a standard vendor or integrated provider, import a CSV file, or load the 20 source sample vendors.
+              {readOnly
+                ? 'There are currently no vendor records under the selected organisation.'
+                : 'Your Vendor Master directory is currently empty. Create a standard vendor or integrated provider, import a CSV file, or load the 20 source sample vendors.'}
             </p>
-            <div className="flex items-center gap-2.5">
-              <button
-                type="button"
-                onClick={openCreateVendorDrawer}
-                className="h-8 px-4 rounded-lg bg-[#FA8A63] hover:bg-[#e57953] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5" /> Create vendor
-              </button>
-              <button
-                type="button"
-                onClick={openImportDrawer}
-                className="h-8 px-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <Upload className="w-3.5 h-3.5" /> Import CSV
-              </button>
-              <button
-                type="button"
-                onClick={handleSeedDemoVendors}
-                className="h-8 px-4 rounded-lg border border-[#FA8A63]/40 bg-[#FFF3EE] hover:bg-[#fee5d8] text-[#B85324] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5" /> Use sample vendors
-              </button>
-            </div>
+            {!readOnly && (
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={openCreateVendorDrawer}
+                  className="h-8 px-4 rounded-lg bg-[#FA8A63] hover:bg-[#e57953] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Create vendor
+                </button>
+                <button
+                  type="button"
+                  onClick={openImportDrawer}
+                  className="h-8 px-4 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" /> Import CSV
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSeedDemoVendors}
+                  className="h-8 px-4 rounded-lg border border-[#FA8A63]/40 bg-[#FFF3EE] hover:bg-[#fee5d8] text-[#B85324] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5" /> Use sample vendors
+                </button>
+              </div>
+            )}
           </div>
         ) : filteredVendors.length === 0 ? (
           /* V-007 Filtered Zero State */
@@ -2622,6 +2708,7 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
               onClick={() => {
                 setQuery('');
                 setAppliedFilters({});
+                setOrganisationFilter('');
                 setStatusTab('all');
                 setPage(1);
               }}
@@ -2636,18 +2723,25 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
             <table className="w-full border-collapse text-left text-xs select-text">
               <thead className="bg-[#F8FAFC] sticky top-0 z-10 border-b border-slate-200 text-slate-700 text-[11px] font-bold">
                 <tr>
-                  <th className="sticky left-0 z-20 bg-[#F8FAFC] w-10 px-3 py-3 border-r border-slate-100 text-center">
-                    <input
-                      type="checkbox"
-                      checked={allCurrentPageSelected}
-                      ref={el => {
-                        if (el) el.indeterminate = someCurrentPageSelected;
-                      }}
-                      onChange={toggleSelectCurrentPage}
-                      aria-label="Select current page vendors"
-                      className="rounded border-slate-300 text-[#FA8A63] focus:ring-[#FA8A63] cursor-pointer"
-                    />
-                  </th>
+                  {!readOnly && (
+                    <th className="sticky left-0 z-20 bg-[#F8FAFC] w-10 px-3 py-3 border-r border-slate-100 text-center">
+                      <input
+                        type="checkbox"
+                        checked={allCurrentPageSelected}
+                        ref={el => {
+                          if (el) el.indeterminate = someCurrentPageSelected;
+                        }}
+                        onChange={toggleSelectCurrentPage}
+                        aria-label="Select current page vendors"
+                        className="rounded border-slate-300 text-[#FA8A63] focus:ring-[#FA8A63] cursor-pointer"
+                      />
+                    </th>
+                  )}
+                  {showOrganisationColumn && (
+                    <th className="px-4 py-3 font-bold text-slate-700 border-r border-slate-100 whitespace-nowrap min-w-[160px]">
+                      Organisation Name
+                    </th>
+                  )}
                   {visibleColumns.map(col => {
                     const isSorted = sortKey === col.key;
                     return (
@@ -2694,15 +2788,22 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
                         isSelected ? 'bg-[#FFF3EE]/60' : 'hover:bg-slate-50/90'
                       }`}
                     >
-                      <td className="px-3 py-2.5 text-center">
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSelectSingle(v.id)}
-                          aria-label={`Select ${v.name}`}
-                          className="rounded border-slate-300 text-[#FA8A63] focus:ring-[#FA8A63] cursor-pointer"
-                        />
-                      </td>
+                      {!readOnly && (
+                        <td className="px-3 py-2.5 text-center">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelectSingle(v.id)}
+                            aria-label={`Select ${v.name}`}
+                            className="rounded border-slate-300 text-[#FA8A63] focus:ring-[#FA8A63] cursor-pointer"
+                          />
+                        </td>
+                      )}
+                      {showOrganisationColumn && (
+                        <td className="px-4 py-2.5 whitespace-nowrap text-slate-700 font-medium">
+                          {v.company_name || v.company || '—'}
+                        </td>
+                      )}
 
                       {visibleColumns.map(col => {
                         if (col.key === 'name') {
@@ -2855,41 +2956,65 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
                         <div className="inline-flex items-center justify-end">
                           <RowActionMenu
                             ariaLabel={`Actions for ${v.name}`}
-                            items={[
-                              {
-                                id: 'view',
-                                label: 'View details',
-                                icon: <Eye className="w-3.5 h-3.5 text-slate-400" />,
-                                onClick: () => openExistingVendorDrawer(v, 'view', 'Overview'),
-                              },
-                              {
-                                id: 'edit',
-                                label: 'Edit vendor',
-                                icon: <Edit2 className="w-3.5 h-3.5 text-slate-400" />,
-                                onClick: () => openExistingVendorDrawer(v, 'edit', 'Overview'),
-                              },
-                              {
-                                id: 'personnel',
-                                label: 'Personnel',
-                                icon: <Users className="w-3.5 h-3.5 text-slate-400" />,
-                                badge: v.personnel.length,
-                                onClick: () => openExistingVendorDrawer(v, 'view', 'Personnel'),
-                              },
-                              {
-                                id: 'account',
-                                label: 'Manage User Account',
-                                icon: <UserCheck className="w-3.5 h-3.5 text-slate-400" />,
-                                onClick: () => openExistingVendorDrawer(v, 'edit', 'Overview'),
-                              },
-                              {
-                                id: 'delete',
-                                label: 'Delete vendor',
-                                icon: <Trash2 className="w-3.5 h-3.5" />,
-                                tone: 'danger',
-                                dividerBefore: true,
-                                onClick: () => openBulkDeleteDrawer([v.id]),
-                              },
-                            ]}
+                            items={
+                              readOnly
+                                ? [
+                                    {
+                                      id: 'view',
+                                      label: 'View details',
+                                      icon: <Eye className="w-3.5 h-3.5 text-slate-400" />,
+                                      onClick: () =>
+                                        openExistingVendorDrawer(v, 'view', 'Overview'),
+                                    },
+                                    {
+                                      id: 'personnel',
+                                      label: 'Personnel',
+                                      icon: <Users className="w-3.5 h-3.5 text-slate-400" />,
+                                      badge: v.personnel.length,
+                                      onClick: () =>
+                                        openExistingVendorDrawer(v, 'view', 'Personnel'),
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      id: 'view',
+                                      label: 'View details',
+                                      icon: <Eye className="w-3.5 h-3.5 text-slate-400" />,
+                                      onClick: () =>
+                                        openExistingVendorDrawer(v, 'view', 'Overview'),
+                                    },
+                                    {
+                                      id: 'edit',
+                                      label: 'Edit vendor',
+                                      icon: <Edit2 className="w-3.5 h-3.5 text-slate-400" />,
+                                      onClick: () =>
+                                        openExistingVendorDrawer(v, 'edit', 'Overview'),
+                                    },
+                                    {
+                                      id: 'personnel',
+                                      label: 'Personnel',
+                                      icon: <Users className="w-3.5 h-3.5 text-slate-400" />,
+                                      badge: v.personnel.length,
+                                      onClick: () =>
+                                        openExistingVendorDrawer(v, 'view', 'Personnel'),
+                                    },
+                                    {
+                                      id: 'account',
+                                      label: 'Manage User Account',
+                                      icon: <UserCheck className="w-3.5 h-3.5 text-slate-400" />,
+                                      onClick: () =>
+                                        openExistingVendorDrawer(v, 'edit', 'Overview'),
+                                    },
+                                    {
+                                      id: 'delete',
+                                      label: 'Delete vendor',
+                                      icon: <Trash2 className="w-3.5 h-3.5" />,
+                                      tone: 'danger',
+                                      dividerBefore: true,
+                                      onClick: () => openBulkDeleteDrawer([v.id]),
+                                    },
+                                  ]
+                            }
                           />
                         </div>
                       </td>
@@ -2969,23 +3094,25 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
                     >
                       <Eye className="w-3 h-3" /> View
                     </button>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => openExistingVendorDrawer(v, 'edit', 'Overview')}
-                        className="h-7 px-2.5 rounded-md bg-[#FFF3EE] text-[#B85324] hover:bg-[#fee5d8] text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
-                      >
-                        <Edit2 className="w-3 h-3" /> Edit
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => openBulkDeleteDrawer([v.id])}
-                        title="Delete vendor"
-                        className="h-7 w-7 rounded-md border border-slate-200 text-slate-400 hover:text-rose-600 hover:border-rose-200 inline-flex items-center justify-center cursor-pointer"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
+                    {!readOnly && (
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => openExistingVendorDrawer(v, 'edit', 'Overview')}
+                          className="h-7 px-2.5 rounded-md bg-[#FFF3EE] text-[#B85324] hover:bg-[#fee5d8] text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Edit2 className="w-3 h-3" /> Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openBulkDeleteDrawer([v.id])}
+                          title="Delete vendor"
+                          className="h-7 w-7 rounded-md border border-slate-200 text-slate-400 hover:text-rose-600 hover:border-rose-200 inline-flex items-center justify-center cursor-pointer"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -3165,6 +3292,31 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
 
             {/* Scrollable Filter Groups */}
             <div className="flex-1 overflow-y-auto p-5 space-y-5">
+              {showOrganisationColumn && (
+                <div className="space-y-2 pb-4 border-b border-slate-100">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Organisation
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-700 block">
+                      Organisation Name
+                    </label>
+                    <select
+                      value={draftOrganisationFilter}
+                      onChange={e => setDraftOrganisationFilter(e.target.value)}
+                      className="w-full h-8 px-2.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-800 focus:outline-none focus:border-[#FA8A63] cursor-pointer"
+                    >
+                      <option value="">All Organisations</option>
+                      {organisationOptions.map(org => (
+                        <option key={org} value={org}>
+                          {org}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
               {(
                 [
                   'User Accounts',
@@ -3385,6 +3537,7 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
                 type="button"
                 onClick={() => {
                   setFilterDraft({});
+                  setDraftOrganisationFilter('');
                   setFilterDraftMode('ALL');
                 }}
                 className="text-xs font-semibold text-slate-600 hover:text-rose-600 cursor-pointer"
@@ -3444,7 +3597,7 @@ export const VendorsPageContent: React.FC<VendorsPageContentProps> = ({ companyC
               </div>
 
               <div className="flex items-center gap-2">
-                {vendorFormMode === 'view' && activeVendorRecord && (
+                {!readOnly && vendorFormMode === 'view' && activeVendorRecord && (
                   <button
                     type="button"
                     onClick={() => setVendorFormMode('edit')}

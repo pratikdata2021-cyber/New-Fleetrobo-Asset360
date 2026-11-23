@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { X, Search, Check, AlertCircle, RotateCcw } from 'lucide-react';
 import { Fleet, FLEET_LOOKUPS, FLEET_STATUSES } from '../types/fleet';
 import { InfoTooltip } from './InfoTooltip';
@@ -11,6 +11,10 @@ interface FleetFilterDrawerProps {
   allFleets: Fleet[];
   onApplyFilters: (filters: Record<string, any>, mode: 'basic' | 'advanced') => void;
   totalMatchedCount: number;
+  showOrganisationFilter?: boolean;
+  organisationFilter?: string;
+  organisationOptions?: string[];
+  onOrganisationFilterChange?: (org: string) => void;
 }
 
 export const FleetFilterDrawer: React.FC<FleetFilterDrawerProps> = ({
@@ -20,14 +24,29 @@ export const FleetFilterDrawer: React.FC<FleetFilterDrawerProps> = ({
   filterMode: initialMode,
   allFleets,
   onApplyFilters,
-  totalMatchedCount
+  totalMatchedCount,
+  showOrganisationFilter = false,
+  organisationFilter = '',
+  organisationOptions = [],
+  onOrganisationFilterChange
 }) => {
   const [mode, setMode] = useState<'basic' | 'advanced'>(initialMode);
   const [draftFilters, setDraftFilters] = useState<Record<string, any>>({ ...appliedFilters });
+  const [draftOrg, setDraftOrg] = useState<string>(organisationFilter);
   const [searchFilterQuery, setSearchFilterQuery] = useState('');
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [rangeErrors, setRangeErrors] = useState<Record<string, string>>({});
   const [openDropdownKey, setOpenDropdownKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setMode(initialMode);
+      setDraftFilters({ ...appliedFilters });
+      setDraftOrg(organisationFilter);
+      setRangeErrors({});
+      setShowDiscardConfirm(false);
+    }
+  }, [isOpen, appliedFilters, initialMode, organisationFilter]);
 
   // Parent fleet options derived from allFleets
   const parentFleetOptions = useMemo(() => {
@@ -46,7 +65,9 @@ export const FleetFilterDrawer: React.FC<FleetFilterDrawerProps> = ({
   }, []);
 
   const isDirty =
-    JSON.stringify(draftFilters) !== JSON.stringify(appliedFilters) || mode !== initialMode;
+    JSON.stringify(draftFilters) !== JSON.stringify(appliedFilters) ||
+    mode !== initialMode ||
+    draftOrg !== organisationFilter;
 
   const handleCloseAttempt = () => {
     if (isDirty) {
@@ -109,16 +130,18 @@ export const FleetFilterDrawer: React.FC<FleetFilterDrawerProps> = ({
       return;
     }
 
+    onOrganisationFilterChange?.(draftOrg);
     onApplyFilters(draftFilters, mode);
     onClose();
   };
 
   const handleReset = () => {
     setDraftFilters({});
+    setDraftOrg('');
     setRangeErrors({});
   };
 
-  const activeCount = Object.keys(draftFilters).length;
+  const activeCount = Object.keys(draftFilters).length + (draftOrg ? 1 : 0);
 
   if (!isOpen) return null;
 
@@ -199,6 +222,31 @@ export const FleetFilterDrawer: React.FC<FleetFilterDrawerProps> = ({
 
         {/* Filter List Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-5">
+          {showOrganisationFilter && (
+            <div className="space-y-2 pb-3 border-b border-slate-100">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                Organisation
+              </div>
+              <div className="space-y-1">
+                <label className="font-semibold text-slate-700 block">
+                  Organisation Name
+                </label>
+                <select
+                  value={draftOrg}
+                  onChange={(e) => setDraftOrg(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-[#FA8A63] cursor-pointer"
+                >
+                  <option value="">All Organisations</option>
+                  {organisationOptions.map((org) => (
+                    <option key={org} value={org}>
+                      {org}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+
           {/* 1. IDENTITY GROUP */}
           <div className="space-y-3">
             <div className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pb-1 border-b border-slate-100">

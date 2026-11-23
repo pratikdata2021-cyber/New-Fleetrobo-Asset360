@@ -82,6 +82,18 @@ const SidebarItem = ({
       <Icon size={16} className="shrink-0" />
       {!collapsed && <span className="truncate">{label}</span>}
     </div>
+    {!collapsed && hasArrow && (
+      <ChevronDown 
+        size={14} 
+        className={`shrink-0 transition-transform duration-200 ${
+          isExpanded 
+            ? 'rotate-180 text-slate-600' 
+            : active 
+            ? 'text-white/80' 
+            : 'text-slate-400'
+        }`} 
+      />
+    )}
   </button>
 );
 
@@ -209,10 +221,24 @@ export default function App() {
   const [activeCustomerMenu, setActiveCustomerMenu] = useState('setup-vehicles');
   const [transportExpanded, setTransportExpanded] = useState(false);
   const [operationalSetupExpanded, setOperationalSetupExpanded] = useState(true);
+  const [resourcesExpanded, setResourcesExpanded] = useState(true);
 
   // Admin navigation state
   const [activeAdminMenu, setActiveAdminMenu] = useState('company-details');
   const [modalMasterExpanded, setModalMasterExpanded] = useState(true);
+  const [adminResourcesExpanded, setAdminResourcesExpanded] = useState(true);
+
+  const isPlatformAdminOrg = currentCompany === 'Platform Admin' || currentCompany === 'Binary';
+
+  // Ensure Platform Admin never remains in Customer Review View, and non-admin orgs exit Platform Admin resource impersonation
+  useEffect(() => {
+    if (isPlatformAdminOrg && viewRole === 'customer') {
+      setViewRole('admin');
+    }
+    if (!isPlatformAdminOrg && activeAdminMenu.startsWith('admin-resources-')) {
+      setActiveAdminMenu('company-details');
+    }
+  }, [isPlatformAdminOrg, viewRole, activeAdminMenu]);
 
   // Sync company model access updates between Binary Platform Admin and Client Modal Master
   const [modelAccessTick, setModelAccessTick] = useState(0);
@@ -360,12 +386,13 @@ export default function App() {
                       hasArrow 
                       isExpanded={modalMasterExpanded}
                       onClick={() => {
-                        if (!modalMasterExpanded) {
-                          setModalMasterExpanded(true);
+                        if (isCollapsed) {
+                          if (hasEnabledDevices) setActiveAdminMenu('devices');
+                          else if (hasEnabledSensors) setActiveAdminMenu('sensors');
+                          else if (hasEnabledSims) setActiveAdminMenu('sim-master');
+                        } else {
+                          setModalMasterExpanded((prev) => !prev);
                         }
-                        if (hasEnabledDevices) setActiveAdminMenu('devices');
-                        else if (hasEnabledSensors) setActiveAdminMenu('sensors');
-                        else if (hasEnabledSims) setActiveAdminMenu('sim-master');
                       }} 
                     />
                     {!isCollapsed && modalMasterExpanded && (
@@ -390,6 +417,85 @@ export default function App() {
                   collapsed={isCollapsed} 
                   onClick={() => setActiveAdminMenu('modal-mapping')} 
                 />
+
+                {/* Platform Admin Resource Impersonation (View Access) below Assets Mapping */}
+                {isPlatformAdminOrg && (
+                  <div className="pt-1">
+                    {isCollapsed ? (
+                      <SidebarItem
+                        icon={Package}
+                        label="Resources (View)"
+                        active={activeAdminMenu.startsWith('admin-resources-')}
+                        collapsed={isCollapsed}
+                        onClick={() => setActiveAdminMenu('admin-resources-vehicles')}
+                      />
+                    ) : (
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => setAdminResourcesExpanded(!adminResourcesExpanded)}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-xs font-medium transition-all duration-200 cursor-pointer ${
+                            activeAdminMenu.startsWith('admin-resources-') && !adminResourcesExpanded
+                              ? 'bg-[#F28C5F] text-white shadow-xs'
+                              : 'text-slate-700 hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <Package
+                              size={16}
+                              className={`shrink-0 ${
+                                activeAdminMenu.startsWith('admin-resources-') && !adminResourcesExpanded
+                                  ? 'text-white'
+                                  : activeAdminMenu.startsWith('admin-resources-')
+                                  ? 'text-[#FA8A63]'
+                                  : 'text-slate-600'
+                              }`}
+                            />
+                            <span className="truncate font-semibold">Resources</span>
+                          </div>
+                          <ChevronDown
+                            size={14}
+                            className={`shrink-0 transition-transform duration-200 ${
+                              adminResourcesExpanded
+                                ? 'rotate-180 text-slate-600'
+                                : activeAdminMenu.startsWith('admin-resources-')
+                                ? 'text-white/80'
+                                : 'text-slate-400'
+                            }`}
+                          />
+                        </button>
+                        {adminResourcesExpanded && (
+                          <div className="space-y-0.5 my-1 pl-2.5 border-l-2 border-slate-200/60 ml-3">
+                            <SubSidebarItem
+                              icon={Users}
+                              label="Drivers"
+                              active={activeAdminMenu === 'admin-resources-drivers'}
+                              onClick={() => setActiveAdminMenu('admin-resources-drivers')}
+                            />
+                            <SubSidebarItem
+                              icon={Truck}
+                              label="Vehicles"
+                              active={activeAdminMenu === 'admin-resources-vehicles'}
+                              onClick={() => setActiveAdminMenu('admin-resources-vehicles')}
+                            />
+                            <SubSidebarItem
+                              icon={Layers}
+                              label="Fleets"
+                              active={activeAdminMenu === 'admin-resources-fleets'}
+                              onClick={() => setActiveAdminMenu('admin-resources-fleets')}
+                            />
+                            <SubSidebarItem
+                              icon={Store}
+                              label="Vendors"
+                              active={activeAdminMenu === 'admin-resources-vendors'}
+                              onClick={() => setActiveAdminMenu('admin-resources-vendors')}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </>
           ) : (
@@ -440,20 +546,52 @@ export default function App() {
               />
               {!isCollapsed && operationalSetupExpanded && (
                 <div className="space-y-1 my-1.5 pl-1 pr-1">
-                  <div className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-slate-800">
-                    <Package size={16} className="text-slate-700" />
-                    <span>Resources</span>
+                  {/* Resources Dropdown */}
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setResourcesExpanded(!resourcesExpanded)}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                        ['setup-drivers', 'setup-vehicles', 'setup-fleets', 'setup-vendors'].includes(activeCustomerMenu) && !resourcesExpanded
+                          ? 'bg-[#FEEFEA] text-[#B85324]'
+                          : 'text-slate-700 hover:text-slate-900 hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Package 
+                          size={16} 
+                          className={`shrink-0 ${
+                            ['setup-drivers', 'setup-vehicles', 'setup-fleets', 'setup-vendors'].includes(activeCustomerMenu)
+                              ? 'text-[#FA8A63]'
+                              : 'text-slate-600'
+                          }`} 
+                        />
+                        <span className="truncate">Resources</span>
+                      </div>
+                      <ChevronDown
+                        size={14}
+                        className={`transition-transform duration-200 shrink-0 ${
+                          resourcesExpanded 
+                            ? 'rotate-180 text-slate-600' 
+                            : 'text-slate-400'
+                        }`}
+                      />
+                    </button>
+                    {resourcesExpanded && (
+                      <div className="space-y-0.5 my-1 pl-2.5 border-l-2 border-slate-200/60 ml-3">
+                        <SubSidebarItem icon={Users} label="Drivers" active={activeCustomerMenu === 'setup-drivers'} onClick={() => setActiveCustomerMenu('setup-drivers')} />
+                        <SubSidebarItem icon={Truck} label="Vehicles" active={activeCustomerMenu === 'setup-vehicles'} onClick={() => setActiveCustomerMenu('setup-vehicles')} />
+                        <SubSidebarItem icon={Layers} label="Fleets" active={activeCustomerMenu === 'setup-fleets'} onClick={() => setActiveCustomerMenu('setup-fleets')} />
+                        <SubSidebarItem icon={Store} label="Vendors" active={activeCustomerMenu === 'setup-vendors'} onClick={() => setActiveCustomerMenu('setup-vendors')} />
+                      </div>
+                    )}
                   </div>
-                  <SubSidebarItem icon={Users} label="Drivers" active={activeCustomerMenu === 'setup-drivers'} onClick={() => setActiveCustomerMenu('setup-drivers')} />
-                  <SubSidebarItem icon={Truck} label="Vehicles" active={activeCustomerMenu === 'setup-vehicles'} onClick={() => setActiveCustomerMenu('setup-vehicles')} />
-                  <SubSidebarItem icon={Layers} label="Fleets" active={activeCustomerMenu === 'setup-fleets'} onClick={() => setActiveCustomerMenu('setup-fleets')} />
-                  <SubSidebarItem icon={Store} label="Vendors" active={activeCustomerMenu === 'setup-vendors'} onClick={() => setActiveCustomerMenu('setup-vendors')} />
                   <SubSidebarItem icon={ArrowLeftRight} label="Hardware & Mappings" active={activeCustomerMenu === 'setup-modal-mapping'} onClick={() => setActiveCustomerMenu('setup-modal-mapping')} />
                 </div>
               )}
             </div>
-            <SidebarItem icon={Building2} label="Company settings" collapsed={isCollapsed} hasArrow onClick={() => alert('Company settings clicked')} />
-            <SidebarItem icon={HelpCircle} label="Help" collapsed={isCollapsed} onClick={() => alert('Help clicked')} />
+            <SidebarItem icon={Building2} label="Company settings" collapsed={isCollapsed} hasArrow onClick={() => setViewRole('admin')} />
+            <SidebarItem icon={HelpCircle} label="Help" collapsed={isCollapsed} />
           </div>
         )}
 
@@ -545,7 +683,8 @@ export default function App() {
                               e.stopPropagation();
                               setCurrentCompany(comp);
                               setShowCompanyMenu(false);
-                              if (comp === 'Platform Admin' && viewRole === 'admin') {
+                              if (comp === 'Platform Admin') {
+                                setViewRole('admin');
                                 setActiveAdminMenu('modal-category-master');
                               }
                             }}
@@ -609,16 +748,18 @@ export default function App() {
                           </div>
                           {viewRole === 'admin' && <CheckCircle2 size={13} className="text-indigo-600" />}
                         </button>
-                        <button 
-                          onClick={() => { setViewRole('customer'); setShowProfileMenu(false); }}
-                          className={`w-full flex items-center justify-between px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${viewRole === 'customer' ? 'bg-orange-50 text-orange-700 font-bold' : 'text-slate-700 hover:bg-slate-50'}`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <Users size={13} />
-                            <span>Customer Review View</span>
-                          </div>
-                          {viewRole === 'customer' && <CheckCircle2 size={13} className="text-orange-600" />}
-                        </button>
+                        {!isPlatformAdminOrg && (
+                          <button 
+                            onClick={() => { setViewRole('customer'); setShowProfileMenu(false); }}
+                            className={`w-full flex items-center justify-between px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${viewRole === 'customer' ? 'bg-orange-50 text-orange-700 font-bold' : 'text-slate-700 hover:bg-slate-50'}`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <Users size={13} />
+                              <span>Customer Review View</span>
+                            </div>
+                            {viewRole === 'customer' && <CheckCircle2 size={13} className="text-orange-600" />}
+                          </button>
+                        )}
                       </div>
 
                       <div className="border-t border-slate-100 p-1.5">
@@ -642,7 +783,7 @@ export default function App() {
         </header>
 
         {/* Scrollable Content */}
-        <main className={`flex-1 overflow-y-auto ${((activeCustomerMenu === 'setup-vehicles' || activeCustomerMenu === 'setup-drivers' || activeCustomerMenu === 'setup-fleets' || activeCustomerMenu === 'setup-vendors' || activeCustomerMenu === 'setup-modal-mapping') && viewRole === 'customer') || ((activeAdminMenu === 'devices' || activeAdminMenu === 'sensors' || activeAdminMenu === 'sim-master' || activeAdminMenu === 'modal-mapping' || activeAdminMenu === 'modal-category-master' || activeAdminMenu === 'vehicle-model-master' || activeAdminMenu === 'company-management') && viewRole === 'admin') ? 'p-0' : 'px-6 py-5'}`}>
+        <main className={`flex-1 overflow-y-auto ${((activeCustomerMenu === 'setup-vehicles' || activeCustomerMenu === 'setup-drivers' || activeCustomerMenu === 'setup-fleets' || activeCustomerMenu === 'setup-vendors' || activeCustomerMenu === 'setup-modal-mapping') && viewRole === 'customer') || ((activeAdminMenu === 'devices' || activeAdminMenu === 'sensors' || activeAdminMenu === 'sim-master' || activeAdminMenu === 'modal-mapping' || activeAdminMenu === 'modal-category-master' || activeAdminMenu === 'vehicle-model-master' || activeAdminMenu === 'company-management' || activeAdminMenu.startsWith('admin-resources-')) && viewRole === 'admin') ? 'p-0' : 'px-6 py-5'}`}>
           {viewRole === 'admin' ? (
             activeAdminMenu === 'company-management' ? (
               <CompanyManagementContent 
@@ -660,6 +801,32 @@ export default function App() {
               <SimMasterContent currentCompany={currentCompany} />
             ) : activeAdminMenu === 'modal-mapping' ? (
               <ModalMappingContent currentCompany={currentCompany} viewRole={viewRole} />
+            ) : isPlatformAdminOrg && activeAdminMenu.startsWith('admin-resources-') ? (
+              activeAdminMenu === 'admin-resources-drivers' ? (
+                <DriversPageContent
+                  companyContext="Platform Admin"
+                  readOnly
+                  showOrganisationColumn
+                />
+              ) : activeAdminMenu === 'admin-resources-vehicles' ? (
+                <VehiclesPageContent
+                  companyContext="Platform Admin"
+                  readOnly
+                  showOrganisationColumn
+                />
+              ) : activeAdminMenu === 'admin-resources-fleets' ? (
+                <FleetsPageContent
+                  companyContext="Platform Admin"
+                  readOnly
+                  showOrganisationColumn
+                />
+              ) : (
+                <VendorsPageContent
+                  companyContext="Platform Admin"
+                  readOnly
+                  showOrganisationColumn
+                />
+              )
             ) : (
             <div className="max-w-5xl mx-auto space-y-5">
               {/* Page Title Row */}

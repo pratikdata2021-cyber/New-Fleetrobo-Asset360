@@ -34,6 +34,10 @@ interface DriverFilterDrawerProps {
   baseMatchedDrivers?: Driver[];
   companyContext?: string;
   modalStore?: Pick<ModalMasterStore, 'connections' | 'resourceAllocations' | 'resourceRelationships'>;
+  showOrganisationFilter?: boolean;
+  organisationFilter?: string;
+  organisationOptions?: string[];
+  onOrganisationFilterChange?: (org: string) => void;
 }
 
 export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
@@ -46,12 +50,17 @@ export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
   scopedDrivers = [],
   baseMatchedDrivers,
   companyContext,
-  modalStore
+  modalStore,
+  showOrganisationFilter = false,
+  organisationFilter = '',
+  organisationOptions = [],
+  onOrganisationFilterChange
 }) => {
   const [mode, setMode] = useState<'basic' | 'advanced'>(initialMode);
   const [draftFilters, setDraftFilters] = useState<Record<string, any>>(() =>
     sanitizeDriverFilters(appliedFilters)
   );
+  const [draftOrg, setDraftOrg] = useState<string>(organisationFilter);
   const [searchFilterQuery, setSearchFilterQuery] = useState('');
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [rangeErrors, setRangeErrors] = useState<Record<string, string>>({});
@@ -70,12 +79,13 @@ export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
     if (isOpen) {
       setMode(initialMode);
       setDraftFilters(sanitizeDriverFilters(appliedFilters));
+      setDraftOrg(organisationFilter);
       setRangeErrors({});
       setShowDiscardConfirm(false);
       setSearchFilterQuery('');
       setMultiOptionSearch({});
     }
-  }, [isOpen, appliedFilters, initialMode]);
+  }, [isOpen, appliedFilters, initialMode, organisationFilter]);
 
   const sanitizedDraft = useMemo(() => sanitizeDriverFilters(draftFilters), [draftFilters]);
   const sanitizedApplied = useMemo(() => sanitizeDriverFilters(appliedFilters), [appliedFilters]);
@@ -83,24 +93,30 @@ export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
 
   const liveMatchedCount = useMemo(() => {
     const store = modalStore || loadModalMasterStore();
+    const matchesOrg = (d: Driver) =>
+      !draftOrg || (d.company || '').trim().toLowerCase() === draftOrg.trim().toLowerCase();
     if (baseMatchedDrivers) {
-      return baseMatchedDrivers.filter((d) =>
-        evaluateDriverFilters(d, sanitizedDraft, mode, {
-          modalStore: store,
-          allDriverIds
-        })
+      return baseMatchedDrivers.filter(
+        (d) =>
+          matchesOrg(d) &&
+          evaluateDriverFilters(d, sanitizedDraft, mode, {
+            modalStore: store,
+            allDriverIds
+          })
       ).length;
     }
     if (scopedDrivers.length > 0) {
-      return scopedDrivers.filter((d) =>
-        evaluateDriverFilters(d, sanitizedDraft, mode, {
-          modalStore: store,
-          allDriverIds
-        })
+      return scopedDrivers.filter(
+        (d) =>
+          matchesOrg(d) &&
+          evaluateDriverFilters(d, sanitizedDraft, mode, {
+            modalStore: store,
+            allDriverIds
+          })
       ).length;
     }
     return totalMatchedCount;
-  }, [baseMatchedDrivers, scopedDrivers, sanitizedDraft, mode, totalMatchedCount, modalStore, allDriverIds]);
+  }, [baseMatchedDrivers, scopedDrivers, sanitizedDraft, mode, totalMatchedCount, modalStore, allDriverIds, draftOrg]);
 
   // Grouped filters by 5 canonical sections
   const groupedFilters = useMemo(() => {
@@ -127,7 +143,8 @@ export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
 
   const isDirty =
     JSON.stringify(sanitizedDraft) !== JSON.stringify(sanitizedApplied) ||
-    mode !== initialMode;
+    mode !== initialMode ||
+    draftOrg !== organisationFilter;
 
   const handleCloseAttempt = () => {
     if (isDirty) {
@@ -215,12 +232,14 @@ export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
     }
 
     setRangeErrors({});
+    onOrganisationFilterChange?.(draftOrg);
     onApplyFilters(sanitizedDraft, mode);
     onClose();
   };
 
   const handleClearAll = () => {
     setDraftFilters({});
+    setDraftOrg('');
     setRangeErrors({});
     setMultiOptionSearch({});
   };
@@ -232,7 +251,7 @@ export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
     }));
   };
 
-  const activeCount = countActiveDriverFilters(sanitizedDraft);
+  const activeCount = countActiveDriverFilters(sanitizedDraft) + (draftOrg ? 1 : 0);
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden flex justify-end">
@@ -331,6 +350,26 @@ export const DriverFilterDrawer: React.FC<DriverFilterDrawerProps> = ({
 
         {/* Scrollable Sectional Filters List */}
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          {showOrganisationFilter && (
+            <div className="border border-slate-200 rounded-xl bg-white p-3.5 space-y-1.5 shadow-2xs">
+              <label className="text-xs font-semibold text-slate-700 block">
+                Organisation Name
+              </label>
+              <select
+                value={draftOrg}
+                onChange={(e) => setDraftOrg(e.target.value)}
+                className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:border-[#FA8A63] cursor-pointer"
+              >
+                <option value="">All Organisations</option>
+                {organisationOptions.map((org) => (
+                  <option key={org} value={org}>
+                    {org}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {Object.keys(groupedFilters).length === 0 ? (
             <div className="p-8 text-center text-slate-500 text-xs bg-slate-50 rounded-xl border border-slate-200">
               No filters found matching "{searchFilterQuery}".
