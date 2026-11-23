@@ -22,12 +22,24 @@ interface DriverImportDrawerProps {
   onImportComplete: (createdDrivers: Driver[], skippedCount: number) => void;
 }
 
-const SAMPLE_CSV_CONTENT = `Driver Name,Mobile Number,Date of Birth,Licence Number,Licence Valid From,Licence Valid To,Company,Transporter,Blood Group,Experience,RTO Certified,Police Verified,Training Completed,RFID Enabled
-Devendra Sharma,9876501234,1989-05-15,DL0420160012345,2016-01-10,2030-01-09,Adani Port,Western Logistics,B+,9,Yes,Yes,Yes,Yes
-Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,Adani Mundra,TMS Transporter,O+,12,Yes,No,Yes,No
-Mohan Lal Verma,9765401234,1993-02-28,RJ1420170054321,2017-08-15,2027-08-14,Binary Semantics Ltd,Binary Logistics,A+,7,Yes,Yes,No,No
-Kalyan Rao,9845101234,1984-09-10,KA0120080033445,2008-03-20,2028-03-19,Adani Port,Western Logistics,AB+,16,No,No,No,Yes
-Ajay Kumar,9934501234,1995-12-05,UP3220190077889,2019-10-01,2029-09-30,Adani Mundra,Western Logistics,B+,5,Yes,Yes,Yes,No`;
+const SAMPLE_CSV_CONTENT = `Driver Name,Mobile Number,Date of Birth,Licence Number,Licence Valid From,Licence Valid To,Company,Transporter,Blood Group,Experience,Driver Status,Licence Type,RTO Certified,Police Verified,Training Completed,RFID Enabled
+Devendra Sharma,9876501234,1989-05-15,DL0420160012345,2016-01-10,2030-01-09,Adani Port,Western Logistics,B+,9,Active,HMV,Yes,Yes,Yes,Yes
+Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,Adani Mundra,TMS Transporter,O+,12,Active,HGMV,Yes,No,Yes,No
+Mohan Lal Verma,9765401234,1993-02-28,RJ1420170054321,2017-08-15,2027-08-14,Binary Semantics Ltd,Binary Logistics,A+,7,Inactive,LMV,Yes,Yes,No,No
+Kalyan Rao,9845101234,1984-09-10,KA0120080033445,2008-03-20,2028-03-19,Adani Port,Western Logistics,AB+,16,,,No,No,No,Yes
+Ajay Kumar,9934501234,1995-12-05,UP3220190077889,2019-10-01,2029-09-30,Adani Mundra,Western Logistics,B+,5,Active,HMV,Yes,Yes,Yes,No`;
+
+export function buildDriverImportTemplateCsv(companyContext?: string): string {
+  const isGlobalAdmin = isGlobalDriverAdminContext(companyContext);
+  if (!isGlobalAdmin && companyContext) {
+    const targetComp = companyContext.trim();
+    const defaultTransporter = DRIVER_LOOKUPS.companyTransporterMap[targetComp]?.[0] || '';
+    return `Driver Name,Mobile Number,Date of Birth,Licence Number,Licence Valid From,Licence Valid To,Company,Transporter,Blood Group,Experience,Driver Status,Licence Type,RTO Certified,Police Verified,Training Completed,RFID Enabled
+Devendra Sharma,9876501234,1989-05-15,DL0420160012345,2016-01-10,2030-01-09,${targetComp},${defaultTransporter},B+,9,Active,HMV,Yes,Yes,Yes,Yes
+Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,${targetComp},${defaultTransporter},O+,12,,,Yes,No,Yes,No`;
+  }
+  return SAMPLE_CSV_CONTENT;
+}
 
 function parseStrictIsoOrSlashDate(raw?: string): string | null {
   const s = (raw || '').trim();
@@ -274,19 +286,7 @@ export const DriverImportDrawer: React.FC<DriverImportDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  const isGlobalAdmin = isGlobalDriverAdminContext(companyContext);
-
-  const buildTemplateCsv = () => {
-    if (!isGlobalAdmin && companyContext) {
-      const targetComp = companyContext.trim();
-      const defaultTransporter =
-        DRIVER_LOOKUPS.companyTransporterMap[targetComp]?.[0] || '';
-      return `Driver Name,Mobile Number,Date of Birth,Licence Number,Licence Valid From,Licence Valid To,Company,Transporter,Blood Group,Experience,RTO Certified,Police Verified,Training Completed,RFID Enabled
-Devendra Sharma,9876501234,1989-05-15,DL0420160012345,2016-01-10,2030-01-09,${targetComp},${defaultTransporter},B+,9,Yes,Yes,Yes,Yes
-Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,${targetComp},${defaultTransporter},O+,12,Yes,No,Yes,No`;
-    }
-    return SAMPLE_CSV_CONTENT;
-  };
+  const buildTemplateCsv = () => buildDriverImportTemplateCsv(companyContext);
 
   const handleDownloadTemplate = () => {
     const content = buildTemplateCsv();
@@ -376,7 +376,7 @@ Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,${tar
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-6 space-y-5">
           <DirectBulkUploadView
             status={upload.status}
             progress={upload.progress}
@@ -399,6 +399,31 @@ Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,${tar
             onReset={upload.reset}
             onDone={onClose}
           />
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-2 text-xs text-slate-600">
+            <div className="font-semibold text-slate-800">
+              Optional Column Rules (Driver Status &amp; Licence Type)
+            </div>
+            <ul className="space-y-1.5 list-disc pl-4">
+              <li>
+                <span className="font-semibold text-slate-800">Driver Status:</span> Blank{' '}
+                <span aria-hidden="true">&rarr;</span> defaults to{' '}
+                <code className="px-1 py-0.5 rounded bg-white border border-slate-200 text-slate-800 font-mono text-[11px]">
+                  Inactive
+                </code>
+                . Valid values:{' '}
+                <span className="font-medium text-slate-800">
+                  Active, Inactive, Suspended, Archived
+                </span>
+                .
+              </li>
+              <li>
+                <span className="font-semibold text-slate-800">Licence Type:</span> Blank{' '}
+                <span aria-hidden="true">&rarr;</span> remains blank (no HMV default). Valid values:{' '}
+                <span className="font-medium text-slate-800">LMV, HMV, HGMV</span>.
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>
