@@ -39,13 +39,15 @@ import {
   DeviceRecord,
   GatewayCategory,
   HardwareLifecycleStatus,
+  EffectiveDeviceStatus,
+  DeviceMappingFilterStatus,
   DEVICE_CATALOGUE,
   DEVICE_COLUMNS,
-  MODAL_OWNERS,
-  MODAL_LOCATIONS,
-  HARDWARE_LIFECYCLE_OPTIONS,
   MODAL_FIELD_TOOLTIPS,
   SavedModalView,
+  deriveDeviceStatus,
+  deriveDeviceMappingFilterStatus,
+  getDeviceMappingReferences,
   loadModalMasterStore,
   saveModalMasterStore,
   loadSavedModalViews,
@@ -54,11 +56,25 @@ import {
   parseCsvLine
 } from '../types/modalMaster';
 import {
+  DevicesFilterDrawer,
+  DevicesAdvancedFilters,
+  DEFAULT_DEVICES_FILTERS,
+  countActiveDeviceFilters,
+  matchesDevicesFilters
+} from './devices-master/DevicesFilterDrawer';
+import {
+  DevicesBulkDrawer,
+  DevicesBulkActionMode
+} from './devices-master/DevicesBulkDrawer';
+import {
   getEnabledModelsForCompanyName,
-  getAvailableClientCompanies
+  getAvailableClientCompanies,
+  resolveClientCompanyByNameOrId,
+  isCompanyEligibleForNewRegistration
 } from '../types/companyModelEnablement';
 import {
   getDeviceModePresets,
+  getModelCategoryById,
   getPlatformProtocolPresets,
   getRecordIdentifierTypes,
   loadCustomDeviceModes,
@@ -67,25 +83,6 @@ import {
   saveCustomPlatformProtocol
 } from '../types/modelCategoryMaster';
 import { ColumnCataloguePopover } from './ColumnCataloguePopover';
-
-const GATEWAY_CATEGORIES: GatewayCategory[] = [
-  'GPS',
-  'ADAS/DMS',
-  'E-Lock',
-  'CCTV',
-  'IP Camera',
-  'Face Terminal'
-];
-
-const ALL_MANUFACTURERS = [
-  'Teltonika',
-  'Queclink',
-  'Mettax',
-  'Streamax',
-  'Jointech',
-  'Hikvision',
-  'CPPLUS'
-];
 
 const FieldLabel: React.FC<{
   label: string;
@@ -118,6 +115,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   const [store, setStoreState] = useState(() => loadModalMasterStore());
   const [savedViews, setSavedViews] = useState<SavedModalView[]>(() => loadSavedModalViews());
   const [modelAccessTick, setModelAccessTick] = useState(0);
+  const [statusTick, setStatusTick] = useState(0);
   const selfWriteRef = React.useRef(false);
 
   const setStore: React.Dispatch<React.SetStateAction<typeof store>> = (updater) => {
@@ -138,16 +136,19 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       if (!selfWriteRef.current) {
         setStoreState(loadModalMasterStore());
       }
+      setStatusTick((t) => t + 1);
     };
     window.addEventListener('fleetrobo:model-access-updated', handleSync);
     window.addEventListener('fleetrobo:modal-store-updated', handleStoreSync);
     window.addEventListener('storage', handleSync);
     window.addEventListener('storage', handleStoreSync);
+    const timer = window.setInterval(() => setStatusTick((t) => t + 1), 30000);
     return () => {
       window.removeEventListener('fleetrobo:model-access-updated', handleSync);
       window.removeEventListener('fleetrobo:modal-store-updated', handleStoreSync);
       window.removeEventListener('storage', handleSync);
       window.removeEventListener('storage', handleStoreSync);
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -157,16 +158,45 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     return getAvailableClientCompanies();
   }, [modelAccessTick]);
 
-  // Toolbar & Table states
+  // Toolbar & Filter states
   const [searchQuery, setSearchQuery] = useState('');
   const [filterCompany, setFilterCompany] = useState<string>('All');
-  const [filterKind, setFilterKind] = useState<string>('All');
-  const [filterManufacturer, setFilterManufacturer] = useState<string>('All');
-  const [filterLifecycle, setFilterLifecycle] = useState<string>('All');
+  const [advancedFilters, setAdvancedFilters] = useState<DevicesAdvancedFilters>(
+    DEFAULT_DEVICES_FILTERS
+  );
 
   useEffect(() => {
     setFilterCompany('All');
+    setAdvancedFilters(DEFAULT_DEVICES_FILTERS);
   }, [currentCompany]);
+
+  // Authorized devices in active tenant/filter scope
+  const scopedDevices = useMemo(() => {
+    const companyTarget =
+      !isPlatformAdmin && currentCompany
+        ? currentCompany.trim().toLowerCase()
+        : isPlatformAdmin && filterCompany !== 'All'
+        ? filterCompany.trim().toLowerCase()
+        : null;
+    if (!companyTarget) return isPlatformAdmin ? store.devices : [];
+    return store.devices.filter((d) => (d.company || '').trim().toLowerCase() === companyTarget);
+  }, [store.devices, currentCompany, isPlatformAdmin, filterCompany]);
+
+  // Derived effective Device status & mapping filter status
+  const { effectiveStatusById, mappingStatusById } = useMemo(() => {
+    void statusTick;
+    const nowMs = Date.now();
+    const statusMap = new Map<string, EffectiveDeviceStatus>();
+    const mappingMap = new Map<string, DeviceMappingFilterStatus>();
+    store.devices.forEach((d) => {
+      statusMap.set(d.id, deriveDeviceStatus(d, store, nowMs));
+      mappingMap.set(d.id, deriveDeviceMappingFilterStatus(d.id, store, nowMs));
+    });
+    return { effectiveStatusById: statusMap, mappingStatusById: mappingMap };
+  }, [store, statusTick]);
+
+  const getEffectiveStatus = (device: DeviceRecord): EffectiveDeviceStatus =>
+    effectiveStatusById.get(device.id) ?? deriveDeviceStatus(device, store);
 
   // Enabled Device models for the active company (or selected filter company in Platform Admin)
   const enabledDeviceModels = useMemo(() => {
@@ -177,9 +207,14 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   }, [currentCompany, isPlatformAdmin, filterCompany, modelAccessTick]);
 
   const enabledCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(enabledDeviceModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : GATEWAY_CATEGORIES;
+    return Array.from(new Set(enabledDeviceModels.map((m) => m.typeName)));
   }, [enabledDeviceModels]);
+
+  const availableLocations = useMemo<string[]>(() => {
+    return Array.from(
+      new Set(scopedDevices.map((d) => (d.inventoryLocation || '').trim()).filter(Boolean))
+    ).sort((a, b) => a.localeCompare(b));
+  }, [scopedDevices]);
 
   const [sortKey, setSortKey] = useState<string>('');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -187,6 +222,21 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   const [pageSize, setPageSize] = useState<number>(20);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Intersect selection to authorized visible scope whenever tenant/filter/devices change
+  useEffect(() => {
+    const allowedIds = new Set(scopedDevices.map((d) => d.id));
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (allowedIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [scopedDevices]);
 
   // Toast feedback
   const [toastMsg, setToastMsg] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
@@ -211,17 +261,15 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   const [formName, setFormName] = useState('');
   const [formDeviceId, setFormDeviceId] = useState('');
   const [formKind, setFormKind] = useState<GatewayCategory>(
-    () => enabledCategories[0] || 'GPS'
+    () => enabledCategories[0] || ''
   );
   const [formCompany, setFormCompany] = useState(() =>
     currentCompany && currentCompany !== 'Platform Admin' && currentCompany !== 'Binary'
       ? currentCompany
-      : availableOrganizations[0] || MODAL_OWNERS[0]
+      : availableOrganizations[0] || ''
   );
 
-  const effectiveFormCompany = isPlatformAdmin
-    ? formCompany || availableOrganizations[0] || 'Adani Mundra'
-    : currentCompany;
+  const effectiveFormCompany = isPlatformAdmin ? formCompany : currentCompany;
 
   const formEnabledDeviceModels = useMemo(() => {
     return getEnabledModelsForCompanyName(effectiveFormCompany).filter(
@@ -229,30 +277,51 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     );
   }, [effectiveFormCompany, modelAccessTick]);
 
+  // Include historical referenced model in Edit mode even if later deactivated/disabled
+  const formSelectableDeviceModels = useMemo(() => {
+    if (!editingDevice) return formEnabledDeviceModels;
+    const historical = editingDevice.modelTypeId
+      ? getModelCategoryById(editingDevice.modelTypeId)
+      : undefined;
+    if (historical && !formEnabledDeviceModels.some((m) => m.id === historical.id)) {
+      return [historical, ...formEnabledDeviceModels];
+    }
+    return formEnabledDeviceModels;
+  }, [editingDevice, formEnabledDeviceModels]);
+
   const formEnabledCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(formEnabledDeviceModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : GATEWAY_CATEGORIES;
-  }, [formEnabledDeviceModels]);
+    const cats = Array.from(new Set(formSelectableDeviceModels.map((m) => m.typeName)));
+    if (editingDevice && editingDevice.kind && !cats.includes(editingDevice.kind)) {
+      return [editingDevice.kind, ...cats];
+    }
+    return cats;
+  }, [formSelectableDeviceModels, editingDevice]);
   const [formManufacturer, setFormManufacturer] = useState(
-    () => enabledDeviceModels[0]?.manufacturer || 'Teltonika'
+    () => enabledDeviceModels[0]?.manufacturer || ''
   );
   const [formModelText, setFormModelText] = useState(
-    () => enabledDeviceModels[0]?.modelReference || 'FMB120'
+    () => enabledDeviceModels[0]?.modelReference || ''
   );
   const [formModes, setFormModes] = useState<string[]>(() => {
     const first = enabledDeviceModels[0];
     if (first?.supportedModes && first.supportedModes.length > 0) return [first.supportedModes[0]];
     if (first?.deviceMode) return [first.deviceMode];
     if (first?.deviceFunction) return [first.deviceFunction];
-    return ['Standard'];
+    return [];
   });
   const [formSerial, setFormSerial] = useState('');
   const [formImei, setFormImei] = useState('');
   const [formIdentifierType, setFormIdentifierType] = useState('');
-  const [formProtocols, setFormProtocols] = useState<string[]>(['Codec8']);
-  const [formLocation, setFormLocation] = useState(MODAL_LOCATIONS[0]);
-  const [formLifecycle, setFormLifecycle] = useState<HardwareLifecycleStatus>('Active');
-  const [formChannelCount, setFormChannelCount] = useState<number>(4);
+  const [formProtocols, setFormProtocols] = useState<string[]>(() =>
+    enabledDeviceModels[0]?.supportedProtocols?.[0]
+      ? [enabledDeviceModels[0].supportedProtocols[0]]
+      : []
+  );
+  const [formLocation, setFormLocation] = useState('');
+  const [formLifecycle, setFormLifecycle] = useState<HardwareLifecycleStatus>('Inventory');
+  const [formChannelCount, setFormChannelCount] = useState<number>(
+    () => enabledDeviceModels[0]?.maxCameraChannels ?? 0
+  );
   const [formNotes, setFormNotes] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -306,13 +375,6 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   // Saved view creation state
   const [newViewName, setNewViewName] = useState('');
 
-  // Bulk operation state
-  const [bulkAction, setBulkAction] = useState<
-    'Update inventory status' | 'Decommission eligible' | 'Delete eligible'
-  >('Update inventory status');
-  const [bulkTargetStatus, setBulkTargetStatus] = useState<HardwareLifecycleStatus>('Active');
-  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
-
   // Direct upload state
   const deviceUpload = useDirectUploadState(activeDrawer === 'import');
 
@@ -320,58 +382,74 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     saveSavedModalViews(savedViews);
   }, [savedViews]);
 
-  // Derived form options from formEnabledDeviceModels for the selected category
+  // Derived form options from formSelectableDeviceModels for the selected category
   const modelsForSelectedCategory = useMemo(() => {
-    return formEnabledDeviceModels.filter((m) => m.typeName === formKind);
-  }, [formEnabledDeviceModels, formKind]);
+    return formSelectableDeviceModels.filter((m) => m.typeName === formKind);
+  }, [formSelectableDeviceModels, formKind]);
 
   const availableManufacturers = useMemo<string[]>(() => {
     if (modelsForSelectedCategory.length > 0) {
-      return Array.from(new Set(modelsForSelectedCategory.map((m) => m.manufacturer)));
+      const list = Array.from(new Set(modelsForSelectedCategory.map((m) => m.manufacturer).filter(Boolean)));
+      if (editingDevice?.manufacturer && !list.includes(editingDevice.manufacturer)) {
+        return [editingDevice.manufacturer, ...list];
+      }
+      return list;
     }
-    const catDef = DEVICE_CATALOGUE[formKind];
-    return catDef ? Object.keys(catDef.manufacturers) : ALL_MANUFACTURERS;
-  }, [modelsForSelectedCategory, formKind]);
+    if (editingDevice?.manufacturer) {
+      return [editingDevice.manufacturer];
+    }
+    return [];
+  }, [modelsForSelectedCategory, editingDevice]);
 
   const availableModels = useMemo<
     { model: string; defaultProtocol: string; channelCount: number }[]
   >(() => {
     if (modelsForSelectedCategory.length > 0) {
       const byMfg = modelsForSelectedCategory.filter((m) => m.manufacturer === formManufacturer);
-      const list = byMfg.length > 0 ? byMfg : modelsForSelectedCategory;
-      return list.map((m) => ({
+      return byMfg.map((m) => ({
         model: m.modelReference,
-        defaultProtocol: 'MQTT',
-        channelCount: 4
+        defaultProtocol: m.supportedProtocols?.[0] || '',
+        channelCount: m.maxCameraChannels != null ? m.maxCameraChannels : 0
       }));
     }
-    const catDef = DEVICE_CATALOGUE[formKind];
-    if (!catDef) {
-      return [{ model: formModelText || 'Standard', defaultProtocol: 'MQTT', channelCount: 1 }];
+    if (editingDevice && editingDevice.modelText) {
+      return [
+        {
+          model: editingDevice.modelText,
+          defaultProtocol: editingDevice.platformProtocol || '',
+          channelCount: editingDevice.channelCount || 0
+        }
+      ];
     }
-    return (
-      catDef.manufacturers[formManufacturer]?.models ||
-      catDef.manufacturers[availableManufacturers[0]]?.models ||
-      []
-    );
-  }, [
-    modelsForSelectedCategory,
-    formManufacturer,
-    formKind,
-    formModelText,
-    availableManufacturers
-  ]);
+    return [];
+  }, [modelsForSelectedCategory, formManufacturer, editingDevice]);
 
   const selectedModelSpec = useMemo(() => {
+    if (editingDevice?.modelTypeId) {
+      const exactHistorical = formSelectableDeviceModels.find(
+        (m) =>
+          m.id === editingDevice.modelTypeId &&
+          m.typeName === formKind &&
+          m.manufacturer === formManufacturer &&
+          m.modelReference === formModelText
+      );
+      if (exactHistorical) return exactHistorical;
+    }
     return (
-      modelsForSelectedCategory.find(
-        (m) => m.manufacturer === formManufacturer && m.modelReference === formModelText
-      ) ||
-      modelsForSelectedCategory[0] ||
-      formEnabledDeviceModels[0] ||
-      null
+      formSelectableDeviceModels.find(
+        (m) =>
+          m.typeName === formKind &&
+          m.manufacturer === formManufacturer &&
+          m.modelReference === formModelText
+      ) || null
     );
-  }, [modelsForSelectedCategory, formManufacturer, formModelText, formEnabledDeviceModels]);
+  }, [
+    editingDevice,
+    formSelectableDeviceModels,
+    formKind,
+    formManufacturer,
+    formModelText
+  ]);
 
   const availableModes = useMemo<string[]>(() => {
     if (selectedModelSpec) {
@@ -402,18 +480,20 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         )
       );
     }
-    const catDef = DEVICE_CATALOGUE[formKind];
-    if (catDef) {
-      return Array.from(
-        new Set(
-          [...catDef.modes, catDef.defaultModeOnSelect, ...customDeviceModes, ...formModes].filter(
-            Boolean
+    if (editingDevice) {
+      const catDef = DEVICE_CATALOGUE[formKind];
+      if (catDef) {
+        return Array.from(
+          new Set(
+            [...catDef.modes, catDef.defaultModeOnSelect, ...customDeviceModes, ...formModes].filter(
+              Boolean
+            )
           )
-        )
-      );
+        );
+      }
     }
-    return Array.from(new Set(['Standard', ...customDeviceModes, ...formModes].filter(Boolean)));
-  }, [selectedModelSpec, formKind, formModes, customDeviceModes]);
+    return Array.from(new Set([...customDeviceModes, ...formModes].filter(Boolean)));
+  }, [selectedModelSpec, editingDevice, formKind, formModes, customDeviceModes]);
 
   const normalizeProtocol = (val?: string) => {
     const trimmed = (val || '').trim();
@@ -423,11 +503,12 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
 
   const availableProtocols = useMemo<string[]>(() => {
     const fromSpec = selectedModelSpec?.supportedProtocols || [];
-    const fromCatDef = DEVICE_CATALOGUE[formKind]?.protocols || [];
-    const fromPresets = getPlatformProtocolPresets(
-      selectedModelSpec?.typeName || formKind,
-      selectedModelSpec?.deviceFunction
-    );
+    const fromCatDef = editingDevice ? DEVICE_CATALOGUE[formKind]?.protocols || [] : [];
+    const fromPresets = selectedModelSpec
+      ? getPlatformProtocolPresets(selectedModelSpec.typeName, selectedModelSpec.deviceFunction)
+      : editingDevice
+      ? getPlatformProtocolPresets(formKind)
+      : [];
     const baseList =
       fromSpec.length > 0
         ? fromSpec
@@ -440,7 +521,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       .filter(Boolean);
     const normalizedSelected = formProtocols.map(normalizeProtocol).filter(Boolean);
     return Array.from(new Set([...normalizedBase, ...normalizedSelected]));
-  }, [selectedModelSpec, formKind, formProtocols, customDeviceProtocols]);
+  }, [selectedModelSpec, editingDevice, formKind, formProtocols, customDeviceProtocols]);
 
   const availableIdentifierTypes = useMemo(() => {
     const fromSpec = getRecordIdentifierTypes(selectedModelSpec);
@@ -448,7 +529,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     if (editingDevice?.identifierType) {
       return getRecordIdentifierTypes({ identifierType: editingDevice.identifierType });
     }
-    return ['Serial Number'];
+    return editingDevice ? ['Serial Number'] : [];
   }, [selectedModelSpec, editingDevice]);
 
   const activeIdentifierType = useMemo(() => {
@@ -494,6 +575,14 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   useEffect(() => {
     if (editingDevice) return;
     if (formEnabledDeviceModels.length > 0) {
+      const currentMatches = formEnabledDeviceModels.some(
+        (m) =>
+          m.typeName === formKind &&
+          m.manufacturer === formManufacturer &&
+          m.modelReference === formModelText
+      );
+      if (currentMatches) return;
+
       const firstModel =
         formEnabledDeviceModels.find((m) => m.typeName === formKind) || formEnabledDeviceModels[0];
       const presets = getDeviceModePresets(firstModel.typeName, firstModel.deviceFunction);
@@ -502,7 +591,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         firstModel.deviceMode ||
         presets[0] ||
         firstModel.deviceFunction ||
-        'Standard';
+        '';
       setFormKind(firstModel.typeName);
       setFormManufacturer(firstModel.manufacturer);
       setFormModelText(firstModel.modelReference);
@@ -514,7 +603,18 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
           firstModel.deviceFunction
         )
       );
-      setFormChannelCount(4);
+      setFormIdentifierType(getRecordIdentifierTypes(firstModel)[0] || '');
+      setFormChannelCount(
+        firstModel.maxCameraChannels != null ? firstModel.maxCameraChannels : 0
+      );
+    } else {
+      setFormKind('');
+      setFormManufacturer('');
+      setFormModelText('');
+      setFormModes([]);
+      setFormProtocols([]);
+      setFormIdentifierType('');
+      setFormChannelCount(0);
     }
   }, [effectiveFormCompany, formEnabledDeviceModels, editingDevice]);
 
@@ -526,24 +626,23 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     const targetOrg = isPlatformAdmin
       ? filterCompany !== 'All'
         ? filterCompany
-        : availableOrganizations[0] || MODAL_OWNERS[0]
-      : currentCompany || MODAL_OWNERS[0];
+        : availableOrganizations[0] || ''
+      : currentCompany || '';
     const targetModels = getEnabledModelsForCompanyName(targetOrg).filter(
       (m) => m.category === 'Device'
     );
     const nextNum = 9001 + store.devices.length;
-    const firstEnabled = targetModels[0] || enabledDeviceModels[0];
-    const cat: GatewayCategory = firstEnabled ? firstEnabled.typeName : 'GPS';
-    const mfg = firstEnabled ? firstEnabled.manufacturer : 'Teltonika';
-    const fallbackModelObj = DEVICE_CATALOGUE['GPS'].manufacturers['Teltonika'].models[0];
-    const modelRef = firstEnabled ? firstEnabled.modelReference : fallbackModelObj.model;
+    const firstEnabled = targetModels[0];
+    const cat: GatewayCategory = firstEnabled ? firstEnabled.typeName : '';
+    const mfg = firstEnabled ? firstEnabled.manufacturer : '';
+    const modelRef = firstEnabled ? firstEnabled.modelReference : '';
     const modeVal = firstEnabled
       ? firstEnabled.supportedModes?.[0] ||
         firstEnabled.deviceMode ||
         getDeviceModePresets(firstEnabled.typeName, firstEnabled.deviceFunction)[0] ||
         firstEnabled.deviceFunction ||
-        'Standard'
-      : DEVICE_CATALOGUE['GPS'].defaultModeOnSelect;
+        ''
+      : '';
     const protoVals = firstEnabled
       ? resolveDefaultProtocolsForModel(
           firstEnabled.supportedProtocols,
@@ -551,7 +650,10 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
           firstEnabled.deviceFunction
         )
       : [];
-    const chCount = firstEnabled ? 4 : fallbackModelObj.channelCount;
+    const chCount =
+      firstEnabled && firstEnabled.maxCameraChannels != null
+        ? firstEnabled.maxCameraChannels
+        : 0;
 
     setFormName('');
     setFormDeviceId(`GTW-${nextNum}`);
@@ -564,11 +666,15 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     setFormImei('');
     setFormIdentifierType(getRecordIdentifierTypes(firstEnabled)[0] || '');
     setFormProtocols(protoVals);
-    setFormLocation(MODAL_LOCATIONS[0]);
-    setFormLifecycle('Active');
+    setFormLocation('');
+    setFormLifecycle('Inventory');
     setFormChannelCount(chCount);
     setFormNotes('');
-    setFormError(null);
+    setFormError(
+      firstEnabled
+        ? null
+        : 'No active Device models are enabled for this company. Enable a Device model in Company Model Access first.'
+    );
     setActiveDrawer('form');
   };
 
@@ -577,7 +683,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     setEditingDevice(record);
     setCustomDeviceModes(loadCustomDeviceModes());
     setCustomDeviceProtocols(loadCustomPlatformProtocols());
-    setFormName(record.name.replace(/\s*·\s*.*$/, ''));
+    setFormName(record.name);
     setFormDeviceId(record.deviceId);
     setFormKind(record.kind);
     setFormCompany(record.company);
@@ -592,8 +698,8 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         .map(normalizeProtocol)
         .filter(Boolean)
     );
-    setFormLocation(record.inventoryLocation);
-    setFormLifecycle(record.hardwareLifecycle);
+    setFormLocation(record.inventoryLocation || '');
+    setFormLifecycle(getEffectiveStatus(record));
     setFormChannelCount(record.channelCount);
     setFormNotes(record.notes);
     setFormError(null);
@@ -603,12 +709,12 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   // Dynamic category change in form
   const handleCategoryChange = (newKind: GatewayCategory) => {
     setFormKind(newKind);
-    const matchingEnabled = formEnabledDeviceModels.filter((m) => m.typeName === newKind);
+    const matchingEnabled = formSelectableDeviceModels.filter((m) => m.typeName === newKind);
     if (matchingEnabled.length > 0) {
       const first = matchingEnabled[0];
       const presets = getDeviceModePresets(first.typeName, first.deviceFunction);
       const defaultMode =
-        first.supportedModes?.[0] || first.deviceMode || presets[0] || first.deviceFunction || 'Standard';
+        first.supportedModes?.[0] || first.deviceMode || presets[0] || first.deviceFunction || '';
       setFormManufacturer(first.manufacturer);
       setFormModelText(first.modelReference);
       setFormModes(defaultMode ? [defaultMode] : []);
@@ -619,39 +725,29 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
           first.deviceFunction
         )
       );
-      setFormChannelCount(4);
+      setFormIdentifierType(getRecordIdentifierTypes(first)[0] || '');
+      setFormChannelCount(first.maxCameraChannels != null ? first.maxCameraChannels : 0);
       return;
     }
-    const catDef = DEVICE_CATALOGUE[newKind];
-    if (catDef) {
-      const firstMfg = Object.keys(catDef.manufacturers)[0];
-      const firstModel = catDef.manufacturers[firstMfg].models[0];
-      setFormManufacturer(firstMfg);
-      setFormModelText(firstModel.model);
-      setFormModes(catDef.defaultModeOnSelect ? [catDef.defaultModeOnSelect] : []);
-      setFormProtocols(
-        resolveDefaultProtocolsForModel(
-          catDef.protocols,
-          newKind,
-          undefined,
-          firstModel.defaultProtocol
-        )
-      );
-      setFormChannelCount(firstModel.channelCount);
-    }
+    setFormManufacturer('');
+    setFormModelText('');
+    setFormModes([]);
+    setFormProtocols([]);
+    setFormIdentifierType('');
+    setFormChannelCount(0);
   };
 
   // Dynamic manufacturer change in form
   const handleManufacturerChange = (newMfg: string) => {
     setFormManufacturer(newMfg);
-    const matchingEnabled = formEnabledDeviceModels.filter(
+    const matchingEnabled = formSelectableDeviceModels.filter(
       (m) => m.typeName === formKind && m.manufacturer === newMfg
     );
     if (matchingEnabled.length > 0) {
       const first = matchingEnabled[0];
       const presets = getDeviceModePresets(first.typeName, first.deviceFunction);
       const defaultMode =
-        first.supportedModes?.[0] || first.deviceMode || presets[0] || first.deviceFunction || 'Standard';
+        first.supportedModes?.[0] || first.deviceMode || presets[0] || first.deviceFunction || '';
       setFormModelText(first.modelReference);
       setFormModes(defaultMode ? [defaultMode] : []);
       setFormProtocols(
@@ -661,30 +757,21 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
           first.deviceFunction
         )
       );
-      setFormChannelCount(4);
+      setFormIdentifierType(getRecordIdentifierTypes(first)[0] || '');
+      setFormChannelCount(first.maxCameraChannels != null ? first.maxCameraChannels : 0);
       return;
     }
-    const catDef = DEVICE_CATALOGUE[formKind];
-    const mfgEntry = catDef?.manufacturers[newMfg];
-    if (mfgEntry && mfgEntry.models.length > 0) {
-      const firstModel = mfgEntry.models[0];
-      setFormModelText(firstModel.model);
-      setFormProtocols(
-        resolveDefaultProtocolsForModel(
-          catDef.protocols,
-          formKind,
-          undefined,
-          firstModel.defaultProtocol
-        )
-      );
-      setFormChannelCount(firstModel.channelCount);
-    }
+    setFormModelText('');
+    setFormModes([]);
+    setFormProtocols([]);
+    setFormIdentifierType('');
+    setFormChannelCount(0);
   };
 
   // Dynamic model change in form
   const handleModelChange = (newModel: string) => {
     setFormModelText(newModel);
-    const matchedEnabled = formEnabledDeviceModels.find(
+    const matchedEnabled = formSelectableDeviceModels.find(
       (m) =>
         m.typeName === formKind &&
         m.manufacturer === formManufacturer &&
@@ -697,7 +784,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         matchedEnabled.deviceMode ||
         presets[0] ||
         matchedEnabled.deviceFunction ||
-        'Standard';
+        '';
       setFormModes(defaultMode ? [defaultMode] : []);
       setFormProtocols(
         resolveDefaultProtocolsForModel(
@@ -706,23 +793,13 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
           matchedEnabled.deviceFunction
         )
       );
-      setFormChannelCount(4);
+      setFormIdentifierType(getRecordIdentifierTypes(matchedEnabled)[0] || '');
+      setFormChannelCount(
+        matchedEnabled.maxCameraChannels != null ? matchedEnabled.maxCameraChannels : 0
+      );
       return;
     }
-    const catDef = DEVICE_CATALOGUE[formKind];
-    const mfgEntry = catDef?.manufacturers[formManufacturer];
-    const found = mfgEntry?.models.find((m) => m.model === newModel);
-    if (found) {
-      setFormProtocols(
-        resolveDefaultProtocolsForModel(
-          catDef.protocols,
-          formKind,
-          undefined,
-          found.defaultProtocol
-        )
-      );
-      setFormChannelCount(found.channelCount);
-    }
+    setFormChannelCount(0);
   };
 
   // Save Device (Create or Edit)
@@ -730,15 +807,72 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     e.preventDefault();
     setFormError(null);
 
-    const trimmedName = formName.trim().replace(/\s*·\s*.*$/, '');
+    const targetCompanyRaw = isPlatformAdmin ? formCompany.trim() : currentCompany.trim();
+    const resolvedOrg = resolveClientCompanyByNameOrId(targetCompanyRaw);
+    if (
+      !resolvedOrg ||
+      resolvedOrg.isPlatformOwner ||
+      !isCompanyEligibleForNewRegistration(resolvedOrg)
+    ) {
+      if (!editingDevice || !resolvedOrg || resolvedOrg.isPlatformOwner) {
+        setFormError(
+          `Organization "${targetCompanyRaw || 'Unknown'}" is not an eligible active client company for device registration.`
+        );
+        return;
+      }
+    }
+
+    const finalCompanyName = resolvedOrg.name;
+    const enabledModelsForTarget = getEnabledModelsForCompanyName(finalCompanyName).filter(
+      (m) => m.category === 'Device'
+    );
+    const exactEnabledModel = enabledModelsForTarget.find(
+      (m) =>
+        m.typeName === formKind &&
+        m.manufacturer === formManufacturer &&
+        m.modelReference === formModelText
+    );
+
+    const isHistoricalModelUnchanged =
+      Boolean(editingDevice) &&
+      editingDevice!.kind === formKind &&
+      editingDevice!.manufacturer === formManufacturer &&
+      editingDevice!.modelText === formModelText;
+
+    if (!editingDevice && !exactEnabledModel) {
+      setFormError(
+        enabledModelsForTarget.length === 0
+          ? `No active Device models are currently enabled for "${finalCompanyName}". Approve models or verify company status in Company Management.`
+          : `Selected combination (${formKind || '—'} · ${formManufacturer || '—'} · ${formModelText || '—'}) is not an active enabled model for "${finalCompanyName}".`
+      );
+      return;
+    }
+
+    if (editingDevice && !isHistoricalModelUnchanged && !exactEnabledModel) {
+      setFormError(
+        `Cannot reassign device to an inactive or disabled model (${formKind || '—'} · ${formManufacturer || '—'} · ${formModelText || '—'}) for "${finalCompanyName}".`
+      );
+      return;
+    }
+
+    const matchedSpec =
+      exactEnabledModel ||
+      (isHistoricalModelUnchanged ? selectedModelSpec : null);
+
+    const trimmedName = formName.trim();
     const trimmedId = formDeviceId.trim();
-    const supportsImei = availableIdentifierTypes.some((t) => t.toUpperCase() === 'IMEI');
-    const supportsSerial = availableIdentifierTypes.some((t) => t.toUpperCase() !== 'IMEI');
-    const requiresImei = activeIdentifierType.toUpperCase() === 'IMEI';
-    const effectiveSerial =
-      formSerial.trim() || (supportsSerial || !requiresImei ? trimmedId : '');
-    const effectiveImei =
-      formImei.trim() || (supportsImei && requiresImei ? trimmedId : '');
+    const effectiveSerial = formSerial.trim();
+    const effectiveImei = formImei.trim();
+
+    const specIdTypes = getRecordIdentifierTypes(matchedSpec);
+    const activeIdType =
+      specIdTypes.includes(activeIdentifierType)
+        ? activeIdentifierType
+        : specIdTypes[0] || editingDevice?.identifierType || 'Serial Number';
+    const supportsImei = specIdTypes.some((t) => t.toUpperCase() === 'IMEI');
+    const supportsNonImei = specIdTypes.some(
+      (t) => t.toUpperCase() !== 'IMEI' && t.toUpperCase() !== 'DEVICE ID'
+    );
 
     const singleProtocol = formProtocols[0] ? formProtocols[0].trim() : '';
 
@@ -749,49 +883,83 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       return;
     }
 
-    // Cross-module uniqueness across both devices AND sensors
+    if (supportsImei && !supportsNonImei && !effectiveImei) {
+      setFormError(`Please enter a valid IMEI required for ${matchedSpec?.modelReference || 'this model'}.`);
+      return;
+    }
+
+    if (!supportsImei && supportsNonImei && !effectiveSerial) {
+      setFormError(`Please enter a valid ${activeIdType} required for ${matchedSpec?.modelReference || 'this model'}.`);
+      return;
+    }
+
+    if (supportsImei && supportsNonImei && !effectiveImei && !effectiveSerial) {
+      setFormError(
+        `Please enter IMEI or ${
+          specIdTypes.find((t) => t.toUpperCase() !== 'IMEI' && t.toUpperCase() !== 'DEVICE ID') ||
+          'Serial Number'
+        } for ${matchedSpec?.modelReference || 'this model'}.`
+      );
+      return;
+    }
+
+    // Cross-module uniqueness across devices AND sensors (checking non-empty physical identifiers)
     const duplicateInDevices = store.devices.some(
       (d) =>
         d.id !== editingDevice?.id &&
         (d.deviceId.toLowerCase() === trimmedId.toLowerCase() ||
-          (effectiveSerial && d.serial.toLowerCase() === effectiveSerial.toLowerCase()) ||
-          (effectiveImei && d.imei && d.imei.toLowerCase() === effectiveImei.toLowerCase()))
+          (effectiveSerial !== '' && d.serial.toLowerCase() === effectiveSerial.toLowerCase()) ||
+          (effectiveImei !== '' && d.imei && d.imei.toLowerCase() === effectiveImei.toLowerCase()))
     );
     const duplicateInSensors = store.sensors.some(
       (s) =>
         s.deviceId.toLowerCase() === trimmedId.toLowerCase() ||
-        (effectiveSerial && s.serial.toLowerCase() === effectiveSerial.toLowerCase())
+        (effectiveSerial !== '' && s.serial.toLowerCase() === effectiveSerial.toLowerCase())
     );
 
     if (duplicateInDevices || duplicateInSensors) {
-      setFormError('Device ID must be unique across Devices and Sensors.');
+      setFormError('Device ID, Serial Number, and IMEI must be unique across Devices and Sensors.');
       return;
     }
 
-    const catDef = DEVICE_CATALOGUE[formKind];
-    const mfgEntry = catDef?.manufacturers[formManufacturer];
-    const modelObj = mfgEntry?.models.find((m) => m.model === formModelText);
-    const capabilities = modelObj
-      ? [...modelObj.capabilities]
-      : selectedModelSpec?.connectivity && selectedModelSpec.connectivity.length > 0
-      ? [...selectedModelSpec.connectivity]
-      : ['Cellular'];
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const capabilities =
+      matchedSpec?.connectivity && matchedSpec.connectivity.length > 0
+        ? [...matchedSpec.connectivity]
+        : isHistoricalModelUnchanged && editingDevice
+        ? [...(editingDevice.capabilities || [])]
+        : [];
 
+    const resolvedChannelCount =
+      matchedSpec?.maxCameraChannels != null
+        ? matchedSpec.maxCameraChannels
+        : isHistoricalModelUnchanged && editingDevice
+        ? editingDevice.channelCount
+        : 0;
+
+    const resolvedSimSlots =
+      matchedSpec?.simSupported === 'Yes'
+        ? editingDevice?.simSlots && editingDevice.simSlots > 0
+          ? editingDevice.simSlots
+          : 1
+        : matchedSpec?.simSupported === 'No'
+        ? 0
+        : editingDevice?.simSlots;
+
+    const todayStr = new Date().toISOString().slice(0, 10);
     const modeSummary = formModes.join(', ');
     const protocolSummary = singleProtocol;
     const protocolArray = singleProtocol ? [singleProtocol] : [];
 
     if (editingDevice) {
-      const updatedRecord: DeviceRecord = {
+      const candidateRecord: DeviceRecord = {
         ...editingDevice,
         name: trimmedName,
         deviceId: trimmedId,
         kind: formKind,
         manufacturer: formManufacturer,
         modelText: formModelText,
-        modelTypeId: selectedModelSpec?.id || editingDevice.modelTypeId,
-        identifierType: activeIdentifierType,
+        modelTypeId: matchedSpec?.id || editingDevice.modelTypeId,
+        identifierType: activeIdType,
         mode: modeSummary,
         modes: [...formModes],
         serial: effectiveSerial,
@@ -799,12 +967,16 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         capabilities,
         platformProtocol: protocolSummary,
         platformProtocols: protocolArray,
-        company: formCompany,
+        company: finalCompanyName,
         inventoryLocation: formLocation,
-        hardwareLifecycle: formLifecycle,
-        channelCount: Number(formChannelCount) || 1,
+        channelCount: resolvedChannelCount,
+        simSlots: resolvedSimSlots,
         notes: formNotes.trim(),
         updatedAt: todayStr
+      };
+      const updatedRecord: DeviceRecord = {
+        ...candidateRecord,
+        hardwareLifecycle: deriveDeviceStatus(candidateRecord, store)
       };
       setStore((prev) => ({
         ...prev,
@@ -820,8 +992,8 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         role: 'gateway',
         manufacturer: formManufacturer,
         modelText: formModelText,
-        modelTypeId: selectedModelSpec?.id,
-        identifierType: activeIdentifierType,
+        modelTypeId: matchedSpec!.id,
+        identifierType: activeIdType,
         mode: modeSummary,
         modes: [...formModes],
         serial: effectiveSerial,
@@ -829,14 +1001,14 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         capabilities,
         platformProtocol: protocolSummary,
         platformProtocols: protocolArray,
-        company: isPlatformAdmin
-          ? formCompany || availableOrganizations[0] || 'Adani Mundra'
-          : currentCompany || formCompany,
+        company: finalCompanyName,
         inventoryLocation: formLocation,
-        hardwareLifecycle: formLifecycle,
+        hardwareLifecycle: 'Inventory',
+        statusOverride: null,
         registeredAt: todayStr,
         updatedAt: todayStr,
-        channelCount: Number(formChannelCount) || 1,
+        channelCount: resolvedChannelCount,
+        ...(resolvedSimSlots !== undefined ? { simSlots: resolvedSimSlots } : {}),
         notes: formNotes.trim()
       };
       setStore((prev) => ({
@@ -845,7 +1017,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       }));
       setSortKey('');
       setCurrentPage(1);
-      showToast(`Device ${trimmedId} created.`);
+      showToast(`Device ${trimmedId} created (Status: Inventory).`);
     }
 
     setActiveDrawer(null);
@@ -854,17 +1026,12 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   // Filtered & Sorted Devices (strictly scoped to active client when not Platform Admin)
   const filteredDevices = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    const companyTarget =
-      !isPlatformAdmin && currentCompany
-        ? currentCompany.trim().toLowerCase()
-        : isPlatformAdmin && filterCompany !== 'All'
-        ? filterCompany.trim().toLowerCase()
-        : null;
-    return store.devices.filter((d) => {
-      if (companyTarget && (d.company || '').trim().toLowerCase() !== companyTarget) return false;
-      if (filterKind !== 'All' && d.kind !== filterKind) return false;
-      if (filterManufacturer !== 'All' && d.manufacturer !== filterManufacturer) return false;
-      if (filterLifecycle !== 'All' && d.hardwareLifecycle !== filterLifecycle) return false;
+    return scopedDevices.filter((d) => {
+      const effStatus = getEffectiveStatus(d);
+      const mapStatus = mappingStatusById.get(d.id) || 'Unmapped';
+      if (!matchesDevicesFilters(d, advancedFilters, effStatus, mapStatus, isPlatformAdmin)) {
+        return false;
+      }
       if (q) {
         const hay = [
           d.name,
@@ -875,7 +1042,8 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
           d.mode,
           d.serial,
           d.imei,
-          d.company
+          d.company,
+          d.inventoryLocation
         ]
           .join(' ')
           .toLowerCase();
@@ -883,20 +1051,33 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       }
       return true;
     });
-  }, [store.devices, currentCompany, isPlatformAdmin, filterCompany, searchQuery, filterKind, filterManufacturer, filterLifecycle]);
+  }, [
+    scopedDevices,
+    searchQuery,
+    advancedFilters,
+    effectiveStatusById,
+    mappingStatusById,
+    isPlatformAdmin
+  ]);
 
   const sortedDevices = useMemo(() => {
     if (!sortKey) return filteredDevices;
     const copy = [...filteredDevices];
     copy.sort((a, b) => {
-      const av = String((a as any)[sortKey] ?? '').toLowerCase();
-      const bv = String((b as any)[sortKey] ?? '').toLowerCase();
+      const av =
+        sortKey === 'hardwareLifecycle'
+          ? getEffectiveStatus(a).toLowerCase()
+          : String((a as any)[sortKey] ?? '').toLowerCase();
+      const bv =
+        sortKey === 'hardwareLifecycle'
+          ? getEffectiveStatus(b).toLowerCase()
+          : String((b as any)[sortKey] ?? '').toLowerCase();
       if (av < bv) return sortDir === 'asc' ? -1 : 1;
       if (av > bv) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
     return copy;
-  }, [filteredDevices, sortKey, sortDir]);
+  }, [filteredDevices, sortKey, sortDir, effectiveStatusById]);
 
   const totalRecords = sortedDevices.length;
   const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
@@ -926,9 +1107,13 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
 
   const activeFilterCount =
     (isPlatformAdmin && filterCompany !== 'All' ? 1 : 0) +
-    (filterKind !== 'All' ? 1 : 0) +
-    (filterManufacturer !== 'All' ? 1 : 0) +
-    (filterLifecycle !== 'All' ? 1 : 0);
+    countActiveDeviceFilters(advancedFilters, isPlatformAdmin);
+
+  const clearAllDeviceFilters = () => {
+    setFilterCompany('All');
+    setAdvancedFilters(DEFAULT_DEVICES_FILTERS);
+    setCurrentPage(1);
+  };
 
   // Selection helpers
   const allCurrentSelected =
@@ -972,10 +1157,18 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
 
   const handleConfirmDeleteDevice = () => {
     if (!deviceToDelete) return;
+    const refs = getDeviceMappingReferences(deviceToDelete.id, store);
+    if (refs.hasAnyReference) {
+      showToast(
+        `Cannot delete ${deviceToDelete.deviceId}: referenced in ${refs.allConnections.length || refs.allBindings.length || refs.allAllocations.length} Asset Mapping record(s).`,
+        'error'
+      );
+      return;
+    }
     const idToDelete = deviceToDelete.id;
     setStore((prev) => ({
       ...prev,
-      devices: prev.devices.filter((d) => d.id !== idToDelete),
+      devices: prev.devices.filter((d) => d.id !== idToDelete)
     }));
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -990,90 +1183,124 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     }
   };
 
-  // Bulk eligibility calculation
+  // Selected devices strictly scoped to authorized visible tenant records
   const selectedDeviceRecords = useMemo(
-    () => store.devices.filter((d) => selectedIds.has(d.id)),
-    [store.devices, selectedIds]
+    () => scopedDevices.filter((d) => selectedIds.has(d.id)),
+    [scopedDevices, selectedIds]
   );
 
-  const bulkEligibility = useMemo(() => {
-    const eligible: DeviceRecord[] = [];
-    const skipped: { record: DeviceRecord; reason: string }[] = [];
-
-    selectedDeviceRecords.forEach((dev) => {
-      if (bulkAction === 'Decommission eligible' || bulkAction === 'Delete eligible') {
-        const hasActiveConn = store.connections.some(
-          (c) =>
-            c.status === 'Active' &&
-            (c.memberIds?.includes(dev.id) || c.hardwareId === dev.id || c.parentId === dev.id)
-        );
-        if (hasActiveConn) {
-          skipped.push({
-            record: dev,
-            reason: 'Linked to an Active connection in Modal Mapping'
-          });
-        } else {
-          eligible.push(dev);
-        }
-      } else {
-        eligible.push(dev);
-      }
-    });
-
-    return { eligible, skipped };
-  }, [selectedDeviceRecords, bulkAction, store.connections]);
-
-  const executeBulkDeleteDevices = (reason?: string) => {
-    const eligibleIds = new Set(bulkEligibility.eligible.map((d) => d.id));
-    if (eligibleIds.size === 0) return;
-
-    setStore((prev) => ({
-      ...prev,
-      devices: prev.devices.filter((d) => !eligibleIds.has(d.id))
+  const handleBulkExportSelected = (recordsToExport: DeviceRecord[]) => {
+    if (recordsToExport.length === 0) return;
+    const exportRows = recordsToExport.map((d) => ({
+      ...d,
+      hardwareLifecycle: getEffectiveStatus(d)
     }));
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      eligibleIds.forEach((id) => next.delete(id));
-      return next;
-    });
-    if (inspectedDevice && eligibleIds.has(inspectedDevice.id)) {
-      setInspectedDevice(null);
-    }
+    downloadModalCsv('FleetRobo_devices_selected_export.csv', visibleColumns, exportRows);
     showToast(
-      `Deleted ${eligibleIds.size} device(s)${bulkEligibility.skipped.length > 0 ? `, ${bulkEligibility.skipped.length} skipped` : ''}${reason ? ` · ${reason}` : ''}`
+      `Exported ${exportRows.length} selected Device record(s) to FleetRobo_devices_selected_export.csv`
     );
-    setPendingBulkDelete(false);
-    setActiveDrawer(null);
   };
 
-  const handleApplyBulk = () => {
-    if (selectedDeviceRecords.length === 0) return;
-    if (bulkAction === 'Delete eligible') {
-      if (bulkEligibility.eligible.length === 0) return;
-      setPendingBulkDelete(true);
+  const handleApplyDevicesBulkUpdate = (
+    mode: Exclude<DevicesBulkActionMode, 'export_selected'>,
+    eligibleIds: string[],
+    options?: { targetLocation?: string }
+  ) => {
+    const allowedScopeIds = new Set(scopedDevices.map((d) => d.id));
+    const safeIds = new Set(eligibleIds.filter((id) => allowedScopeIds.has(id)));
+    if (safeIds.size === 0) return;
+
+    const nowMs = Date.now();
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    if (mode === 'delete') {
+      const actuallyDeleted = new Set<string>();
+      setStore((prev) => ({
+        ...prev,
+        devices: prev.devices.filter((d) => {
+          if (!safeIds.has(d.id)) return true;
+          const refs = getDeviceMappingReferences(d.id, prev, nowMs);
+          if (refs.hasAnyReference) return true;
+          actuallyDeleted.add(d.id);
+          return false;
+        })
+      }));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        safeIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      if (inspectedDevice && safeIds.has(inspectedDevice.id)) {
+        setInspectedDevice(null);
+      }
+      showToast(`Deleted ${safeIds.size} unreferenced device(s).`);
       return;
     }
-    const eligibleIds = new Set(bulkEligibility.eligible.map((d) => d.id));
-    const todayStr = new Date().toISOString().slice(0, 10);
 
     setStore((prev) => ({
       ...prev,
       devices: prev.devices.map((d) => {
-        if (!eligibleIds.has(d.id)) return d;
-        if (bulkAction === 'Update inventory status') {
-          return { ...d, hardwareLifecycle: bulkTargetStatus, updatedAt: todayStr };
+        if (!safeIds.has(d.id)) return d;
+        const refs = getDeviceMappingReferences(d.id, prev, nowMs);
+        const eff = deriveDeviceStatus(d, prev, nowMs);
+
+        if (mode === 'send_maintenance') {
+          if (eff === 'Decommissioned' || eff === 'In Maintenance' || refs.hasActiveOrScheduledReference) {
+            return d;
+          }
+          return {
+            ...d,
+            statusOverride: 'In Maintenance',
+            hardwareLifecycle: 'In Maintenance',
+            updatedAt: todayStr
+          };
         }
-        if (bulkAction === 'Decommission eligible') {
-          return { ...d, hardwareLifecycle: 'Decommissioned', updatedAt: todayStr };
+
+        if (mode === 'return_service') {
+          if (eff !== 'In Maintenance') return d;
+          const cleared: DeviceRecord = { ...d, statusOverride: null };
+          const recalc = deriveDeviceStatus(cleared, prev, nowMs);
+          return {
+            ...cleared,
+            hardwareLifecycle: recalc,
+            updatedAt: todayStr
+          };
         }
+
+        if (mode === 'update_location') {
+          if (eff === 'Decommissioned') return d;
+          const nextLoc = (options?.targetLocation || '').trim();
+          if (!nextLoc) return d;
+          return {
+            ...d,
+            inventoryLocation: nextLoc,
+            updatedAt: todayStr
+          };
+        }
+
+        if (mode === 'decommission') {
+          if (eff === 'Decommissioned' || refs.hasActiveOrScheduledReference) return d;
+          return {
+            ...d,
+            statusOverride: 'Decommissioned',
+            hardwareLifecycle: 'Decommissioned',
+            updatedAt: todayStr
+          };
+        }
+
         return d;
       })
     }));
 
-    showToast(
-      `Bulk action completed: ${bulkEligibility.eligible.length} updated, ${bulkEligibility.skipped.length} skipped.`
-    );
-    setActiveDrawer(null);
+    if (mode === 'send_maintenance') {
+      showToast(`Moved ${safeIds.size} device(s) to In Maintenance.`);
+    } else if (mode === 'return_service') {
+      showToast(`Returned ${safeIds.size} device(s) to service and recalculated status.`);
+    } else if (mode === 'update_location') {
+      showToast(`Updated Inventory Location on ${safeIds.size} device(s).`);
+    } else if (mode === 'decommission') {
+      showToast(`Decommissioned ${safeIds.size} device(s).`);
+    }
   };
 
   // Direct CSV/JSON upload execution
@@ -1084,50 +1311,223 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       return;
     }
 
-    const valid: Partial<DeviceRecord>[] = [];
+    const valid: DeviceRecord[] = [];
     const invalid: { line: number; reason: string }[] = [];
     const seenIds = new Set([
       ...store.devices.map((d) => d.deviceId.toLowerCase()),
       ...store.sensors.map((s) => s.deviceId.toLowerCase())
     ]);
-    const seenSerials = new Set([
-      ...store.devices.map((d) => d.serial.toLowerCase()),
-      ...store.sensors.map((s) => s.serial.toLowerCase())
-    ]);
+    const seenSerials = new Set(
+      [
+        ...store.devices.map((d) => d.serial.trim().toLowerCase()),
+        ...store.sensors.map((s) => s.serial.trim().toLowerCase())
+      ].filter(Boolean)
+    );
+    const seenImeis = new Set(
+      store.devices.map((d) => (d.imei || '').trim().toLowerCase()).filter(Boolean)
+    );
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    const validateAndBuildRow = (
+      lineNum: number,
+      rowData: {
+        name: string;
+        deviceId: string;
+        kind: string;
+        manufacturer: string;
+        modelText: string;
+        mode: string;
+        serial: string;
+        imei: string;
+        company: string;
+        inventoryLocation: string;
+        hardwareLifecycle: string;
+      }
+    ) => {
+      const name = rowData.name.trim();
+      const deviceId = rowData.deviceId.trim();
+      const kind = rowData.kind.trim();
+      const manufacturer = rowData.manufacturer.trim();
+      const modelText = rowData.modelText.trim();
+      const serial = rowData.serial.trim();
+      const imei = rowData.imei.trim();
+      const rawCompany = rowData.company.trim();
+      const requestedStatus = rowData.hardwareLifecycle.trim();
+
+      if (!name || !deviceId || !kind || !manufacturer || !modelText) {
+        invalid.push({
+          line: lineNum,
+          reason: 'Row requires Device name, Device ID, Device category, Manufacturer, and Model.'
+        });
+        return;
+      }
+
+      const targetCompanyName = !isPlatformAdmin
+        ? currentCompany
+        : rawCompany;
+      if (!targetCompanyName) {
+        invalid.push({ line: lineNum, reason: 'Owner / Organization Name is required.' });
+        return;
+      }
+      if (
+        !isPlatformAdmin &&
+        rawCompany &&
+        rawCompany.toLowerCase() !== currentCompany.trim().toLowerCase()
+      ) {
+        invalid.push({
+          line: lineNum,
+          reason: `Cross-tenant import blocked: row company "${rawCompany}" does not match "${currentCompany}".`
+        });
+        return;
+      }
+
+      const resolvedOrg = resolveClientCompanyByNameOrId(targetCompanyName);
+      if (
+        !resolvedOrg ||
+        resolvedOrg.isPlatformOwner ||
+        !isCompanyEligibleForNewRegistration(resolvedOrg)
+      ) {
+        invalid.push({
+          line: lineNum,
+          reason: `Invalid or ineligible company "${targetCompanyName}".`
+        });
+        return;
+      }
+
+      const enabledForCompany = getEnabledModelsForCompanyName(resolvedOrg.name).filter(
+        (m) => m.category === 'Device'
+      );
+      const matchedModel = enabledForCompany.find(
+        (m) =>
+          m.typeName.toLowerCase() === kind.toLowerCase() &&
+          m.manufacturer.toLowerCase() === manufacturer.toLowerCase() &&
+          m.modelReference.toLowerCase() === modelText.toLowerCase()
+      );
+      if (!matchedModel) {
+        invalid.push({
+          line: lineNum,
+          reason: `Model "${kind} · ${manufacturer} · ${modelText}" is not active and enabled for "${resolvedOrg.name}".`
+        });
+        return;
+      }
+
+      const identTypes = getRecordIdentifierTypes(matchedModel);
+      const primaryIdentType = identTypes[0] || matchedModel.identifierType || 'Serial Number';
+      const supportsImei = identTypes.some((t) => t.toUpperCase() === 'IMEI');
+      const supportsNonImei = identTypes.some(
+        (t) => t.toUpperCase() !== 'IMEI' && t.toUpperCase() !== 'DEVICE ID'
+      );
+
+      if (supportsImei && !supportsNonImei && !imei) {
+        invalid.push({
+          line: lineNum,
+          reason: `IMEI is required for model ${matchedModel.modelReference}.`
+        });
+        return;
+      }
+      if (!supportsImei && supportsNonImei && !serial) {
+        invalid.push({
+          line: lineNum,
+          reason: `${primaryIdentType} is required for model ${matchedModel.modelReference}.`
+        });
+        return;
+      }
+      if (supportsImei && supportsNonImei && !imei && !serial) {
+        invalid.push({
+          line: lineNum,
+          reason: `Provide IMEI or ${primaryIdentType} for model ${matchedModel.modelReference}.`
+        });
+        return;
+      }
+
+      if (seenIds.has(deviceId.toLowerCase())) {
+        invalid.push({ line: lineNum, reason: `Duplicate Device ID (${deviceId}).` });
+        return;
+      }
+      if (serial && seenSerials.has(serial.toLowerCase())) {
+        invalid.push({ line: lineNum, reason: `Duplicate Serial (${serial}).` });
+        return;
+      }
+      if (imei && seenImeis.has(imei.toLowerCase())) {
+        invalid.push({ line: lineNum, reason: `Duplicate IMEI (${imei}).` });
+        return;
+      }
+
+      seenIds.add(deviceId.toLowerCase());
+      if (serial) seenSerials.add(serial.toLowerCase());
+      if (imei) seenImeis.add(imei.toLowerCase());
+
+      // Never allow import-specified forced Active on brand new devices
+      let statusOverride: 'In Maintenance' | 'Decommissioned' | null = null;
+      let initialLifecycle: EffectiveDeviceStatus = 'Inventory';
+      if (requestedStatus === 'In Maintenance') {
+        statusOverride = 'In Maintenance';
+        initialLifecycle = 'In Maintenance';
+      } else if (requestedStatus === 'Decommissioned') {
+        statusOverride = 'Decommissioned';
+        initialLifecycle = 'Decommissioned';
+      }
+
+      const modeList = rowData.mode
+        ? rowData.mode.split(',').map((s) => s.trim()).filter(Boolean)
+        : matchedModel.supportedModes?.[0]
+        ? [matchedModel.supportedModes[0]]
+        : matchedModel.deviceMode
+        ? [matchedModel.deviceMode]
+        : [];
+      const firstProto = matchedModel.supportedProtocols?.[0] || '';
+
+      valid.push({
+        id: `dev-import-${Date.now()}-${lineNum}-${Math.random().toString(36).slice(2, 6)}`,
+        deviceId,
+        name,
+        kind: matchedModel.typeName,
+        role: 'gateway',
+        manufacturer: matchedModel.manufacturer,
+        modelText: matchedModel.modelReference,
+        modelTypeId: matchedModel.id,
+        identifierType: primaryIdentType,
+        mode: modeList.join(', '),
+        modes: modeList,
+        serial,
+        imei,
+        capabilities: matchedModel.connectivity ? [...matchedModel.connectivity] : [],
+        platformProtocol: firstProto,
+        platformProtocols: firstProto ? [firstProto] : [],
+        company: resolvedOrg.name,
+        inventoryLocation: rowData.inventoryLocation.trim(),
+        hardwareLifecycle: initialLifecycle,
+        statusOverride,
+        registeredAt: todayStr,
+        updatedAt: todayStr,
+        channelCount: matchedModel.maxCameraChannels != null ? matchedModel.maxCameraChannels : 0,
+        ...(matchedModel.simSupported === 'Yes'
+          ? { simSlots: 1 }
+          : matchedModel.simSupported === 'No'
+          ? { simSlots: 0 }
+          : {}),
+        notes: 'Imported via bulk CSV/JSON'
+      });
+    };
 
     if (fmt === 'json') {
       try {
         const parsed = JSON.parse(raw);
         const arr = Array.isArray(parsed) ? parsed : [parsed];
         arr.forEach((item, idx) => {
-          const deviceId = String(item.deviceId || '').trim();
-          const name = String(item.name || '').trim();
-          const serial = String(item.serial || '').trim();
-          if (!deviceId || !name || !serial) {
-            invalid.push({ line: idx + 1, reason: 'Missing required name, deviceId, or serial' });
-            return;
-          }
-          if (seenIds.has(deviceId.toLowerCase()) || seenSerials.has(serial.toLowerCase())) {
-            invalid.push({
-              line: idx + 1,
-              reason: `Duplicate deviceId (${deviceId}) or serial (${serial})`
-            });
-            return;
-          }
-          seenIds.add(deviceId.toLowerCase());
-          seenSerials.add(serial.toLowerCase());
-          valid.push({
-            deviceId,
-            name,
-            kind: (GATEWAY_CATEGORIES.includes(item.kind) ? item.kind : 'GPS') as GatewayCategory,
-            manufacturer: item.manufacturer || 'Teltonika',
-            modelText: item.modelText || 'FMB120',
-            mode: item.mode || 'GPS tracking',
-            serial,
-            imei: item.imei || '',
-            company: item.company || 'Adani Port',
-            inventoryLocation: item.inventoryLocation || 'Mundra CT2',
-            hardwareLifecycle: item.hardwareLifecycle || 'Inventory'
+          validateAndBuildRow(idx + 1, {
+            name: String(item.name || ''),
+            deviceId: String(item.deviceId || ''),
+            kind: String(item.kind || ''),
+            manufacturer: String(item.manufacturer || ''),
+            modelText: String(item.modelText || ''),
+            mode: String(item.mode || ''),
+            serial: String(item.serial || ''),
+            imei: String(item.imei || ''),
+            company: String(item.company || ''),
+            inventoryLocation: String(item.inventoryLocation || ''),
+            hardwareLifecycle: String(item.hardwareLifecycle || '')
           });
         });
       } catch {
@@ -1141,86 +1541,57 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         if (idx === 0 && cols[0]?.toLowerCase().includes('device')) {
           return;
         }
-        const [name, deviceId, kind, manufacturer, modelText, mode, serial, imei, company, inventoryLocation, hardwareLifecycle] = cols;
-        if (!name || !deviceId || !serial) {
-          invalid.push({
-            line: idx + 1,
-            reason: 'CSV row requires at least Device name, Device ID, and Serial number'
-          });
-          return;
-        }
-        if (seenIds.has(deviceId.toLowerCase()) || seenSerials.has(serial.toLowerCase())) {
-          invalid.push({
-            line: idx + 1,
-            reason: `Duplicate Device ID (${deviceId}) or Serial (${serial})`
-          });
-          return;
-        }
-        seenIds.add(deviceId.toLowerCase());
-        seenSerials.add(serial.toLowerCase());
-        valid.push({
+        const [
+          name = '',
+          deviceId = '',
+          kind = '',
+          manufacturer = '',
+          modelText = '',
+          mode = '',
+          serial = '',
+          imei = '',
+          company = '',
+          inventoryLocation = '',
+          hardwareLifecycle = ''
+        ] = cols;
+        validateAndBuildRow(idx + 1, {
           name,
           deviceId,
-          kind: (GATEWAY_CATEGORIES.includes(kind as GatewayCategory) ? kind : 'GPS') as GatewayCategory,
-          manufacturer: manufacturer || 'Teltonika',
-          modelText: modelText || 'FMB120',
-          mode: mode || 'GPS tracking',
+          kind,
+          manufacturer,
+          modelText,
+          mode,
           serial,
-          imei: imei || '',
-          company: company || 'Adani Port',
-          inventoryLocation: inventoryLocation || 'Mundra CT2',
-          hardwareLifecycle: (HARDWARE_LIFECYCLE_OPTIONS.includes(hardwareLifecycle as HardwareLifecycleStatus)
-            ? hardwareLifecycle
-            : 'Inventory') as HardwareLifecycleStatus
+          imei,
+          company,
+          inventoryLocation,
+          hardwareLifecycle
         });
       });
     }
 
     if (valid.length === 0) {
       deviceUpload.fail(
-        invalid[0]?.reason || 'No valid new device rows found (duplicates or missing required fields).'
+        invalid[0]?.reason || 'No valid new device rows found (duplicates or validation failures).'
       );
       return;
     }
 
     deviceUpload.startUploading(fileName, formatUploadFileSize(fileSize), () => {
-      const todayStr = new Date().toISOString().slice(0, 10);
-      const created: DeviceRecord[] = valid.map((v, i) => ({
-        id: `dev-import-${Date.now()}-${i}`,
-        deviceId: v.deviceId!,
-        name: v.name!,
-        kind: (v.kind as GatewayCategory) || 'GPS',
-        role: 'gateway',
-        manufacturer: v.manufacturer || 'Teltonika',
-        modelText: v.modelText || 'FMB120',
-        mode: v.mode || 'GPS tracking',
-        serial: v.serial!,
-        imei: v.imei || '',
-        capabilities: ['Cellular', 'BLE'],
-        platformProtocol: 'MQTT',
-        company: v.company || 'Adani Port',
-        inventoryLocation: v.inventoryLocation || 'Mundra CT2',
-        hardwareLifecycle: (v.hardwareLifecycle as HardwareLifecycleStatus) || 'Inventory',
-        registeredAt: todayStr,
-        updatedAt: todayStr,
-        channelCount: 4,
-        notes: 'Imported via bulk CSV/JSON'
-      }));
-
       setStore((prev) => ({
         ...prev,
-        devices: [...created, ...prev.devices]
+        devices: [...valid, ...prev.devices]
       }));
       setSortKey('');
       setCurrentPage(1);
-      showToast(`Imported ${created.length} Device(s) (${invalid.length} skipped).`);
+      showToast(`Imported ${valid.length} Device(s) (${invalid.length} skipped).`);
       return {
         headline: 'Devices uploaded successfully',
-        description: `${created.length} device record${created.length === 1 ? '' : 's'} imported from ${fileName}.${
+        description: `${valid.length} device record${valid.length === 1 ? '' : 's'} imported from ${fileName}.${
           invalid.length > 0 ? ` ${invalid.length} duplicate or invalid row${invalid.length === 1 ? '' : 's'} skipped.` : ''
         }`,
         stats: [
-          { label: 'Uploaded', value: created.length, tone: 'emerald' },
+          { label: 'Uploaded', value: valid.length, tone: 'emerald' },
           { label: 'Skipped', value: invalid.length, tone: invalid.length > 0 ? 'amber' : 'slate' }
         ]
       };
@@ -1453,9 +1824,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
               onClick={() => {
                 setSearchQuery('');
                 setFilterCompany('All');
-                setFilterKind('All');
-                setFilterManufacturer('All');
-                setFilterLifecycle('All');
+                setAdvancedFilters(DEFAULT_DEVICES_FILTERS);
                 setSelectedIds(new Set());
                 setCurrentPage(1);
                 showToast('Devices table refreshed.');
@@ -1498,8 +1867,12 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
             {/* 8. Export */}
             <button
               onClick={() => {
-                downloadModalCsv('FleetRobo_devices_export.csv', visibleColumns, sortedDevices);
-                showToast(`Exported ${sortedDevices.length} Device records to FleetRobo_devices_export.csv`);
+                const exportRows = sortedDevices.map((d) => ({
+                  ...d,
+                  hardwareLifecycle: getEffectiveStatus(d)
+                }));
+                downloadModalCsv('FleetRobo_devices_export.csv', visibleColumns, exportRows);
+                showToast(`Exported ${exportRows.length} Device records to FleetRobo_devices_export.csv`);
               }}
               className="h-[33px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-medium text-[#17212b] hover:bg-[#f8fafc] inline-flex items-center gap-1.5 cursor-pointer"
             >
@@ -1524,18 +1897,247 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
             </span>
             {activeFilterCount > 0 && (
               <button
-                onClick={() => {
-                  setFilterCompany('All');
-                  setFilterKind('All');
-                  setFilterManufacturer('All');
-                  setFilterLifecycle('All');
-                }}
+                onClick={clearAllDeviceFilters}
                 className="text-[#9e431c] hover:underline font-medium cursor-pointer"
               >
-                Clear active filters ({activeFilterCount})
+                Clear All ({activeFilterCount})
               </button>
             )}
           </div>
+
+          {/* Removable Applied-Filter Chips Row */}
+          {activeFilterCount > 0 && (
+            <div className="px-4 py-2 bg-slate-50 border-b border-[#e3e8ee] flex items-center gap-2 flex-wrap text-xs shrink-0">
+              <span className="text-slate-500 font-medium">Applied Filters:</span>
+              {isPlatformAdmin && filterCompany !== 'All' && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Organization Scope: {filterCompany}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilterCompany('All');
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {isPlatformAdmin && advancedFilters.organizations.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Organization: {advancedFilters.organizations.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, organizations: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.categories.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Category: {advancedFilters.categories.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, categories: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.manufacturers.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Manufacturer: {advancedFilters.manufacturers.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, manufacturers: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.models.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Model: {advancedFilters.models.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, models: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.identifierTypes.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Identifier Type: {advancedFilters.identifierTypes.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, identifierTypes: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.modes.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Mode: {advancedFilters.modes.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, modes: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.protocols.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Protocol: {advancedFilters.protocols.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, protocols: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.channels.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Channels: {advancedFilters.channels.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, channels: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.deviceStatuses.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Device Status: {advancedFilters.deviceStatuses.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, deviceStatuses: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.mappingStatuses.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Mapping Status: {advancedFilters.mappingStatuses.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, mappingStatuses: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {advancedFilters.inventoryLocations.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Location: {advancedFilters.inventoryLocations.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, inventoryLocations: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {(advancedFilters.registeredFrom || advancedFilters.registeredTo) && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Registered: {advancedFilters.registeredFrom || '...'} →{' '}
+                  {advancedFilters.registeredTo || '...'}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({
+                        ...p,
+                        registeredFrom: '',
+                        registeredTo: ''
+                      }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {(advancedFilters.updatedFrom || advancedFilters.updatedTo) && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Updated: {advancedFilters.updatedFrom || '...'} →{' '}
+                  {advancedFilters.updatedTo || '...'}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({
+                        ...p,
+                        updatedFrom: '',
+                        updatedTo: ''
+                      }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={clearAllDeviceFilters}
+                className="text-xs text-[#FA8A63] font-semibold hover:underline ml-2 cursor-pointer"
+              >
+                Clear All
+              </button>
+            </div>
+          )}
 
           {/* Scrollable Table Viewport */}
           <div className="flex-1 overflow-auto min-h-0">
@@ -1627,7 +2229,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                                   className="text-left group cursor-pointer"
                                 >
                                   <div className="font-semibold text-[#17212b] group-hover:text-[#9e431c] transition-colors">
-                                    {row.name.replace(/\s*·\s*.*$/, '')}
+                                    {row.name}
                                   </div>
                                   <div className="text-[11px] text-[#8291a0]">
                                     {row.deviceId} · {row.manufacturer} {row.modelText}
@@ -1639,7 +2241,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                           if (col.key === 'hardwareLifecycle') {
                             return (
                               <td key={col.key} className="px-3 py-2.5 whitespace-nowrap">
-                                {renderLifecycleBadge(row.hardwareLifecycle)}
+                                {renderLifecycleBadge(getEffectiveStatus(row))}
                               </td>
                             );
                           }
@@ -1780,143 +2382,40 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       {/* =====================================================================
           RIGHT-SIDE DRAWERS
          ===================================================================== */}
-      {activeDrawer && (
+      {/* 1. ADVANCED FILTERS DRAWER */}
+      <DevicesFilterDrawer
+        isOpen={activeDrawer === 'filters'}
+        onClose={() => setActiveDrawer(null)}
+        appliedFilters={advancedFilters}
+        onApplyFilters={(next) => {
+          setAdvancedFilters(next);
+          setCurrentPage(1);
+        }}
+        authorizedDevices={scopedDevices}
+        effectiveStatusById={effectiveStatusById}
+        mappingStatusById={mappingStatusById}
+        isPlatformAdmin={isPlatformAdmin}
+      />
+
+      {/* 2. BULK OPERATIONS DRAWER */}
+      <DevicesBulkDrawer
+        isOpen={activeDrawer === 'bulk'}
+        selectedRecords={selectedDeviceRecords}
+        store={store}
+        effectiveStatusById={effectiveStatusById}
+        availableLocations={availableLocations}
+        onClose={() => setActiveDrawer(null)}
+        onClearSelection={() => setSelectedIds(new Set())}
+        onExportSelected={handleBulkExportSelected}
+        onApplyBulkUpdate={handleApplyDevicesBulkUpdate}
+      />
+
+      {activeDrawer && activeDrawer !== 'filters' && activeDrawer !== 'bulk' && (
         <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/35 backdrop-blur-[1px]">
           <div
             className="flex-1"
             onClick={() => setActiveDrawer(null)}
           />
-
-          {/* 1. FILTERS DRAWER */}
-          {activeDrawer === 'filters' && (
-            <div className="w-[520px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
-              <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
-                <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">Filter Devices</h2>
-                  <p className="text-[12px] text-[#5c6b7a] mt-0.5">
-                    Narrow down registered Gateway Devices by category, manufacturer, or inventory status.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="p-1.5 rounded-lg text-[#5c6b7a] hover:bg-slate-100 cursor-pointer"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-5 space-y-4">
-                {isPlatformAdmin && (
-                  <div>
-                    <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                      Organization Name
-                    </label>
-                    <select
-                      value={filterCompany}
-                      onChange={(e) => {
-                        setFilterCompany(e.target.value);
-                        setCurrentPage(1);
-                      }}
-                      className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                    >
-                      <option value="All">All Organizations</option>
-                      {availableOrganizations.map((org) => (
-                        <option key={org} value={org}>
-                          {org}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Device category
-                  </label>
-                  <select
-                    value={filterKind}
-                    onChange={(e) => {
-                      setFilterKind(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    {GATEWAY_CATEGORIES.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Vendor / Manufacturer
-                  </label>
-                  <select
-                    value={filterManufacturer}
-                    onChange={(e) => {
-                      setFilterManufacturer(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    {ALL_MANUFACTURERS.map((mfg) => (
-                      <option key={mfg} value={mfg}>
-                        {mfg}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Inventory status
-                  </label>
-                  <select
-                    value={filterLifecycle}
-                    onChange={(e) => {
-                      setFilterLifecycle(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    {HARDWARE_LIFECYCLE_OPTIONS.map((st) => (
-                      <option key={st} value={st}>
-                        {st}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="px-5 py-3.5 border-t border-[#e3e8ee] bg-[#f8fafc] flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFilterCompany('All');
-                    setFilterKind('All');
-                    setFilterManufacturer('All');
-                    setFilterLifecycle('All');
-                    setCurrentPage(1);
-                  }}
-                  className="px-3.5 py-2 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-semibold text-[#5c6b7a] hover:text-[#17212b] cursor-pointer"
-                >
-                  Reset filters
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveDrawer(null)}
-                  className="px-4 py-2 rounded-[7px] bg-[#e56b38] hover:bg-[#d15b2a] text-white text-[12px] font-semibold cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* 3. SAVED VIEWS DRAWER */}
           {activeDrawer === 'saved-views' && (
@@ -1958,9 +2457,10 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                           name: newViewName.trim(),
                           query: searchQuery,
                           filters: {
-                            kind: filterKind,
-                            manufacturer: filterManufacturer,
-                            hardwareLifecycle: filterLifecycle
+                            kind: advancedFilters.categories[0] || 'All',
+                            manufacturer: advancedFilters.manufacturers[0] || 'All',
+                            hardwareLifecycle: advancedFilters.deviceStatuses[0] || 'All',
+                            advancedFiltersJson: JSON.stringify(advancedFilters)
                           },
                           sortKey,
                           sortDir,
@@ -2000,12 +2500,71 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                           <button
                             onClick={() => {
                               setSearchQuery(view.query || '');
-                              setFilterKind(view.filters.kind || 'All');
-                              setFilterManufacturer(view.filters.manufacturer || 'All');
-                              setFilterLifecycle(view.filters.hardwareLifecycle || 'All');
-                              setSortKey(view.sortKey || 'deviceId');
+                              if (view.filters.advancedFiltersJson) {
+                                try {
+                                  const parsed = JSON.parse(view.filters.advancedFiltersJson);
+                                  const rawStatuses: string[] = Array.isArray(parsed.deviceStatuses)
+                                    ? parsed.deviceStatuses
+                                    : [];
+                                  const normalizedStatuses = Array.from(
+                                    new Set(
+                                      rawStatuses
+                                        .map((s) => (s === 'Suspended' ? 'In Maintenance' : s))
+                                        .filter(
+                                          (s): s is EffectiveDeviceStatus =>
+                                            s === 'Inventory' ||
+                                            s === 'Active' ||
+                                            s === 'In Maintenance' ||
+                                            s === 'Decommissioned'
+                                        )
+                                    )
+                                  );
+                                  setAdvancedFilters({
+                                    ...DEFAULT_DEVICES_FILTERS,
+                                    ...parsed,
+                                    organizations: isPlatformAdmin
+                                      ? Array.isArray(parsed.organizations)
+                                        ? parsed.organizations
+                                        : []
+                                      : [],
+                                    deviceStatuses: normalizedStatuses
+                                  });
+                                } catch {
+                                  setAdvancedFilters(DEFAULT_DEVICES_FILTERS);
+                                }
+                              } else {
+                                const rawLifecycle = view.filters.hardwareLifecycle || 'All';
+                                const normalizedLifecycle =
+                                  rawLifecycle === 'Suspended'
+                                    ? 'In Maintenance'
+                                    : rawLifecycle === 'Pending Hardware Review'
+                                    ? 'All'
+                                    : rawLifecycle;
+                                setAdvancedFilters({
+                                  ...DEFAULT_DEVICES_FILTERS,
+                                  categories:
+                                    view.filters.kind && view.filters.kind !== 'All'
+                                      ? [view.filters.kind]
+                                      : [],
+                                  manufacturers:
+                                    view.filters.manufacturer && view.filters.manufacturer !== 'All'
+                                      ? [view.filters.manufacturer]
+                                      : [],
+                                  deviceStatuses:
+                                    normalizedLifecycle !== 'All'
+                                      ? [normalizedLifecycle as EffectiveDeviceStatus]
+                                      : []
+                                });
+                              }
+                              setSortKey(
+                                view.sortKey === 'inventoryLocation'
+                                  ? 'deviceId'
+                                  : view.sortKey || 'deviceId'
+                              );
                               setSortDir(view.sortDir || 'asc');
-                              setHiddenCols(view.hiddenCols || []);
+                              setHiddenCols(
+                                (view.hiddenCols || []).filter((k) => k !== 'inventoryLocation')
+                              );
                               setCurrentPage(1);
                               setActiveDrawer(null);
                               showToast(`Applied view "${view.name}".`);
@@ -2210,7 +2769,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <FieldLabel
-                        label="Vendor / Manufacturer"
+                        label="Brand"
                         required
                         tooltip={MODAL_FIELD_TOOLTIPS.device.manufacturer}
                       />
@@ -2675,7 +3234,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                 <div>
                   <div className="flex items-center gap-2">
                     <h2 className="text-[16px] font-bold text-[#17212b]">
-                      {inspectedDevice.name.replace(/\s*·\s*.*$/, '')}
+                      {inspectedDevice.name}
                     </h2>
                   </div>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5 font-mono">
@@ -2739,7 +3298,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                   <>
                     <div className="grid grid-cols-2 gap-3.5 p-4 rounded-xl border border-[#e3e8ee] bg-[#f8fafc]">
                       {[
-                        ['Device name', inspectedDevice.name.replace(/\s*·\s*.*$/, '')],
+                        ['Device name', inspectedDevice.name],
                         ['Device ID', inspectedDevice.deviceId],
                         ['Device category', inspectedDevice.kind],
                         ['Vendor / Manufacturer', inspectedDevice.manufacturer],
@@ -2873,13 +3432,13 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                     {[
                       {
                         date: inspectedDevice.updatedAt,
-                        title: 'Inventory metadata & status verified',
-                        detail: `Current lifecycle state is ${inspectedDevice.hardwareLifecycle} at ${inspectedDevice.inventoryLocation} (${inspectedDevice.company}).`
+                        title: 'Effective Device status summary',
+                        detail: `Current status is ${getEffectiveStatus(inspectedDevice)}${inspectedDevice.inventoryLocation ? ` · Location: ${inspectedDevice.inventoryLocation}` : ''} (${inspectedDevice.company}).`
                       },
                       {
                         date: inspectedDevice.registeredAt,
-                        title: 'Gateway hardware onboarded in Devices Master',
-                        detail: `Registered ${inspectedDevice.manufacturer} ${inspectedDevice.modelText} with serial ${inspectedDevice.serial}.`
+                        title: 'Gateway hardware registered in Devices Master',
+                        detail: `Registered ${inspectedDevice.manufacturer} ${inspectedDevice.modelText}${inspectedDevice.serial ? ` · Serial ${inspectedDevice.serial}` : inspectedDevice.imei ? ` · IMEI ${inspectedDevice.imei}` : ''}.`
                       }
                     ].map((ev, i) => (
                       <div
@@ -2902,161 +3461,12 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
             </div>
           )}
 
-          {/* 6. BULK OPERATIONS DRAWER */}
-          {activeDrawer === 'bulk' && (
-            <div className="w-[560px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
-              <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
-                <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">
-                    Bulk Operations · Devices
-                  </h2>
-                  <p className="text-[12px] text-[#5c6b7a] mt-0.5">
-                    {selectedDeviceRecords.length} Device record(s) currently selected.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="p-1.5 rounded-lg text-[#5c6b7a] hover:bg-slate-100 cursor-pointer"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="p-5 flex-1 overflow-y-auto space-y-5">
-                {selectedDeviceRecords.length === 0 ? (
-                  <div className="p-6 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] text-center text-[12px] text-[#5c6b7a]">
-                    Select one or more Devices in the table first to run a bulk operation.
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                        Bulk action
-                      </label>
-                      <select
-                        value={bulkAction}
-                        onChange={(e) => setBulkAction(e.target.value as any)}
-                        className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
-                      >
-                        <option value="Update inventory status">Update inventory status</option>
-                        <option value="Decommission eligible">Decommission eligible</option>
-                        <option value="Delete eligible">Delete eligible</option>
-                      </select>
-                    </div>
-
-                    {bulkAction === 'Update inventory status' && (
-                      <div>
-                        <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                          Target inventory status
-                        </label>
-                        <select
-                          value={bulkTargetStatus}
-                          onChange={(e) =>
-                            setBulkTargetStatus(e.target.value as HardwareLifecycleStatus)
-                          }
-                          className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
-                        >
-                          {HARDWARE_LIFECYCLE_OPTIONS.map((st) => (
-                            <option key={st} value={st}>
-                              {st}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {(bulkAction === 'Decommission eligible' || bulkAction === 'Delete eligible') && (
-                      <div className="p-3.5 rounded-lg border border-[#fed7aa] bg-[#fff7ed] text-[12px] text-[#b45309]">
-                        Devices linked to an <strong>Active</strong> connection in Modal Mapping are
-                        protected and automatically skipped during bulk{' '}
-                        {bulkAction === 'Delete eligible' ? 'deletion' : 'decommissioning'}.
-                      </div>
-                    )}
-
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-slate-200 bg-slate-100 text-slate-700">
-                        {selectedDeviceRecords.length} Selected
-                      </span>
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-emerald-200 bg-emerald-50 text-emerald-700">
-                        <CheckCircle2 size={12} /> {bulkEligibility.eligible.length} Eligible
-                      </span>
-                      {bulkEligibility.skipped.length > 0 && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-amber-200 bg-amber-50 text-amber-800">
-                          <AlertTriangle size={12} /> {bulkEligibility.skipped.length} Protected / Skipped
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="p-3 rounded-lg border border-[#b9ebd0] bg-[#eaf8f0]">
-                        <div className="text-[11px] text-[#0f7b4b] font-semibold">
-                          {bulkAction === 'Delete eligible' ? 'Eligible to delete' : 'Eligible to update'}
-                        </div>
-                        <div className="text-[20px] font-bold text-[#0f7b4b]">
-                          {bulkEligibility.eligible.length}
-                        </div>
-                      </div>
-                      <div className="p-3 rounded-lg border border-[#fed7aa] bg-[#fff7ed]">
-                        <div className="text-[11px] text-[#b45309] font-semibold">
-                          Skipped (active connection)
-                        </div>
-                        <div className="text-[20px] font-bold text-[#b45309]">
-                          {bulkEligibility.skipped.length}
-                        </div>
-                      </div>
-                    </div>
-
-                    {bulkEligibility.skipped.length > 0 && (
-                      <div className="space-y-1.5">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-[#5c6b7a]">
-                          Skipped Records
-                        </div>
-                        <div className="max-h-[160px] overflow-y-auto divide-y divide-[#edf1f5] border border-[#e3e8ee] rounded-lg">
-                          {bulkEligibility.skipped.map(({ record, reason }) => (
-                            <div key={record.id} className="px-3 py-2 text-[11px]">
-                              <span className="font-semibold text-[#17212b]">
-                                {record.deviceId} ({record.name})
-                              </span>
-                              <span className="text-[#dc2626] ml-1.5">— {reason}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-
-              <div className="px-5 py-3.5 border-t border-[#e3e8ee] bg-[#f8fafc] flex items-center justify-end gap-2">
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="px-4 py-2 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-semibold text-[#5c6b7a] cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  disabled={bulkEligibility.eligible.length === 0}
-                  onClick={handleApplyBulk}
-                  className={`px-4 py-2 rounded-[7px] disabled:opacity-40 text-white text-[12px] font-semibold cursor-pointer ${
-                    bulkAction === 'Delete eligible'
-                      ? 'bg-rose-600 hover:bg-rose-700'
-                      : 'bg-[#e56b38] hover:bg-[#d15b2a]'
-                  }`}
-                >
-                  {bulkAction === 'Delete eligible'
-                    ? `Delete ${bulkEligibility.eligible.length} eligible device(s)`
-                    : `Apply to ${bulkEligibility.eligible.length} eligible record(s)`}
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* 7. DIRECT IMPORT DRAWER */}
           {activeDrawer === 'import' && (
             <div className="w-[620px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
               <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
                 <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">Import Devices</h2>
+                  <h2 className="text-[16px] font-bold text-[#17212b]">Import</h2>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5">
                     Upload a CSV or JSON file to register gateway devices directly.
                   </p>
@@ -3100,9 +3510,14 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                     reader.readAsText(file);
                   }}
                   onDownloadTemplate={() => {
+                    const org = isPlatformAdmin
+                      ? filterCompany !== 'All'
+                        ? filterCompany
+                        : availableOrganizations[0] || 'Adani Mundra'
+                      : currentCompany;
                     const csv =
                       'Device name,Device ID,Device category,Vendor / Manufacturer,Model,Mode,Serial number,IMEI,Owner,Inventory location,Inventory status\n' +
-                      'ADAS/DMS — Mettax MC202N · Mundra Hub,GTW-9101,ADAS/DMS,Mettax,MC202N,ADAS + DMS,SN-GTW-9101,864019283799101,Adani Port,Mundra CT2,Inventory';
+                      `ADAS/DMS Dashcam — MettaX MC202N · Mundra Hub,GTW-9101,ADAS/DMS Dashcam,MettaX,MC202N,ADAS,SN-GTW-9101,864019283799101,${org},Mundra CT2,Inventory`;
                     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -3113,9 +3528,21 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                   }}
                   onUseSample={() => {
                     const suffix = Math.floor(100 + Math.random() * 899);
+                    const org = isPlatformAdmin
+                      ? filterCompany !== 'All'
+                        ? filterCompany
+                        : availableOrganizations[0] || 'Adani Mundra'
+                      : currentCompany;
+                    const sampleModel =
+                      getEnabledModelsForCompanyName(org).find((m) => m.category === 'Device') ||
+                      enabledDeviceModels[0];
+                    const cat = sampleModel?.typeName || 'ADAS/DMS Dashcam';
+                    const mfg = sampleModel?.manufacturer || 'MettaX';
+                    const modRef = sampleModel?.modelReference || 'MC202N';
+                    const modMode = sampleModel?.supportedModes?.[0] || sampleModel?.deviceMode || 'ADAS';
                     const sampleCsv =
                       `Device name,Device ID,Device category,Vendor / Manufacturer,Model,Mode,Serial number,IMEI,Owner,Inventory location,Inventory status\n` +
-                      `ADAS/DMS — Mettax MC202N · Mundra Hub ${suffix},GTW-9${suffix},ADAS/DMS,Mettax,MC202N,ADAS + DMS,SN-GTW-9${suffix},864019283799${suffix},Adani Port,Mundra CT2,Inventory`;
+                      `${cat} — ${mfg} ${modRef} #${suffix},GTW-9${suffix},${cat},${mfg},${modRef},${modMode},SN-GTW-9${suffix},864019283799${suffix},${org},Mundra CT2,Inventory`;
                     processDevicesUpload('csv', sampleCsv, `sample_devices_${suffix}.csv`, sampleCsv.length);
                   }}
                   onReset={deviceUpload.reset}
@@ -3130,13 +3557,10 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       {/* Delete Device Confirmation Modal with Confirmation Chips */}
       {(() => {
         if (!deviceToDelete) return null;
-        const activeLinks = store.connections.filter(
-          (c) =>
-            c.status === 'Active' &&
-            (c.memberIds?.includes(deviceToDelete.id) ||
-              c.hardwareId === deviceToDelete.id ||
-              c.parentId === deviceToDelete.id)
-        );
+        const refs = getDeviceMappingReferences(deviceToDelete.id, store);
+        const effStatus = getEffectiveStatus(deviceToDelete);
+        const blockedByHistory = refs.hasAnyReference;
+        const connListLabel = refs.allConnections.map((c) => c.connectionId || c.id).join(', ');
         return (
           <DeleteConfirmationModal
             isOpen={Boolean(deviceToDelete)}
@@ -3148,7 +3572,9 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                 {deviceToDelete.deviceId})? This device will be permanently removed from inventory.
               </>
             }
-            confirmLabel="Delete Device"
+            confirmLabel={blockedByHistory ? 'Delete Blocked (In Mapping History)' : 'Delete Device'}
+            confirmDisabled={blockedByHistory}
+            reasonPresets={blockedByHistory ? [] : undefined}
             targetChips={[
               { id: 'devId', label: deviceToDelete.deviceId, tone: 'orange' },
               { id: 'kind', label: deviceToDelete.kind, tone: 'blue' },
@@ -3160,20 +3586,20 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
               { id: 'org', label: deviceToDelete.company, tone: 'purple' },
               {
                 id: 'status',
-                label: deviceToDelete.hardwareLifecycle,
-                tone: deviceToDelete.hardwareLifecycle === 'Active' ? 'emerald' : 'slate',
+                label: effStatus,
+                tone: effStatus === 'Active' ? 'emerald' : 'slate',
               },
             ]}
             confirmationChips={[
-              activeLinks.length > 0
+              blockedByHistory
                 ? {
                     id: 'conn-link',
-                    label: `Linked in ${activeLinks.length} Active Connection(s)`,
+                    label: `Protected · Referenced in ${Math.max(refs.allConnections.length, refs.allBindings.length, refs.allAllocations.length)} Mapping Record(s)`,
                     tone: 'amber',
                   }
                 : {
                     id: 'conn-link',
-                    label: 'Safe to Delete · No Active Connection',
+                    label: 'Safe to Delete · No Mapping History',
                     tone: 'emerald',
                   },
               {
@@ -3183,11 +3609,15 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
               },
             ]}
             warningNote={
-              activeLinks.length > 0 ? (
+              blockedByHistory ? (
                 <>
-                  This device is currently referenced in{' '}
-                  <strong>{activeLinks.map((c) => c.connectionId || c.id).join(', ')}</strong>.
-                  Removing it will detach it from future telemetry queries.
+                  This device is referenced by active, scheduled, or historical Asset Mapping records
+                  {connListLabel ? (
+                    <>
+                      {' '}(<strong>{connListLabel}</strong>)
+                    </>
+                  ) : null}
+                  . Deletion is blocked to preserve mapping audit history; use Decommission instead once active/scheduled mappings are ended.
                 </>
               ) : undefined
             }
@@ -3196,54 +3626,6 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
           />
         );
       })()}
-
-      {/* Bulk Delete Devices Confirmation Modal with Confirmation Chips */}
-      <DeleteConfirmationModal
-        isOpen={pendingBulkDelete}
-        title={`Delete ${bulkEligibility.eligible.length} Eligible Device(s)?`}
-        description="Permanently remove eligible selected gateway devices from inventory. Devices linked to Active Modal Mapping connections are automatically excluded."
-        confirmLabel={`Confirm Delete (${bulkEligibility.eligible.length})`}
-        targetChips={[
-          ...bulkEligibility.eligible.slice(0, 5).map((d) => ({
-            id: d.id,
-            label: d.deviceId,
-            sublabel: d.name,
-            tone: 'orange' as const,
-          })),
-          ...(bulkEligibility.eligible.length > 5
-            ? [
-                {
-                  id: 'more-devs',
-                  label: `+${bulkEligibility.eligible.length - 5} more`,
-                  tone: 'slate' as const,
-                },
-              ]
-            : []),
-        ]}
-        confirmationChips={[
-          {
-            id: 'selected',
-            label: `${selectedDeviceRecords.length} Selected`,
-            tone: 'slate',
-          },
-          {
-            id: 'eligible',
-            label: `${bulkEligibility.eligible.length} Eligible to Delete`,
-            tone: 'emerald',
-          },
-          ...(bulkEligibility.skipped.length > 0
-            ? [
-                {
-                  id: 'skipped',
-                  label: `${bulkEligibility.skipped.length} Skipped (Active Connection)`,
-                  tone: 'amber' as const,
-                },
-              ]
-            : []),
-        ]}
-        onCancel={() => setPendingBulkDelete(false)}
-        onConfirm={executeBulkDeleteDevices}
-      />
     </div>
   );
 };

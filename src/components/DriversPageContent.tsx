@@ -40,16 +40,30 @@ import {
   loadDriverMasterStore,
   saveDriverMasterStore,
   deriveDriverBadges,
+  isDriverAuthorizedForCompany,
   TransferHistoryJob
 } from '../types/driver';
 import {
   DRIVER_COLUMNS_CATALOGUE,
   DEFAULT_DRIVER_VISIBLE_COLUMNS,
-  ALL_27_DRIVER_FILTERS
+  countActiveDriverFilters,
+  evaluateDriverFilters,
+  sanitizeDriverFilters
 } from '../types/driverFilters';
+import {
+  ModalMasterStore,
+  getDriverMappingReferences,
+  loadModalMasterStore
+} from '../types/modalMaster';
+import { resolveTransporterVendor } from '../data/vendorsSeed';
 import { DriverDrawer } from './DriverDrawer';
 import { DriverFilterDrawer } from './DriverFilterDrawer';
-import { DriverBulkDrawer, DriverBulkActionType } from './DriverBulkDrawer';
+import {
+  DriverBulkDrawer,
+  DriverBulkActionType,
+  DriverBulkParams,
+  evaluateDriverBulkEligibility
+} from './DriverBulkDrawer';
 import { DriverImportDrawer } from './DriverImportDrawer';
 import { DriverExportModal } from './DriverExportModal';
 import { DriverTransferHistoryModal } from './DriverTransferHistoryModal';
@@ -65,6 +79,8 @@ interface SavedView {
   filters: Record<string, any>;
   statusTab: string;
 }
+
+const DRIVER_SAVED_VIEWS_STORAGE_KEY = 'fleetrobo_driver_saved_views_v1';
 
 const DEFAULT_SAVED_VIEWS: SavedView[] = [
   {
@@ -85,7 +101,7 @@ const DEFAULT_SAVED_VIEWS: SavedView[] = [
     id: 'view-expiring-licences',
     name: 'Expiring Licences (30d)',
     visibleColumns: ['name', 'licence', 'phone', 'licenceTo', 'licenceType', 'status'],
-    filters: { expiryStatus: ['Expiring within 30 days', 'Expired'] },
+    filters: { expiry: ['Expiring within 30 days', 'Expired'] },
     statusTab: 'active'
   },
   {
@@ -99,26 +115,56 @@ const DEFAULT_SAVED_VIEWS: SavedView[] = [
     id: 'view-active-fleet',
     name: 'Active Fleet Drivers',
     visibleColumns: ['name', 'reg', 'phone', 'licence', 'transporter', 'status'],
-    filters: { status: ['Active'], reg: ['Assigned'] },
+    filters: { status: ['Active'], mapping: ['Mapped'] },
     statusTab: 'active'
   }
 ];
+
+function loadInitialSavedViews(): SavedView[] {
+  try {
+    const raw = localStorage.getItem(DRIVER_SAVED_VIEWS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const defaultIds = new Set(DEFAULT_SAVED_VIEWS.map((v) => v.id));
+        const customViews = parsed
+          .filter((v) => v && typeof v.id === 'string' && !defaultIds.has(v.id))
+          .map((v) => ({
+            ...v,
+            filters: sanitizeDriverFilters(v.filters)
+          }));
+        return [...DEFAULT_SAVED_VIEWS, ...customViews];
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_SAVED_VIEWS;
+}
 
 interface DriversPageContentProps {
   companyContext?: string;
 }
 
 export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyContext }) => {
-  // Master driver data state
+  // Master driver data & live Asset Mapping store
   const [drivers, setDriversState] = useState<Driver[]>(() => loadDriverMasterStore());
+  const [modalStore, setModalStore] = useState<ModalMasterStore>(() => loadModalMasterStore());
 
   useEffect(() => {
-    const sync = () => setDriversState(loadDriverMasterStore());
-    window.addEventListener('fleetrobo:resources-updated', sync);
-    window.addEventListener('storage', sync);
+    const syncDrivers = () => setDriversState(loadDriverMasterStore());
+    const syncModal = () => setModalStore(loadModalMasterStore());
+    const syncAll = () => {
+      syncDrivers();
+      syncModal();
+    };
+    window.addEventListener('fleetrobo:resources-updated', syncDrivers);
+    window.addEventListener('fleetrobo:modal-store-updated', syncModal);
+    window.addEventListener('storage', syncAll);
     return () => {
-      window.removeEventListener('fleetrobo:resources-updated', sync);
-      window.removeEventListener('storage', sync);
+      window.removeEventListener('fleetrobo:resources-updated', syncDrivers);
+      window.removeEventListener('fleetrobo:modal-store-updated', syncModal);
+      window.removeEventListener('storage', syncAll);
     };
   }, []);
 
@@ -130,10 +176,31 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
     });
   };
 
+  const allDriverIds = useMemo(() => new Set(drivers.map((d) => d.id)), [drivers]);
+
   const [driverToDelete, setDriverToDelete] = useState<Driver | null>(null);
+
+  const driverToDeleteRefs = useMemo(() => {
+    if (!driverToDelete) return null;
+    return getDriverMappingReferences(driverToDelete, modalStore, allDriverIds);
+  }, [driverToDelete, modalStore, allDriverIds]);
 
   const handleConfirmDeleteDriver = () => {
     if (!driverToDelete) return;
+    const refs = getDriverMappingReferences(driverToDelete, modalStore, allDriverIds);
+    if (refs.hasAnyReference) {
+      showToast(
+        'Cannot delete driver while Asset Mapping references exist. Archive the driver record instead.',
+        'error'
+      );
+      setDriverToDelete(null);
+      return;
+    }
+    if (!isDriverAuthorizedForCompany(driverToDelete, companyContext)) {
+      showToast('You are not authorized to delete records outside the active tenant.', 'error');
+      setDriverToDelete(null);
+      return;
+    }
     const idToDelete = driverToDelete.id;
     setDrivers((prev) => prev.filter((d) => d.id !== idToDelete));
     setSelectedDriverIds((prev: Set<string>) => {
@@ -172,12 +239,22 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
   // QA screen states: normal | loading | error | restricted | empty
   const [qaScreenState, setQaScreenState] = useState<'normal' | 'loading' | 'error' | 'restricted' | 'empty'>('normal');
 
-  // Saved views state
-  const [savedViews, setSavedViews] = useState<SavedView[]>(DEFAULT_SAVED_VIEWS);
+  // Saved views state (persisted locally)
+  const [savedViews, setSavedViews] = useState<SavedView[]>(() => loadInitialSavedViews());
   const [currentViewId, setCurrentViewId] = useState<string>('view-default');
   const [isSavedViewsDropdownOpen, setIsSavedViewsDropdownOpen] = useState(false);
   const [newViewName, setNewViewName] = useState('');
   const [showCreateViewInput, setShowCreateViewInput] = useState(false);
+
+  useEffect(() => {
+    try {
+      const defaultIds = new Set(DEFAULT_SAVED_VIEWS.map((v) => v.id));
+      const custom = savedViews.filter((v) => !defaultIds.has(v.id));
+      localStorage.setItem(DRIVER_SAVED_VIEWS_STORAGE_KEY, JSON.stringify(custom));
+    } catch {
+      // ignore
+    }
+  }, [savedViews]);
 
   // Modals & Drawers state
   const [drawerState, setDrawerState] = useState<{
@@ -215,11 +292,30 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
     }, 3500);
   };
 
+  // Strict tenant scoping
   const scopedDrivers = useMemo(() => {
-    if (!companyContext || companyContext === 'Platform Admin' || companyContext === 'Binary') return drivers;
-    const target = companyContext.trim().toLowerCase();
-    return drivers.filter((d) => (d.company || '').trim().toLowerCase() === target);
+    return drivers.filter((d) => isDriverAuthorizedForCompany(d, companyContext));
   }, [drivers, companyContext]);
+
+  // Clear stale selection whenever companyContext switches (prevents cross-tenant bulk actions)
+  useEffect(() => {
+    setSelectedDriverIds(new Set());
+    setCurrentPage(1);
+  }, [companyContext]);
+
+  // Prune deleted or now-out-of-scope IDs cleanly
+  useEffect(() => {
+    const allowedIds = new Set(scopedDrivers.map((d) => d.id));
+    setSelectedDriverIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (allowedIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [scopedDrivers]);
 
   // Status Tab Counts
   const statusCounts = useMemo(() => {
@@ -235,133 +331,47 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
   }, [scopedDrivers]);
 
   // Applied filter count calculation
-  const appliedFilterCount = useMemo(() => {
-    return Object.keys(activeFilters).filter((k) => {
-      const val = activeFilters[k];
-      if (Array.isArray(val)) return val.length > 0;
-      if (typeof val === 'string') return val.trim().length > 0;
-      if (typeof val === 'number') return true;
-      return Boolean(val);
-    }).length;
-  }, [activeFilters]);
+  const appliedFilterCount = useMemo(() => countActiveDriverFilters(activeFilters), [activeFilters]);
 
-  // Filtered & Sorted Drivers List
-  const filteredDrivers = useMemo(() => {
+  // Pre-filter drivers matching outer tenant, status tab & search (used by FilterDrawer live preview & filteredDrivers)
+  const baseMatchedDrivers = useMemo(() => {
     if (qaScreenState === 'empty') return [];
 
     let list = [...scopedDrivers];
 
-    // Status Tab filter
     if (activeStatusTab !== 'all') {
       list = list.filter((d) => d.status.toLowerCase() === activeStatusTab.toLowerCase());
     }
 
-    // Text search query across multiple fields
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();
       list = list.filter((d) => {
+        const badges = deriveDriverBadges(d, modalStore, Date.now(), allDriverIds);
         return (
           d.name?.toLowerCase().includes(q) ||
           d.phone?.toLowerCase().includes(q) ||
           d.licence?.toLowerCase().includes(q) ||
           d.company?.toLowerCase().includes(q) ||
           d.transporter?.toLowerCase().includes(q) ||
-          d.reg?.toLowerCase().includes(q) ||
+          badges.mappedVehicleRegs.some((r) => r.toLowerCase().includes(q)) ||
           d.accountName?.toLowerCase().includes(q) ||
           d.accountEmail?.toLowerCase().includes(q)
         );
       });
     }
 
-    // Advanced / Basic Filters
-    const filterKeys = Object.keys(activeFilters).filter((k) => {
-      const val = activeFilters[k];
-      if (Array.isArray(val)) return val.length > 0;
-      if (typeof val === 'string') return val.trim().length > 0;
-      if (typeof val === 'number') return true;
-      return Boolean(val);
-    });
+    return list;
+  }, [scopedDrivers, activeStatusTab, searchQuery, qaScreenState, modalStore, allDriverIds]);
 
-    if (filterKeys.length > 0) {
-      list = list.filter((driver) => {
-        const badges = deriveDriverBadges(driver);
-
-        const checkCondition = (key: string): boolean => {
-          const filterVal = activeFilters[key];
-
-          switch (key) {
-            case 'accountStatus':
-              return filterVal.includes(badges.accountStatus);
-            case 'accountName':
-              return driver.accountName?.toLowerCase().includes(filterVal.toLowerCase()) || false;
-            case 'accountEmail':
-              return driver.accountEmail?.toLowerCase().includes(filterVal.toLowerCase()) || false;
-            case 'accountPhone':
-              return driver.accountPhone?.toLowerCase().includes(filterVal.toLowerCase()) || false;
-            case 'accountCountry':
-              return filterVal.includes(driver.accountCountry);
-            case 'accountRole':
-              return filterVal.includes(driver.accountRole);
-            case 'company':
-              return filterVal.includes(driver.company);
-            case 'transporter':
-              return filterVal.includes(driver.transporter);
-            case 'vendor':
-              return filterVal.includes(driver.vendor ? 'Yes' : 'No');
-            case 'status':
-              return filterVal.includes(driver.status);
-            case 'phone':
-              return driver.phone?.toLowerCase().includes(filterVal.toLowerCase()) || false;
-            case 'name':
-              return driver.name?.toLowerCase().includes(filterVal.toLowerCase()) || false;
-            case 'licence':
-              return driver.licence?.toLowerCase().includes(filterVal.toLowerCase()) || false;
-            case 'licenceType':
-              return filterVal.includes(driver.licenceType);
-            case 'verification':
-              return filterVal.includes(badges.verification);
-            case 'documents':
-              return filterVal.includes(badges.documents);
-            case 'expiryStatus':
-              return filterVal.includes(badges.expiry);
-            case 'rto':
-              return filterVal.includes(driver.rto ? 'Yes' : 'No');
-            case 'police':
-              return filterVal.includes(driver.police ? 'Yes' : 'No');
-            case 'training':
-              return filterVal.includes(driver.training ? 'Yes' : 'No');
-            case 'rfid':
-              return filterVal.includes(driver.rfid ? 'Yes' : 'No');
-            case 'blood':
-              return filterVal.includes(driver.blood);
-            case 'experience':
-              return driver.experience !== undefined && driver.experience >= Number(filterVal);
-            case 'reg':
-              if (filterVal.includes('Assigned')) return Boolean(driver.reg);
-              if (filterVal.includes('Unassigned')) return !driver.reg;
-              return true;
-            default:
-              return true;
-          }
-        };
-
-        if (filterLogic === 'OR') {
-          // Status filters always apply with AND, other filters evaluated with OR
-          const statusVal = activeFilters['status'];
-          let statusMatch = true;
-          if (statusVal && Array.isArray(statusVal) && statusVal.length > 0) {
-            statusMatch = statusVal.includes(driver.status);
-          }
-          const otherKeys = filterKeys.filter((k) => k !== 'status');
-          if (otherKeys.length === 0) return statusMatch;
-          const otherMatch = otherKeys.some((k) => checkCondition(k));
-          return statusMatch && otherMatch;
-        } else {
-          // AND logic: all conditions must match
-          return filterKeys.every((k) => checkCondition(k));
-        }
-      });
-    }
+  // Filtered & Sorted Drivers List
+  const filteredDrivers = useMemo(() => {
+    const mode = filterLogic === 'OR' ? 'advanced' : 'basic';
+    let list = baseMatchedDrivers.filter((driver) =>
+      evaluateDriverFilters(driver, activeFilters, mode, {
+        modalStore,
+        allDriverIds
+      })
+    );
 
     // Sorting
     if (sortField) {
@@ -369,29 +379,43 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         let valA: any = (a as any)[sortField] ?? '';
         let valB: any = (b as any)[sortField] ?? '';
 
-        if (sortField === 'verification') {
-          valA = deriveDriverBadges(a).verification;
-          valB = deriveDriverBadges(b).verification;
-        } else if (sortField === 'documents') {
-          valA = deriveDriverBadges(a).documents;
-          valB = deriveDriverBadges(b).documents;
-        } else if (sortField === 'accountStatus') {
-          valA = deriveDriverBadges(a).accountStatus;
-          valB = deriveDriverBadges(b).accountStatus;
+        if (
+          sortField === 'verification' ||
+          sortField === 'documents' ||
+          sortField === 'accountStatus' ||
+          sortField === 'reg'
+        ) {
+          const badgesA = deriveDriverBadges(a, modalStore, Date.now(), allDriverIds);
+          const badgesB = deriveDriverBadges(b, modalStore, Date.now(), allDriverIds);
+          if (sortField === 'reg') {
+            valA = badgesA.mappedVehicleRegs[0] || '';
+            valB = badgesB.mappedVehicleRegs[0] || '';
+          } else {
+            valA = badgesA[sortField];
+            valB = badgesB[sortField];
+          }
         }
 
         if (typeof valA === 'string') {
-          const cmp = valA.localeCompare(valB);
+          const cmp = valA.localeCompare(String(valB ?? ''));
           return sortDirection === 'asc' ? cmp : -cmp;
         } else if (typeof valA === 'number') {
-          return sortDirection === 'asc' ? valA - valB : valB - valA;
+          return sortDirection === 'asc' ? valA - Number(valB ?? 0) : Number(valB ?? 0) - valA;
         }
         return 0;
       });
     }
 
     return list;
-  }, [drivers, activeStatusTab, searchQuery, activeFilters, filterLogic, sortField, sortDirection, qaScreenState]);
+  }, [
+    baseMatchedDrivers,
+    activeFilters,
+    filterLogic,
+    sortField,
+    sortDirection,
+    modalStore,
+    allDriverIds
+  ]);
 
   // Paginated Drivers
   const paginatedDrivers = useMemo(() => {
@@ -439,8 +463,8 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
   };
 
   const selectedDriversList = useMemo(() => {
-    return drivers.filter((d) => selectedDriverIds.has(d.id));
-  }, [drivers, selectedDriverIds]);
+    return scopedDrivers.filter((d) => selectedDriverIds.has(d.id));
+  }, [scopedDrivers, selectedDriverIds]);
 
   const driverCatalogueColumns = useMemo(
     () =>
@@ -457,7 +481,7 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
   const handleApplySavedView = (view: SavedView) => {
     setCurrentViewId(view.id);
     setVisibleColumnKeys(view.visibleColumns);
-    setActiveFilters(view.filters);
+    setActiveFilters(sanitizeDriverFilters(view.filters));
     setActiveStatusTab(view.statusTab);
     setCurrentPage(1);
     setIsSavedViewsDropdownOpen(false);
@@ -493,12 +517,40 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
     showToast('Saved view removed');
   };
 
-  // Row ellipsis menu actions
+  // Row ellipsis menu actions (safe status transitions matching bulk policy)
   const handleToggleDriverStatus = (driver: Driver) => {
+    if (!isDriverAuthorizedForCompany(driver, companyContext)) {
+      showToast('Outside authorized tenant scope.', 'error');
+      return;
+    }
+    if (driver.status === 'Archived') {
+      showToast(
+        'Archived drivers cannot be activated via quick toggle. Restore from Edit Driver profile.',
+        'error'
+      );
+      return;
+    }
+    if (driver.status === 'Suspended') {
+      showToast(
+        'Suspended drivers require compliance review before reactivation. Use Bulk Activate or Edit Driver.',
+        'error'
+      );
+      return;
+    }
     const nextStatus = driver.status === 'Active' ? 'Inactive' : 'Active';
     setDrivers((prev) =>
       prev.map((d) => (d.id === driver.id ? { ...d, status: nextStatus } : d))
     );
+    if (nextStatus === 'Active') {
+      const badges = deriveDriverBadges(driver, modalStore, Date.now(), allDriverIds);
+      if (badges.expiry === 'Expired' || badges.expiry === 'Missing') {
+        showToast(
+          `Driver ${driver.name} set to Active (Note: Licence ${badges.expiry.toLowerCase()})`,
+          'info'
+        );
+        return;
+      }
+    }
     showToast(`Driver ${driver.name} is now ${nextStatus}`);
   };
 
@@ -711,7 +763,10 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
           {appliedFilterCount > 0 && (
             <button
               type="button"
-              onClick={() => setActiveFilters({})}
+              onClick={() => {
+                setActiveFilters({});
+                setCurrentPage(1);
+              }}
               className="text-[11px] text-slate-500 hover:text-red-600 font-semibold underline cursor-pointer"
             >
               Reset
@@ -876,6 +931,8 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
           <button
             type="button"
             onClick={() => {
+              setDriversState(loadDriverMasterStore());
+              setModalStore(loadModalMasterStore());
               showToast('Directory refreshed', 'info');
             }}
             title="Refresh driver records"
@@ -1002,8 +1059,9 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
           /* Grid Card View */
           <div className="p-6 grid grid-cols-3 gap-4">
             {paginatedDrivers.map((driver) => {
-              const badges = deriveDriverBadges(driver);
+              const badges = deriveDriverBadges(driver, modalStore, Date.now(), allDriverIds);
               const isSelected = selectedDriverIds.has(driver.id);
+              const primaryVehicle = badges.mappedVehicleRegs[0];
               return (
                 <div
                   key={driver.id}
@@ -1062,7 +1120,17 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
                     </div>
                     <div>
                       <span className="text-slate-400 block">Vehicle</span>
-                      <span className="font-semibold text-slate-800">{driver.reg || 'Unassigned'}</span>
+                      <span className="font-semibold text-slate-800">
+                        {primaryVehicle
+                          ? badges.mappedVehicleRegs.length > 1
+                            ? `${primaryVehicle} (+${badges.mappedVehicleRegs.length - 1})`
+                            : primaryVehicle
+                          : badges.mapping === 'Expired'
+                          ? 'Mapping Expired'
+                          : badges.hasScheduledMapping
+                          ? 'Scheduled'
+                          : 'Unassigned'}
+                      </span>
                     </div>
                     <div>
                       <span className="text-slate-400 block">Phone</span>
@@ -1192,7 +1260,7 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
               <tbody className="divide-y divide-slate-100 text-xs">
                 {paginatedDrivers.map((driver) => {
                   const isSelected = selectedDriverIds.has(driver.id);
-                  const badges = deriveDriverBadges(driver);
+                  const badges = deriveDriverBadges(driver, modalStore, Date.now(), allDriverIds);
 
                   return (
                     <tr
@@ -1297,19 +1365,30 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
                                 {driver.status}
                               </span>
                             ) : col.key === 'reg' ? (
-                              driver.reg ? (
+                              badges.mappedVehicleRegs.length > 0 ? (
                                 <div className="flex items-center gap-1.5">
                                   <span className="font-mono font-semibold text-slate-900">
-                                    {driver.reg}
+                                    {badges.mappedVehicleRegs[0]}
+                                    {badges.mappedVehicleRegs.length > 1
+                                      ? ` (+${badges.mappedVehicleRegs.length - 1})`
+                                      : ''}
                                   </span>
-                                  <span
-                                    className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
-                                      badges.mapping === 'Mapped'
-                                        ? 'bg-emerald-50 text-emerald-700'
-                                        : 'bg-amber-50 text-amber-700'
-                                    }`}
-                                  >
-                                    {badges.mapping}
+                                  <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700">
+                                    Mapped
+                                  </span>
+                                </div>
+                              ) : badges.mapping === 'Expired' ? (
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-slate-500 italic">Unassigned</span>
+                                  <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-50 text-amber-700">
+                                    Expired
+                                  </span>
+                                </div>
+                              ) : badges.hasScheduledMapping ? (
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-slate-500 italic">Unassigned</span>
+                                  <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-blue-50 text-blue-700">
+                                    Scheduled
                                   </span>
                                 </div>
                               ) : (
@@ -1591,8 +1670,12 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         appliedFilters={activeFilters}
         filterMode={filterLogic === 'OR' ? 'advanced' : 'basic'}
         totalMatchedCount={filteredDrivers.length}
+        scopedDrivers={scopedDrivers}
+        baseMatchedDrivers={baseMatchedDrivers}
+        companyContext={companyContext}
+        modalStore={modalStore}
         onApplyFilters={(filters: Record<string, any>, mode: 'basic' | 'advanced') => {
-          setActiveFilters(filters);
+          setActiveFilters(sanitizeDriverFilters(filters));
           setFilterLogic(mode === 'advanced' ? 'OR' : 'AND');
           setCurrentPage(1);
           showToast('Filters applied', 'info');
@@ -1604,31 +1687,55 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         isOpen={isBulkDrawerOpen}
         onClose={() => setIsBulkDrawerOpen(false)}
         selectedDrivers={selectedDriversList}
+        companyContext={companyContext}
+        modalStore={modalStore}
+        allDriverIds={allDriverIds}
         onExportSelected={() => setIsExportModalOpen(true)}
-        onCommitBulkAction={(action: DriverBulkActionType, values: any, eligibleIds: string[]) => {
-          let updatedCount = 0;
-          const skippedCount = selectedDriversList.length - eligibleIds.length;
+        onCommitBulkAction={(
+          action: DriverBulkActionType,
+          values: DriverBulkParams,
+          _eligibleIds: string[]
+        ) => {
+          // Revalidate tenant authorization & eligibility against live store at commit time
+          const rechecked = evaluateDriverBulkEligibility(
+            selectedDriversList,
+            action,
+            values,
+            {
+              companyContext,
+              modalStore,
+              allDriverIds
+            }
+          );
+          const verifiedIds = new Set(rechecked.eligible.map((item) => item.driver.id));
+          const skippedCount = rechecked.skipped.length;
+
+          if (verifiedIds.size === 0) {
+            showToast('No eligible drivers remaining to update.', 'error');
+            return;
+          }
 
           setDrivers((prev) =>
             prev.map((d) => {
-              if (!eligibleIds.includes(d.id)) return d;
-              updatedCount++;
+              if (!verifiedIds.has(d.id)) return d;
               if (action === 'activate') return { ...d, status: 'Active' };
               if (action === 'deactivate') return { ...d, status: 'Inactive' };
               if (action === 'suspend') return { ...d, status: 'Suspended' };
               if (action === 'archive') return { ...d, status: 'Archived' };
               if (action === 'transporter') {
+                const nextTransporter = values.transporter || d.transporter;
                 return {
                   ...d,
-                  transporter: values.transporter || d.transporter,
-                  company: values.company || d.company
+                  transporter: nextTransporter,
+                  transporterVendorId:
+                    resolveTransporterVendor(nextTransporter)?.id ?? d.transporterVendorId
                 };
               }
               if (action === 'verify') {
                 const patch: Partial<Driver> = {};
-                if (values.rto !== 'keep') patch.rto = values.rto === 'yes';
-                if (values.police !== 'keep') patch.police = values.police === 'yes';
-                if (values.training !== 'keep') patch.training = values.training === 'yes';
+                if (typeof values.rto === 'boolean') patch.rto = values.rto;
+                if (typeof values.police === 'boolean') patch.police = values.police;
+                if (typeof values.training === 'boolean') patch.training = values.training;
                 return { ...d, ...patch };
               }
               return d;
@@ -1638,12 +1745,16 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
           handleLogHistory({
             type: 'Bulk',
             name: `Bulk ${action.toUpperCase()}`,
-            recordCount: updatedCount,
+            recordCount: verifiedIds.size,
             skippedCount,
-            status: 'Completed'
+            status: skippedCount > 0 ? 'Partial' : 'Completed'
           });
 
-          showToast(`Bulk update applied to ${updatedCount} drivers!`);
+          showToast(
+            `Bulk update applied to ${verifiedIds.size} driver${verifiedIds.size === 1 ? '' : 's'}${
+              skippedCount > 0 ? ` (${skippedCount} skipped)` : ''
+            }!`
+          );
           clearSelection();
         }}
       />
@@ -1653,7 +1764,8 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         isOpen={isImportDrawerOpen}
         onClose={() => setIsImportDrawerOpen(false)}
         existingDrivers={drivers}
-        onImportComplete={(newDrivers: Driver[]) => {
+        companyContext={companyContext}
+        onImportComplete={(newDrivers: Driver[], skippedCount: number) => {
           setDrivers([...newDrivers, ...drivers]);
           setSortField('');
           setCurrentPage(1);
@@ -1661,7 +1773,8 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
             type: 'Import',
             name: `CSV Import (${newDrivers.length} rows)`,
             recordCount: newDrivers.length,
-            status: 'Completed'
+            skippedCount,
+            status: skippedCount > 0 ? 'Partial' : 'Completed'
           });
           showToast(`Successfully imported ${newDrivers.length} drivers!`);
         }}
@@ -1674,6 +1787,8 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         filteredDrivers={filteredDrivers}
         selectedDrivers={selectedDriversList}
         visibleColumnIds={visibleColumnKeys}
+        modalStore={modalStore}
+        allDriverIds={allDriverIds}
         onLogHistory={handleLogHistory}
         onOpenHistory={() => setIsHistoryModalOpen(true)}
       />
@@ -1686,23 +1801,39 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
         onClearHistory={() => setHistoryJobs([])}
       />
 
-      {/* Delete Driver Confirmation Modal with Confirmation Chips */}
+      {/* Delete Driver Confirmation Modal with Confirmation Chips & Mapping Safeguard */}
       <DeleteConfirmationModal
         isOpen={Boolean(driverToDelete)}
-        title="Delete Driver?"
+        title={driverToDeleteRefs?.hasAnyReference ? 'Driver Deletion Blocked' : 'Delete Driver?'}
         description={
           driverToDelete ? (
-            <>
-              Are you sure you want to delete driver{' '}
-              <strong className="text-slate-900 font-semibold">{driverToDelete.name}</strong> (
-              {driverToDelete.licence || driverToDelete.phone})? All driver allocation records
-              and document files will be removed.
-            </>
+            driverToDeleteRefs?.hasAnyReference ? (
+              <>
+                Driver <strong className="text-slate-900 font-semibold">{driverToDelete.name}</strong> (
+                {driverToDelete.licence || driverToDelete.phone}) cannot be permanently deleted because it has{' '}
+                {driverToDeleteRefs.allAllocations.length} allocation
+                {driverToDeleteRefs.allAllocations.length === 1 ? '' : 's'} and{' '}
+                {driverToDeleteRefs.allRelationships.length} relationship
+                {driverToDeleteRefs.allRelationships.length === 1 ? '' : 's'} in Asset Mapping.
+              </>
+            ) : (
+              <>
+                Are you sure you want to delete driver{' '}
+                <strong className="text-slate-900 font-semibold">{driverToDelete.name}</strong> (
+                {driverToDelete.licence || driverToDelete.phone})? All driver document files will be removed.
+              </>
+            )
           ) : (
             ''
           )
         }
         confirmLabel="Delete Driver"
+        confirmDisabled={Boolean(driverToDeleteRefs?.hasAnyReference)}
+        warningNote={
+          driverToDeleteRefs?.hasAnyReference
+            ? 'Historical or active driver assignments must not be orphaned. End active mappings in Asset Mapping and use Archive instead of deleting.'
+            : undefined
+        }
         targetChips={
           driverToDelete
             ? [
@@ -1728,11 +1859,11 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({ companyC
             : []
         }
         confirmationChips={
-          driverToDelete
+          driverToDelete && !driverToDeleteRefs?.hasAnyReference
             ? [
                 {
                   id: 'docs',
-                  label: 'Compliance Docs & Allocations Removed',
+                  label: 'Compliance Docs & Record Removed',
                   tone: 'amber',
                 },
                 {

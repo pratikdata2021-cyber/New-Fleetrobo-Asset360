@@ -11,9 +11,7 @@ import {
   Plus,
   Eye,
   Edit2,
-  MoreHorizontal,
   X,
-  Info,
   CheckCircle2,
   AlertTriangle,
   ArrowUpDown,
@@ -32,41 +30,51 @@ import { DeleteConfirmationModal } from './common/DeleteConfirmationModal';
 import {
   SensorRecord,
   SensorCategory,
-  HardwareLifecycleStatus,
-  SENSOR_CATALOGUE,
+  EffectiveSensorStatus,
+  SensorMappingFilterStatus,
   SENSOR_COLUMNS,
-  MODAL_OWNERS,
-  MODAL_LOCATIONS,
-  HARDWARE_LIFECYCLE_OPTIONS,
   MODAL_FIELD_TOOLTIPS,
   SavedModalView,
+  HardwareAuditEntry,
   loadModalMasterStore,
   saveModalMasterStore,
   loadSavedModalViews,
   saveSavedModalViews,
   downloadModalCsv,
-  parseCsvLine
+  parseCsvLine,
+  deriveSensorStatus,
+  deriveSensorMappingFilterStatus,
+  getSensorMappingReferences,
+  SENSOR_EFFECTIVE_STATUS_OPTIONS
 } from '../types/modalMaster';
 import {
   getEnabledModelsForCompanyName,
-  getAvailableClientCompanies
+  getAvailableClientCompanies,
+  isCompanyEligibleForNewRegistration,
+  resolveClientCompanyByNameOrId
 } from '../types/companyModelEnablement';
-import { getRecordIdentifierTypes } from '../types/modelCategoryMaster';
+import { getModelCategoryById, getRecordIdentifierTypes } from '../types/modelCategoryMaster';
 import { ColumnCataloguePopover } from './ColumnCataloguePopover';
+import {
+  SensorsFilterDrawer,
+  SensorsAdvancedFilters,
+  DEFAULT_SENSORS_FILTERS,
+  countActiveSensorFilters,
+  matchesSensorsFilters
+} from './sensors-master/SensorsFilterDrawer';
+import {
+  SensorsBulkDrawer,
+  SensorsBulkActionMode
+} from './sensors-master/SensorsBulkDrawer';
 
-const SENSOR_CATEGORIES: SensorCategory[] = ['Temperature Sensor', 'Fuel Sensor'];
+const normalizeSensorTypeAlias = (value: string): string => {
+  const norm = (value || '').trim().toLowerCase();
+  if (norm === 'fuel sensor' || norm === 'fuel level sensor') return 'fuel level sensor';
+  return norm;
+};
 
-const ALL_SENSOR_MANUFACTURERS = [
-  'Teltonika',
-  'Sensitech',
-  'WIKA',
-  'Monnit',
-  'Digital Matter',
-  'Milesight',
-  'Escort',
-  'Epsilon',
-  'Omnicomm'
-];
+const sensorTypesMatch = (a: string, b: string): boolean =>
+  normalizeSensorTypeAlias(a) === normalizeSensorTypeAlias(b);
 
 const FieldLabel: React.FC<{
   label: string;
@@ -114,24 +122,28 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     });
   };
 
-  // Model access sync from Binary Platform Admin -> Company Management
+  // Model access sync + cross-tab / Mapping store sync + 60s time-window re-evaluation
   const [modelAccessTick, setModelAccessTick] = useState(0);
+  const [statusTick, setStatusTick] = useState(0);
   useEffect(() => {
     const handleSync = () => setModelAccessTick((t) => t + 1);
     const handleStoreSync = () => {
       if (!selfWriteRef.current) {
         setStoreState(loadModalMasterStore());
       }
+      setStatusTick((t) => t + 1);
     };
     window.addEventListener('fleetrobo:model-access-updated', handleSync);
     window.addEventListener('fleetrobo:modal-store-updated', handleStoreSync);
     window.addEventListener('storage', handleSync);
     window.addEventListener('storage', handleStoreSync);
+    const timer = window.setInterval(() => setStatusTick((t) => t + 1), 60000);
     return () => {
       window.removeEventListener('fleetrobo:model-access-updated', handleSync);
       window.removeEventListener('fleetrobo:modal-store-updated', handleStoreSync);
       window.removeEventListener('storage', handleSync);
       window.removeEventListener('storage', handleStoreSync);
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -141,17 +153,45 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     return getAvailableClientCompanies();
   }, [modelAccessTick]);
 
-  // Toolbar & Table states
+  // Toolbar & Drawer Filter states
   const [searchQuery, setSearchQuery] = useState('');
   const [filterCompany, setFilterCompany] = useState<string>('All');
-  const [filterKind, setFilterKind] = useState<string>('All');
-  const [filterManufacturer, setFilterManufacturer] = useState<string>('All');
-  const [filterUnit, setFilterUnit] = useState<string>('All');
-  const [filterLifecycle, setFilterLifecycle] = useState<string>('All');
+  const [advancedFilters, setAdvancedFilters] = useState<SensorsAdvancedFilters>(
+    DEFAULT_SENSORS_FILTERS
+  );
 
   useEffect(() => {
     setFilterCompany('All');
+    setAdvancedFilters(DEFAULT_SENSORS_FILTERS);
   }, [currentCompany]);
+
+  // Authorized sensors in active tenant/toolbar scope
+  const scopedSensors = useMemo(() => {
+    const companyTarget =
+      !isPlatformAdmin && currentCompany
+        ? currentCompany.trim().toLowerCase()
+        : isPlatformAdmin && filterCompany !== 'All'
+        ? filterCompany.trim().toLowerCase()
+        : null;
+    if (!companyTarget) return isPlatformAdmin ? store.sensors : [];
+    return store.sensors.filter((s) => (s.company || '').trim().toLowerCase() === companyTarget);
+  }, [store.sensors, currentCompany, isPlatformAdmin, filterCompany]);
+
+  // Derived effective Sensor status & mapping filter status
+  const { effectiveStatusById, mappingStatusById } = useMemo(() => {
+    void statusTick;
+    const nowMs = Date.now();
+    const statusMap = new Map<string, EffectiveSensorStatus>();
+    const mappingMap = new Map<string, SensorMappingFilterStatus>();
+    store.sensors.forEach((s) => {
+      statusMap.set(s.id, deriveSensorStatus(s, store, nowMs));
+      mappingMap.set(s.id, deriveSensorMappingFilterStatus(s.id, store, nowMs));
+    });
+    return { effectiveStatusById: statusMap, mappingStatusById: mappingMap };
+  }, [store, statusTick]);
+
+  const getEffectiveStatus = (sensor: SensorRecord): EffectiveSensorStatus =>
+    effectiveStatusById.get(sensor.id) ?? deriveSensorStatus(sensor, store);
 
   // Enabled Sensor models for the active company (or selected filter company in Platform Admin)
   const enabledSensorModels = useMemo(() => {
@@ -162,9 +202,14 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
   }, [currentCompany, isPlatformAdmin, filterCompany, modelAccessTick]);
 
   const enabledSensorCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(enabledSensorModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : ['Temperature Sensor', 'Fuel Level Sensor', 'Door Sensor'];
+    return Array.from(new Set(enabledSensorModels.map((m) => m.typeName)));
   }, [enabledSensorModels]);
+
+  const availableLocations = useMemo<string[]>(() => {
+    return Array.from(
+      new Set(scopedSensors.map((s) => (s.inventoryLocation || '').trim()).filter(Boolean))
+    ).sort((a, b) => a.localeCompare(b));
+  }, [scopedSensors]);
 
   const [sortKey, setSortKey] = useState<string>('');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -196,32 +241,32 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
   const [formName, setFormName] = useState('');
   const [formDeviceId, setFormDeviceId] = useState('');
   const [formKind, setFormKind] = useState<SensorCategory>(
-    () => enabledSensorCategories[0] || 'Temperature Sensor'
+    () => enabledSensorCategories[0] || ''
   );
   const [formSerial, setFormSerial] = useState('');
-  const [formIdentifierType, setFormIdentifierType] = useState('Serial Number');
+  const [formIdentifierType, setFormIdentifierType] = useState('');
   const [formManufacturer, setFormManufacturer] = useState(
-    () => enabledSensorModels[0]?.manufacturer || 'Teltonika'
+    () => enabledSensorModels[0]?.manufacturer || ''
   );
   const [formModelText, setFormModelText] = useState(
-    () => enabledSensorModels[0]?.modelReference || 'EYE Sensor'
+    () => enabledSensorModels[0]?.modelReference || enabledSensorModels[0]?.typeName || ''
   );
   const [formMeasurementCap, setFormMeasurementCap] = useState<string>(
-    () => enabledSensorModels[0]?.measurementType || 'Temperature'
+    () => enabledSensorModels[0]?.measurementType || ''
   );
   const [formUnit, setFormUnit] = useState<string>(
-    () => enabledSensorModels[0]?.measurementUnit || '°C'
+    () => enabledSensorModels[0]?.measurementUnit || ''
   );
-  const [formRange, setFormRange] = useState('−40 to +85 °C');
-  const [formCapabilities, setFormCapabilities] = useState<string[]>(['BLE']);
+  const [formRange, setFormRange] = useState('');
+  const [formCapabilities, setFormCapabilities] = useState<string[]>([]);
   const [formCompany, setFormCompany] = useState(() =>
     currentCompany && currentCompany !== 'Platform Admin' && currentCompany !== 'Binary'
       ? currentCompany
-      : availableOrganizations[0] || MODAL_OWNERS[0]
+      : availableOrganizations[0] || ''
   );
 
   const effectiveFormCompany = isPlatformAdmin
-    ? formCompany || availableOrganizations[0] || 'Adani Mundra'
+    ? formCompany || availableOrganizations[0] || ''
     : currentCompany;
 
   const formEnabledSensorModels = useMemo(() => {
@@ -230,25 +275,30 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     );
   }, [effectiveFormCompany, modelAccessTick]);
 
+  const formSelectableSensorModels = useMemo(() => {
+    if (!editingSensor) return formEnabledSensorModels;
+    const historical = editingSensor.modelTypeId
+      ? getModelCategoryById(editingSensor.modelTypeId)
+      : undefined;
+    if (historical && !formEnabledSensorModels.some((m) => m.id === historical.id)) {
+      return [historical, ...formEnabledSensorModels];
+    }
+    return formEnabledSensorModels;
+  }, [editingSensor, formEnabledSensorModels]);
+
   const formEnabledSensorCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(formEnabledSensorModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : ['Temperature Sensor', 'Fuel Level Sensor', 'Door Sensor'];
-  }, [formEnabledSensorModels]);
-  const [formLocation, setFormLocation] = useState(MODAL_LOCATIONS[0]);
-  const [formLifecycle, setFormLifecycle] = useState<HardwareLifecycleStatus>('Active');
+    const cats = Array.from(new Set(formSelectableSensorModels.map((m) => m.typeName)));
+    if (editingSensor?.kind && !cats.includes(editingSensor.kind)) {
+      return [editingSensor.kind, ...cats];
+    }
+    return cats;
+  }, [formSelectableSensorModels, editingSensor]);
+  const [formLocation, setFormLocation] = useState('');
   const [formNotes, setFormNotes] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
   // Saved view creation state
   const [newViewName, setNewViewName] = useState('');
-
-  // Bulk operation state
-  const [bulkAction, setBulkAction] = useState<
-    'Update ownership' | 'Update inventory status' | 'Decommission eligible' | 'Delete eligible'
-  >('Update ownership');
-  const [bulkTargetOwner, setBulkTargetOwner] = useState(MODAL_OWNERS[0]);
-  const [bulkTargetStatus, setBulkTargetStatus] = useState<HardwareLifecycleStatus>('Active');
-  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
 
   // Direct upload state
   const sensorUpload = useDirectUploadState(activeDrawer === 'import');
@@ -257,82 +307,75 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     saveSavedModalViews(savedViews);
   }, [savedViews]);
 
-  // Derived form options from formEnabledSensorModels for the selected category
+  // Derived form options strictly from formSelectableSensorModels for the selected category
   const modelsForSelectedCategory = useMemo(() => {
-    return formEnabledSensorModels.filter(
-      (m) =>
-        m.typeName === formKind ||
-        (formKind === 'Fuel Sensor' && m.typeName === 'Fuel Level Sensor') ||
-        (formKind === 'Fuel Level Sensor' && m.typeName === 'Fuel Sensor')
-    );
-  }, [formEnabledSensorModels, formKind]);
+    return formSelectableSensorModels.filter((m) => sensorTypesMatch(m.typeName, formKind));
+  }, [formSelectableSensorModels, formKind]);
 
   const availableManufacturers = useMemo<string[]>(() => {
     if (modelsForSelectedCategory.length > 0) {
       const mfgs = Array.from(
         new Set(modelsForSelectedCategory.map((m) => m.manufacturer).filter(Boolean))
       );
-      if (mfgs.length > 0) return mfgs;
+      if (editingSensor?.manufacturer && !mfgs.includes(editingSensor.manufacturer)) {
+        return [editingSensor.manufacturer, ...mfgs];
+      }
+      return mfgs;
     }
-    const catDef = SENSOR_CATALOGUE[formKind as any];
-    return catDef ? Object.keys(catDef.manufacturers) : ALL_SENSOR_MANUFACTURERS;
-  }, [modelsForSelectedCategory, formKind]);
+    if (editingSensor?.manufacturer) {
+      return [editingSensor.manufacturer];
+    }
+    return [];
+  }, [modelsForSelectedCategory, editingSensor]);
 
   const availableModels = useMemo<
-    { model: string; capabilities: string[]; defaultRange: string }[]
+    { model: string; modelId?: string }[]
   >(() => {
     if (modelsForSelectedCategory.length > 0) {
       const byMfg = modelsForSelectedCategory.filter((m) => m.manufacturer === formManufacturer);
-      const list = byMfg.length > 0 ? byMfg : modelsForSelectedCategory;
-      const validModels = list
+      const validModels = byMfg
         .map((m) => ({
           model: m.modelReference || m.typeName,
-          capabilities: ['BLE'],
-          defaultRange:
-            m.measurementType === 'Temperature'
-              ? '−40 to +85 °C'
-              : m.measurementType === 'Fuel Level'
-              ? '0–600 L'
-              : 'State'
+          modelId: m.id
         }))
         .filter((x) => Boolean(x.model));
       if (validModels.length > 0) return validModels;
     }
-    const catDef = SENSOR_CATALOGUE[formKind as any];
-    if (!catDef) {
-      return [
-        {
-          model: formModelText || 'EYE Sensor',
-          capabilities: ['BLE'],
-          defaultRange: '−40 to +85 °C'
-        }
-      ];
+    if (editingSensor && editingSensor.modelText) {
+      return [{ model: editingSensor.modelText, modelId: editingSensor.modelTypeId }];
     }
-    return (
-      catDef.manufacturers[formManufacturer]?.models ||
-      catDef.manufacturers[availableManufacturers[0]]?.models ||
-      []
-    );
-  }, [
-    modelsForSelectedCategory,
-    formManufacturer,
-    formKind,
-    formModelText,
-    availableManufacturers
-  ]);
+    return [];
+  }, [modelsForSelectedCategory, formManufacturer, editingSensor]);
 
+  // Exact matching on category=Sensor, type, manufacturer, model, and tenant-enabled/historical modelTypeId
   const selectedSensorModelSpec = useMemo(() => {
+    if (editingSensor?.modelTypeId) {
+      const exactHistorical = formSelectableSensorModels.find(
+        (m) =>
+          m.category === 'Sensor' &&
+          m.id === editingSensor.modelTypeId &&
+          sensorTypesMatch(m.typeName, formKind) &&
+          m.manufacturer === formManufacturer &&
+          (m.modelReference || m.typeName) === formModelText
+      );
+      if (exactHistorical) return exactHistorical;
+    }
     return (
       modelsForSelectedCategory.find(
         (m) =>
-          (m.manufacturer === formManufacturer && m.modelReference === formModelText) ||
-          m.manufacturer === formManufacturer
-      ) ||
-      modelsForSelectedCategory[0] ||
-      formEnabledSensorModels[0] ||
-      null
+          m.category === 'Sensor' &&
+          m.manufacturer === formManufacturer &&
+          (m.modelReference || m.typeName) === formModelText
+      ) || null
     );
-  }, [modelsForSelectedCategory, formManufacturer, formModelText, formEnabledSensorModels]);
+  }, [
+    editingSensor,
+    formSelectableSensorModels,
+    modelsForSelectedCategory,
+    formKind,
+    formManufacturer,
+    formModelText
+  ]);
 
   const availableIdentifierTypes = useMemo(() => {
     const fromSpec = getRecordIdentifierTypes(selectedSensorModelSpec);
@@ -350,17 +393,26 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     return availableIdentifierTypes[0] || 'Serial Number';
   }, [formIdentifierType, availableIdentifierTypes]);
 
-  // Keep defaults aligned when company or enabled models change
+  // Keep defaults aligned when company or enabled models change during Create
   useEffect(() => {
     if (editingSensor) return;
     if (formEnabledSensorModels.length > 0) {
       const first =
-        formEnabledSensorModels.find((m) => m.typeName === formKind) || formEnabledSensorModels[0];
+        formEnabledSensorModels.find((m) => sensorTypesMatch(m.typeName, formKind)) ||
+        formEnabledSensorModels[0];
       setFormKind(first.typeName);
-      setFormManufacturer(first.manufacturer || 'Teltonika');
+      setFormManufacturer(first.manufacturer || '');
       setFormModelText(first.modelReference || first.typeName);
-      setFormMeasurementCap(first.measurementType || 'Temperature');
-      setFormUnit(first.measurementUnit || '°C');
+      setFormMeasurementCap(first.measurementType || '');
+      setFormUnit(first.measurementUnit || '');
+      setFormIdentifierType(getRecordIdentifierTypes(first)[0] || '');
+    } else {
+      setFormKind('');
+      setFormManufacturer('');
+      setFormModelText('');
+      setFormMeasurementCap('');
+      setFormUnit('');
+      setFormIdentifierType('');
     }
   }, [effectiveFormCompany, formEnabledSensorModels, editingSensor]);
 
@@ -370,35 +422,37 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     const targetOrg = isPlatformAdmin
       ? filterCompany !== 'All'
         ? filterCompany
-        : availableOrganizations[0] || MODAL_OWNERS[0]
-      : currentCompany || MODAL_OWNERS[0];
+        : availableOrganizations[0] || ''
+      : currentCompany || '';
     const targetModels = getEnabledModelsForCompanyName(targetOrg).filter(
       (m) => m.category === 'Sensor'
     );
     const targetCats = Array.from(new Set(targetModels.map((m) => m.typeName)));
     const nextNum = 10001 + store.sensors.length;
-    const initialKind = targetCats[0] || enabledSensorCategories[0] || 'Temperature Sensor';
-    const initialSpec =
-      targetModels.find((m) => m.typeName === initialKind) || targetModels[0] || enabledSensorModels[0];
-    const mfg = initialSpec?.manufacturer || 'Teltonika';
-    const modelStr = initialSpec?.modelReference || 'EYE Sensor';
+    const initialKind = targetCats[0] || '';
+    const initialSpec = targetModels.find((m) => m.typeName === initialKind) || targetModels[0];
+    const mfg = initialSpec?.manufacturer || '';
+    const modelStr = initialSpec?.modelReference || initialSpec?.typeName || '';
 
     setFormName('');
     setFormDeviceId(`SENS-${nextNum}`);
     setFormKind(initialKind);
-    setFormIdentifierType(getRecordIdentifierTypes(initialSpec)[0] || 'Serial Number');
-    setFormSerial(`SN-SENSOR-${260000 + store.sensors.length}`);
+    setFormIdentifierType(getRecordIdentifierTypes(initialSpec)[0] || '');
+    setFormSerial('');
     setFormManufacturer(mfg);
     setFormModelText(modelStr);
-    setFormMeasurementCap(initialSpec?.measurementType || 'Temperature');
-    setFormUnit(initialSpec?.measurementUnit || '°C');
-    setFormRange(initialSpec?.measurementType === 'Temperature' ? '−40 to +85 °C' : '0–600 L');
-    setFormCapabilities(['BLE']);
+    setFormMeasurementCap(initialSpec?.measurementType || '');
+    setFormUnit(initialSpec?.measurementUnit || '');
+    setFormRange('');
+    setFormCapabilities([]);
     setFormCompany(targetOrg);
-    setFormLocation('Mundra CT2');
-    setFormLifecycle('Active');
+    setFormLocation('');
     setFormNotes('');
-    setFormError(null);
+    setFormError(
+      initialSpec
+        ? null
+        : `No active Sensor models are enabled for "${targetOrg || 'this company'}". Enable a Sensor model in Company Model Access first.`
+    );
     setActiveDrawer('form');
   };
 
@@ -412,14 +466,13 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     setFormSerial(record.serial);
     setFormManufacturer(record.manufacturer);
     setFormModelText(record.modelText);
-    setFormMeasurementCap(record.measurementCapability);
-    setFormUnit(record.measurementUnit);
-    setFormRange(record.measurementRange);
-    setFormCapabilities([...record.capabilities]);
-    setFormCompany(record.company || currentCompany || 'Adani Mundra');
-    setFormLocation(record.inventoryLocation || 'Mundra CT2');
-    setFormLifecycle(record.hardwareLifecycle);
-    setFormNotes(record.notes);
+    setFormMeasurementCap(record.measurementCapability || '');
+    setFormUnit(record.measurementUnit || '');
+    setFormRange(record.measurementRange || '');
+    setFormCapabilities([...(record.capabilities || [])]);
+    setFormCompany(record.company || currentCompany || '');
+    setFormLocation(record.inventoryLocation || '');
+    setFormNotes(record.notes || '');
     setFormError(null);
     setActiveDrawer('form');
   };
@@ -427,31 +480,22 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
   // Dynamic sensor type change
   const handleSensorTypeChange = (newType: SensorCategory) => {
     setFormKind(newType);
-    const matching = formEnabledSensorModels.filter(
-      (m) =>
-        m.typeName === newType ||
-        (newType === 'Fuel Sensor' && m.typeName === 'Fuel Level Sensor') ||
-        (newType === 'Fuel Level Sensor' && m.typeName === 'Fuel Sensor')
+    const matching = formSelectableSensorModels.filter((m) =>
+      sensorTypesMatch(m.typeName, newType)
     );
     if (matching.length > 0) {
       const first = matching[0];
-      setFormManufacturer(first.manufacturer || 'Teltonika');
+      setFormManufacturer(first.manufacturer || '');
       setFormModelText(first.modelReference || first.typeName);
-      setFormMeasurementCap(first.measurementType || 'Temperature');
-      setFormUnit(first.measurementUnit || '°C');
-      setFormRange(first.measurementType === 'Temperature' ? '−40 to +85 °C' : '0–600 L');
+      setFormMeasurementCap(first.measurementType || '');
+      setFormUnit(first.measurementUnit || '');
+      setFormIdentifierType(getRecordIdentifierTypes(first)[0] || '');
     } else {
-      const catDef = SENSOR_CATALOGUE[newType as any];
-      if (catDef) {
-        const firstMfg = Object.keys(catDef.manufacturers)[0];
-        const firstModel = catDef.manufacturers[firstMfg].models[0];
-        setFormManufacturer(firstMfg);
-        setFormModelText(firstModel.model);
-        setFormMeasurementCap(catDef.measurementCapability);
-        setFormUnit(catDef.defaultUnit);
-        setFormRange(firstModel.defaultRange);
-        setFormCapabilities([...firstModel.capabilities]);
-      }
+      setFormManufacturer('');
+      setFormModelText('');
+      setFormMeasurementCap('');
+      setFormUnit('');
+      setFormIdentifierType('');
     }
   };
 
@@ -462,29 +506,26 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     if (matching.length > 0) {
       const first = matching[0];
       setFormModelText(first.modelReference || first.typeName);
-      setFormMeasurementCap(first.measurementType || 'Temperature');
-      setFormUnit(first.measurementUnit || '°C');
+      setFormMeasurementCap(first.measurementType || '');
+      setFormUnit(first.measurementUnit || '');
+      setFormIdentifierType(getRecordIdentifierTypes(first)[0] || '');
     } else {
-      const catDef = SENSOR_CATALOGUE[formKind as any];
-      const mfgEntry = catDef?.manufacturers[newMfg];
-      if (mfgEntry && mfgEntry.models.length > 0) {
-        const firstModel = mfgEntry.models[0];
-        setFormModelText(firstModel.model);
-        setFormRange(firstModel.defaultRange);
-        setFormCapabilities([...firstModel.capabilities]);
-      }
+      setFormModelText('');
+      setFormMeasurementCap('');
+      setFormUnit('');
     }
   };
 
   // Dynamic model change
   const handleModelChange = (newModel: string) => {
     setFormModelText(newModel);
-    const catDef = SENSOR_CATALOGUE[formKind as any];
-    const mfgEntry = catDef?.manufacturers[formManufacturer];
-    const found = mfgEntry?.models.find((m) => m.model === newModel);
-    if (found) {
-      setFormRange(found.defaultRange);
-      setFormCapabilities([...found.capabilities]);
+    const matched = modelsForSelectedCategory.find(
+      (m) => m.manufacturer === formManufacturer && (m.modelReference || m.typeName) === newModel
+    );
+    if (matched) {
+      setFormMeasurementCap(matched.measurementType || '');
+      setFormUnit(matched.measurementUnit || '');
+      setFormIdentifierType(getRecordIdentifierTypes(matched)[0] || '');
     }
   };
 
@@ -495,39 +536,89 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
 
     const trimmedName = formName.trim();
     const trimmedId = formDeviceId.trim();
-    const trimmedSerial = formSerial.trim() || `SN-${trimmedId}`;
+    const trimmedSerial = formSerial.trim();
 
-    if (!trimmedName || !trimmedId) {
+    if (!editingSensor && formEnabledSensorModels.length === 0) {
+      setFormError(
+        `No active Sensor models are currently available for "${effectiveFormCompany}". Approve models or verify company status in Company Management.`
+      );
+      return;
+    }
+
+    if (!trimmedName || !trimmedId || !trimmedSerial || !formKind || !formManufacturer || !formModelText) {
       setFormError('Please complete all required fields marked with *.');
       return;
+    }
+
+    const finalCompany = (isPlatformAdmin ? formCompany : currentCompany).trim();
+    const matchedCompany = resolveClientCompanyByNameOrId(finalCompany);
+    if (
+      !finalCompany ||
+      !matchedCompany ||
+      matchedCompany.isPlatformOwner ||
+      !isCompanyEligibleForNewRegistration(matchedCompany)
+    ) {
+      setFormError(
+        `Organization "${finalCompany || 'Unknown'}" is not an eligible client company for sensor registration.`
+      );
+      return;
+    }
+
+    // Validate model matches exact company-approved Sensor model (unless editing unchanged historical record)
+    const isUnchangedHistoricalModel =
+      Boolean(editingSensor) &&
+      editingSensor!.kind === formKind &&
+      editingSensor!.manufacturer === formManufacturer &&
+      editingSensor!.modelText === formModelText;
+
+    if (!isUnchangedHistoricalModel) {
+      if (!selectedSensorModelSpec) {
+        setFormError(
+          `Selected model "${formManufacturer} ${formModelText}" does not match an active Sensor model in ${matchedCompany.name}'s Model Access.`
+        );
+        return;
+      }
+      const isEnabledForTenant = formEnabledSensorModels.some(
+        (m) => m.id === selectedSensorModelSpec.id
+      );
+      if (!isEnabledForTenant) {
+        setFormError(
+          `Model "${formManufacturer} ${formModelText}" is not enabled for ${matchedCompany.name}. Enable it in Company Model Access first.`
+        );
+        return;
+      }
     }
 
     // Cross-module uniqueness across both devices AND sensors
     const duplicateInDevices = store.devices.some(
       (d) =>
         d.deviceId.toLowerCase() === trimmedId.toLowerCase() ||
-        (trimmedSerial && d.serial.toLowerCase() === trimmedSerial.toLowerCase())
+        d.serial.toLowerCase() === trimmedSerial.toLowerCase()
     );
     const duplicateInSensors = store.sensors.some(
       (s) =>
         s.id !== editingSensor?.id &&
         (s.deviceId.toLowerCase() === trimmedId.toLowerCase() ||
-          (trimmedSerial && s.serial.toLowerCase() === trimmedSerial.toLowerCase()))
+          s.serial.toLowerCase() === trimmedSerial.toLowerCase())
     );
 
     if (duplicateInDevices || duplicateInSensors) {
-      setFormError('Device/Sensor ID and physical serial must be unique.');
+      setFormError('Device/Sensor ID and physical identifier must be unique.');
       return;
     }
 
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const finalCompany = isPlatformAdmin
-      ? formCompany || availableOrganizations[0] || 'Adani Mundra'
-      : currentCompany || formCompany || 'Adani Mundra';
-    const finalLocation = formLocation || 'Mundra CT2';
+    const nowIso = new Date().toISOString();
+    const todayStr = nowIso.slice(0, 10);
 
     if (editingSensor) {
-      const updatedRecord: SensorRecord = {
+      const nextAudit: HardwareAuditEntry = {
+        id: `aud-sen-${Date.now()}`,
+        timestamp: nowIso,
+        actor: isPlatformAdmin ? 'Platform Admin' : matchedCompany.name,
+        action: 'Updated',
+        summary: `Updated sensor metadata (${trimmedId} · ${formManufacturer} ${formModelText}).`
+      };
+      const candidate: SensorRecord = {
         ...editingSensor,
         name: trimmedName,
         deviceId: trimmedId,
@@ -539,21 +630,36 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
         identifierType: activeIdentifierType,
         serial: trimmedSerial,
         capabilities: formCapabilities,
-        measurementCapability: formMeasurementCap,
-        measurementUnit: formUnit,
+        measurementCapability: selectedSensorModelSpec?.measurementType || formMeasurementCap,
+        measurementUnit: selectedSensorModelSpec?.measurementUnit || formUnit,
         measurementRange: formRange.trim(),
-        company: finalCompany,
-        inventoryLocation: finalLocation,
-        hardwareLifecycle: formLifecycle,
+        company: matchedCompany.name,
+        inventoryLocation: formLocation.trim(),
         notes: formNotes.trim(),
+        auditHistory: [nextAudit, ...(editingSensor.auditHistory || [])].slice(0, 25),
         updatedAt: todayStr
+      };
+      const effectiveStatus = deriveSensorStatus(candidate, store);
+      const updatedRecord: SensorRecord = {
+        ...candidate,
+        hardwareLifecycle: effectiveStatus
       };
       setStore((prev) => ({
         ...prev,
         sensors: prev.sensors.map((s) => (s.id === editingSensor.id ? updatedRecord : s))
       }));
+      if (inspectedSensor?.id === editingSensor.id) {
+        setInspectedSensor(updatedRecord);
+      }
       showToast(`Sensor ${trimmedId} updated.`);
     } else {
+      const createAudit: HardwareAuditEntry = {
+        id: `aud-sen-${Date.now()}`,
+        timestamp: nowIso,
+        actor: isPlatformAdmin ? 'Platform Admin' : matchedCompany.name,
+        action: 'Registered',
+        summary: `Registered sensor ${trimmedId} (${formManufacturer} ${formModelText}) into Inventory.`
+      };
       const newRecord: SensorRecord = {
         id: `sen-focus-${Date.now()}`,
         deviceId: trimmedId,
@@ -567,12 +673,14 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
         identifierType: activeIdentifierType,
         serial: trimmedSerial,
         capabilities: formCapabilities,
-        measurementCapability: formMeasurementCap,
-        measurementUnit: formUnit,
+        measurementCapability: selectedSensorModelSpec?.measurementType || formMeasurementCap,
+        measurementUnit: selectedSensorModelSpec?.measurementUnit || formUnit,
         measurementRange: formRange.trim(),
-        company: finalCompany,
-        inventoryLocation: finalLocation,
-        hardwareLifecycle: formLifecycle,
+        company: matchedCompany.name,
+        inventoryLocation: '',
+        hardwareLifecycle: 'Inventory',
+        statusOverride: null,
+        auditHistory: [createAudit],
         registeredAt: todayStr,
         updatedAt: todayStr,
         notes: formNotes.trim()
@@ -583,27 +691,32 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
       }));
       setSortKey('');
       setCurrentPage(1);
-      showToast(`Sensor ${trimmedId} created.`);
+      showToast(`Sensor ${trimmedId} created in Inventory.`);
     }
 
     setActiveDrawer(null);
   };
 
-  // Filtered & Sorted Sensors (strictly scoped to active client when not Platform Admin)
+  // Filtered & Sorted Sensors (strictly scoped to authorized tenant & sectional drawer filters)
+  const effectiveAdvancedFilters = useMemo<SensorsAdvancedFilters>(() => {
+    if (
+      isPlatformAdmin &&
+      filterCompany !== 'All' &&
+      advancedFilters.organizations.length === 0
+    ) {
+      return { ...advancedFilters, organizations: [filterCompany] };
+    }
+    return advancedFilters;
+  }, [isPlatformAdmin, filterCompany, advancedFilters]);
+
   const filteredSensors = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    const companyTarget =
-      !isPlatformAdmin && currentCompany
-        ? currentCompany.trim().toLowerCase()
-        : isPlatformAdmin && filterCompany !== 'All'
-        ? filterCompany.trim().toLowerCase()
-        : null;
-    return store.sensors.filter((s) => {
-      if (companyTarget && (s.company || '').trim().toLowerCase() !== companyTarget) return false;
-      if (filterKind !== 'All' && s.kind !== filterKind) return false;
-      if (filterManufacturer !== 'All' && s.manufacturer !== filterManufacturer) return false;
-      if (filterUnit !== 'All' && s.measurementUnit !== filterUnit) return false;
-      if (filterLifecycle !== 'All' && s.hardwareLifecycle !== filterLifecycle) return false;
+    return scopedSensors.filter((s) => {
+      const eff = getEffectiveStatus(s);
+      const mapSt = mappingStatusById.get(s.id) || 'Unmapped';
+      if (!matchesSensorsFilters(s, effectiveAdvancedFilters, eff, mapSt, isPlatformAdmin)) {
+        return false;
+      }
       if (q) {
         const hay = [
           s.name,
@@ -611,34 +724,64 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
           s.kind,
           s.manufacturer,
           s.modelText,
+          s.identifierType,
           s.serial,
           s.measurementCapability,
           s.measurementUnit,
           s.measurementRange,
           s.company,
           s.inventoryLocation,
-          s.hardwareLifecycle
+          eff
         ]
+          .filter(Boolean)
           .join(' ')
           .toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [store.sensors, currentCompany, isPlatformAdmin, filterCompany, searchQuery, filterKind, filterManufacturer, filterUnit, filterLifecycle]);
+  }, [
+    scopedSensors,
+    effectiveAdvancedFilters,
+    isPlatformAdmin,
+    searchQuery,
+    effectiveStatusById,
+    mappingStatusById
+  ]);
+
+  // Prune stale selections on company switch, search, or filter change
+  useEffect(() => {
+    const visibleIds = new Set(filteredSensors.map((s) => s.id));
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (visibleIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [filteredSensors]);
 
   const sortedSensors = useMemo(() => {
     if (!sortKey) return filteredSensors;
     const copy = [...filteredSensors];
     copy.sort((a, b) => {
-      const av = String((a as any)[sortKey] ?? '').toLowerCase();
-      const bv = String((b as any)[sortKey] ?? '').toLowerCase();
+      const av =
+        sortKey === 'hardwareLifecycle'
+          ? getEffectiveStatus(a).toLowerCase()
+          : String((a as any)[sortKey] ?? '').toLowerCase();
+      const bv =
+        sortKey === 'hardwareLifecycle'
+          ? getEffectiveStatus(b).toLowerCase()
+          : String((b as any)[sortKey] ?? '').toLowerCase();
       if (av < bv) return sortDir === 'asc' ? -1 : 1;
       if (av > bv) return sortDir === 'asc' ? 1 : -1;
       return 0;
     });
     return copy;
-  }, [filteredSensors, sortKey, sortDir]);
+  }, [filteredSensors, sortKey, sortDir, effectiveStatusById]);
 
   const totalRecords = sortedSensors.length;
   const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
@@ -651,12 +794,24 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     [hiddenCols]
   );
 
-  const activeFilterCount =
-    (isPlatformAdmin && filterCompany !== 'All' ? 1 : 0) +
-    (filterKind !== 'All' ? 1 : 0) +
-    (filterManufacturer !== 'All' ? 1 : 0) +
-    (filterUnit !== 'All' ? 1 : 0) +
-    (filterLifecycle !== 'All' ? 1 : 0);
+  const activeFilterCount = useMemo(
+    () => countActiveSensorFilters(effectiveAdvancedFilters, isPlatformAdmin),
+    [effectiveAdvancedFilters, isPlatformAdmin]
+  );
+
+  const clearAllSensorFilters = () => {
+    setFilterCompany('All');
+    setAdvancedFilters(DEFAULT_SENSORS_FILTERS);
+    setCurrentPage(1);
+  };
+
+  const handleApplyAdvancedFilters = (next: SensorsAdvancedFilters) => {
+    setAdvancedFilters(next);
+    if (isPlatformAdmin) {
+      setFilterCompany(next.organizations.length === 1 ? next.organizations[0] : 'All');
+    }
+    setCurrentPage(1);
+  };
 
   // Selection helpers
   const allCurrentSelected =
@@ -700,6 +855,14 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
 
   const handleConfirmDeleteSensor = () => {
     if (!sensorToDelete) return;
+    const refs = getSensorMappingReferences(sensorToDelete.id, store);
+    if (refs.hasAnyReference) {
+      showToast(
+        `Cannot delete ${sensorToDelete.deviceId}: referenced in ${refs.allConnections.length || refs.allBindings.length || refs.allAllocations.length} Asset Mapping record(s).`,
+        'error'
+      );
+      return;
+    }
     const idToDelete = sensorToDelete.id;
     setStore((prev) => ({
       ...prev,
@@ -718,94 +881,215 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     }
   };
 
-  // Bulk eligibility calculation
+  // Selected sensors strictly scoped to authorized filtered view
   const selectedSensorRecords = useMemo(
-    () => store.sensors.filter((s) => selectedIds.has(s.id)),
-    [store.sensors, selectedIds]
+    () => filteredSensors.filter((s) => selectedIds.has(s.id)),
+    [filteredSensors, selectedIds]
   );
 
-  const bulkEligibility = useMemo(() => {
-    const eligible: SensorRecord[] = [];
-    const skipped: { record: SensorRecord; reason: string }[] = [];
-
-    selectedSensorRecords.forEach((sen) => {
-      if (bulkAction === 'Decommission eligible' || bulkAction === 'Delete eligible') {
-        const hasActiveConn = store.connections.some(
-          (c) => c.status === 'Active' && (c.memberIds?.includes(sen.id) || c.hardwareId === sen.id)
-        );
-        if (hasActiveConn) {
-          skipped.push({
-            record: sen,
-            reason: 'Linked to an Active connection in Modal Mapping'
-          });
-        } else {
-          eligible.push(sen);
-        }
-      } else {
-        eligible.push(sen);
-      }
-    });
-
-    return { eligible, skipped };
-  }, [selectedSensorRecords, bulkAction, store.connections]);
-
-  const executeBulkDeleteSensors = (reason?: string) => {
-    const eligibleIds = new Set(bulkEligibility.eligible.map((s) => s.id));
-    if (eligibleIds.size === 0) return;
-
-    setStore((prev) => ({
-      ...prev,
-      sensors: prev.sensors.filter((s) => !eligibleIds.has(s.id))
+  const handleBulkExportSelected = (recordsToExport: SensorRecord[]) => {
+    if (recordsToExport.length === 0) return;
+    const exportRows = recordsToExport.map((s) => ({
+      ...s,
+      hardwareLifecycle: getEffectiveStatus(s)
     }));
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      eligibleIds.forEach((id) => next.delete(id));
-      return next;
-    });
-    if (inspectedSensor && eligibleIds.has(inspectedSensor.id)) {
-      setInspectedSensor(null);
-    }
+    downloadModalCsv('FleetRobo_sensors_selected_export.csv', visibleColumns, exportRows);
     showToast(
-      `Deleted ${eligibleIds.size} sensor(s)${bulkEligibility.skipped.length > 0 ? `, ${bulkEligibility.skipped.length} skipped` : ''}${reason ? ` · ${reason}` : ''}`
+      `Exported ${exportRows.length} selected Sensor record(s) to FleetRobo_sensors_selected_export.csv`
     );
-    setPendingBulkDelete(false);
-    setActiveDrawer(null);
   };
 
-  const handleApplyBulk = () => {
-    if (selectedSensorRecords.length === 0) return;
-    if (bulkAction === 'Delete eligible') {
-      if (bulkEligibility.eligible.length === 0) return;
-      setPendingBulkDelete(true);
+  const handleApplySensorsBulkUpdate = (
+    mode: Exclude<SensorsBulkActionMode, 'export_selected'>,
+    eligibleIds: string[],
+    options?: { targetLocation?: string; targetOwner?: string }
+  ) => {
+    // Re-evaluate tenant & mapping eligibility at commit time (reject stale selections)
+    const allowedScopeIds = new Set(filteredSensors.map((s) => s.id));
+    const safeIds = new Set(eligibleIds.filter((id) => allowedScopeIds.has(id)));
+    if (safeIds.size === 0) return;
+
+    const nowMs = Date.now();
+    const nowIso = new Date().toISOString();
+    const todayStr = nowIso.slice(0, 10);
+    const actorLabel = isPlatformAdmin ? 'Platform Admin' : currentCompany;
+
+    if (mode === 'delete') {
+      let deletedCount = 0;
+      const deletedSet = new Set<string>();
+      setStore((prev) => ({
+        ...prev,
+        sensors: prev.sensors.filter((s) => {
+          if (!safeIds.has(s.id)) return true;
+          const refs = getSensorMappingReferences(s.id, prev, nowMs);
+          if (refs.hasAnyReference) return true;
+          deletedSet.add(s.id);
+          deletedCount += 1;
+          return false;
+        })
+      }));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        deletedSet.forEach((id) => next.delete(id));
+        return next;
+      });
+      if (inspectedSensor && deletedSet.has(inspectedSensor.id)) {
+        setInspectedSensor(null);
+      }
+      showToast(`Deleted ${deletedCount} unreferenced sensor(s).`);
       return;
     }
-    const eligibleIds = new Set(bulkEligibility.eligible.map((s) => s.id));
-    const todayStr = new Date().toISOString().slice(0, 10);
 
+    if (mode === 'update_ownership') {
+      if (!isPlatformAdmin) {
+        showToast('Only Platform Admin can transfer sensor ownership.', 'error');
+        return;
+      }
+      const nextOwnerName = (options?.targetOwner || '').trim();
+      const targetComp = resolveClientCompanyByNameOrId(nextOwnerName);
+      if (!targetComp || targetComp.isPlatformOwner || !isCompanyEligibleForNewRegistration(targetComp)) {
+        showToast(`Target organization "${nextOwnerName}" is invalid or ineligible.`, 'error');
+        return;
+      }
+      const targetEnabledModels = getEnabledModelsForCompanyName(targetComp.name).filter(
+        (m) => m.category === 'Sensor'
+      );
+      let transferred = 0;
+
+      setStore((prev) => ({
+        ...prev,
+        sensors: prev.sensors.map((s) => {
+          if (!safeIds.has(s.id)) return s;
+          if ((s.company || '').trim().toLowerCase() === targetComp.name.toLowerCase()) return s;
+          const refs = getSensorMappingReferences(s.id, prev, nowMs);
+          if (refs.hasAnyReference) return s;
+          if (s.modelTypeId && !targetEnabledModels.some((m) => m.id === s.modelTypeId)) {
+            return s;
+          }
+          transferred += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-own-${Date.now()}-${transferred}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Ownership Transfer',
+            summary: `Transferred ownership from ${s.company} to ${targetComp.name}.`
+          };
+          return {
+            ...s,
+            company: targetComp.name,
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25),
+            updatedAt: todayStr
+          };
+        })
+      }));
+      showToast(`Transferred ownership on ${transferred} eligible sensor(s) to ${targetComp.name}.`);
+      return;
+    }
+
+    let updatedCount = 0;
     setStore((prev) => ({
       ...prev,
       sensors: prev.sensors.map((s) => {
-        if (!eligibleIds.has(s.id)) return s;
-        if (bulkAction === 'Update ownership') {
-          return { ...s, company: bulkTargetOwner, updatedAt: todayStr };
+        if (!safeIds.has(s.id)) return s;
+        const refs = getSensorMappingReferences(s.id, prev, nowMs);
+        const eff = deriveSensorStatus(s, prev, nowMs);
+
+        if (mode === 'send_maintenance') {
+          if (eff === 'Decommissioned' || eff === 'In Maintenance' || refs.hasActiveOrScheduledReference) {
+            return s;
+          }
+          updatedCount += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-mnt-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Sent to Maintenance',
+            summary: `Placed into In Maintenance override (previous status: ${eff}).`
+          };
+          return {
+            ...s,
+            statusOverride: 'In Maintenance',
+            hardwareLifecycle: 'In Maintenance',
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25),
+            updatedAt: todayStr
+          };
         }
-        if (bulkAction === 'Update inventory status') {
-          return { ...s, hardwareLifecycle: bulkTargetStatus, updatedAt: todayStr };
+
+        if (mode === 'return_service') {
+          if (eff !== 'In Maintenance') return s;
+          const cleared: SensorRecord = { ...s, statusOverride: null };
+          const recalc = deriveSensorStatus(cleared, prev, nowMs);
+          updatedCount += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-ret-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Returned to Service',
+            summary: `Cleared Maintenance override; derived status recalculated to ${recalc}.`
+          };
+          return {
+            ...cleared,
+            hardwareLifecycle: recalc,
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25),
+            updatedAt: todayStr
+          };
         }
-        if (bulkAction === 'Decommission eligible') {
-          return { ...s, hardwareLifecycle: 'Decommissioned', updatedAt: todayStr };
+
+        if (mode === 'update_location') {
+          if (eff === 'Decommissioned') return s;
+          const nextLoc = (options?.targetLocation || '').trim();
+          if (!nextLoc) return s;
+          updatedCount += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-loc-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Location Updated',
+            summary: `Updated Inventory Location to "${nextLoc}".`
+          };
+          return {
+            ...s,
+            inventoryLocation: nextLoc,
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25),
+            updatedAt: todayStr
+          };
         }
+
+        if (mode === 'decommission') {
+          if (eff === 'Decommissioned' || refs.hasActiveOrScheduledReference) return s;
+          updatedCount += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-dec-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Decommissioned',
+            summary: `Permanently decommissioned from ${eff}.`
+          };
+          return {
+            ...s,
+            statusOverride: 'Decommissioned',
+            hardwareLifecycle: 'Decommissioned',
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25),
+            updatedAt: todayStr
+          };
+        }
+
         return s;
       })
     }));
 
-    showToast(
-      `Bulk action completed: ${bulkEligibility.eligible.length} updated, ${bulkEligibility.skipped.length} skipped.`
-    );
-    setActiveDrawer(null);
+    if (mode === 'send_maintenance') {
+      showToast(`Moved ${updatedCount} sensor(s) to In Maintenance.`);
+    } else if (mode === 'return_service') {
+      showToast(`Returned ${updatedCount} sensor(s) to service and recalculated status.`);
+    } else if (mode === 'update_location') {
+      showToast(`Updated Inventory Location on ${updatedCount} sensor(s).`);
+    } else if (mode === 'decommission') {
+      showToast(`Decommissioned ${updatedCount} sensor(s).`);
+    }
   };
 
-  // Direct CSV/JSON upload execution
+  // Direct CSV/JSON upload execution (preserves Door Sensor / custom types, validates company-enabled models, zero fake defaults)
   const processSensorsUpload = (fmt: 'csv' | 'json', rawText: string, fileName: string, fileSize?: number) => {
     const raw = rawText.trim();
     if (!raw) {
@@ -813,53 +1097,181 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
       return;
     }
 
-    const valid: Partial<SensorRecord>[] = [];
+    const valid: SensorRecord[] = [];
     const invalid: { line: number; reason: string }[] = [];
     const seenIds = new Set([
       ...store.devices.map((d) => d.deviceId.toLowerCase()),
       ...store.sensors.map((s) => s.deviceId.toLowerCase())
     ]);
-    const seenSerials = new Set([
-      ...store.devices.map((d) => d.serial.toLowerCase()),
-      ...store.sensors.map((s) => s.serial.toLowerCase())
-    ]);
+    const seenSerials = new Set(
+      [
+        ...store.devices.map((d) => (d.serial || '').trim().toLowerCase()),
+        ...store.sensors.map((s) => (s.serial || '').trim().toLowerCase())
+      ].filter(Boolean)
+    );
+
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const nowIso = new Date().toISOString();
+
+    const validateAndBuildRow = (
+      lineNum: number,
+      rowData: {
+        name: string;
+        deviceId: string;
+        kind: string;
+        manufacturer: string;
+        modelText: string;
+        serial: string;
+        measurementCapability: string;
+        measurementUnit: string;
+        measurementRange: string;
+        company: string;
+        inventoryLocation: string;
+      }
+    ) => {
+      const name = (rowData.name || '').trim();
+      const deviceId = (rowData.deviceId || '').trim();
+      const kind = (rowData.kind || '').trim();
+      const manufacturer = (rowData.manufacturer || '').trim();
+      const modelText = (rowData.modelText || '').trim();
+      const serial = (rowData.serial || '').trim();
+      const requestedCompany = (rowData.company || '').trim();
+
+      if (!name || !deviceId || !serial || !kind || !manufacturer || !modelText) {
+        invalid.push({
+          line: lineNum,
+          reason: 'Missing required Sensor name, Sensor ID, Sensor type, Manufacturer, Model, or physical identifier'
+        });
+        return;
+      }
+
+      if (seenIds.has(deviceId.toLowerCase()) || seenSerials.has(serial.toLowerCase())) {
+        invalid.push({
+          line: lineNum,
+          reason: `Duplicate Sensor ID (${deviceId}) or identifier (${serial})`
+        });
+        return;
+      }
+
+      // Enforce strict tenant isolation
+      let resolvedOrgName = currentCompany;
+      if (isPlatformAdmin) {
+        if (!requestedCompany) {
+          invalid.push({
+            line: lineNum,
+            reason: 'Organization / Ownership is required for Platform Admin import'
+          });
+          return;
+        }
+        const matched = resolveClientCompanyByNameOrId(requestedCompany);
+        if (!matched || matched.isPlatformOwner || !isCompanyEligibleForNewRegistration(matched)) {
+          invalid.push({
+            line: lineNum,
+            reason: `Organization "${requestedCompany}" is unknown or ineligible for registration`
+          });
+          return;
+        }
+        resolvedOrgName = matched.name;
+      } else {
+        if (
+          requestedCompany &&
+          requestedCompany.toLowerCase() !== currentCompany.trim().toLowerCase()
+        ) {
+          invalid.push({
+            line: lineNum,
+            reason: `Cross-company import blocked ("${requestedCompany}" != "${currentCompany}")`
+          });
+          return;
+        }
+        const matched = resolveClientCompanyByNameOrId(currentCompany);
+        if (!matched || !isCompanyEligibleForNewRegistration(matched)) {
+          invalid.push({
+            line: lineNum,
+            reason: `Current company "${currentCompany}" is not eligible for registration`
+          });
+          return;
+        }
+        resolvedOrgName = matched.name;
+      }
+
+      // Match exact enabled Sensor model in Model Category Master for target company
+      const tenantModels = getEnabledModelsForCompanyName(resolvedOrgName).filter(
+        (m) => m.category === 'Sensor'
+      );
+      const matchedModel = tenantModels.find(
+        (m) =>
+          sensorTypesMatch(m.typeName, kind) &&
+          m.manufacturer.trim().toLowerCase() === manufacturer.toLowerCase() &&
+          (m.modelReference || m.typeName).trim().toLowerCase() === modelText.toLowerCase()
+      );
+      if (!matchedModel) {
+        invalid.push({
+          line: lineNum,
+          reason: `Model "${kind} / ${manufacturer} ${modelText}" is not enabled for ${resolvedOrgName}`
+        });
+        return;
+      }
+
+      const idTypes = getRecordIdentifierTypes(matchedModel);
+      const primaryIdentType = idTypes[0] || matchedModel.identifierType || 'Serial Number';
+
+      seenIds.add(deviceId.toLowerCase());
+      seenSerials.add(serial.toLowerCase());
+
+      valid.push({
+        id: `sen-import-${Date.now()}-${valid.length}`,
+        deviceId,
+        name,
+        kind: matchedModel.typeName,
+        role: 'peripheral',
+        category: matchedModel.typeName,
+        manufacturer: matchedModel.manufacturer,
+        modelText: matchedModel.modelReference || matchedModel.typeName,
+        modelTypeId: matchedModel.id,
+        identifierType: primaryIdentType,
+        serial,
+        capabilities: [],
+        measurementCapability:
+          matchedModel.measurementType || rowData.measurementCapability.trim() || '',
+        measurementUnit:
+          matchedModel.measurementUnit || rowData.measurementUnit.trim() || '',
+        measurementRange: rowData.measurementRange.trim(),
+        company: resolvedOrgName,
+        inventoryLocation: rowData.inventoryLocation.trim(),
+        hardwareLifecycle: 'Inventory',
+        statusOverride: null,
+        auditHistory: [
+          {
+            id: `aud-imp-${Date.now()}-${valid.length}`,
+            timestamp: nowIso,
+            actor: isPlatformAdmin ? 'Platform Admin' : resolvedOrgName,
+            action: 'Imported',
+            summary: `Imported into Inventory via ${fileName}.`
+          }
+        ],
+        registeredAt: todayStr,
+        updatedAt: todayStr,
+        notes: 'Imported via bulk CSV/JSON'
+      });
+    };
 
     if (fmt === 'json') {
       try {
         const parsed = JSON.parse(raw);
         const arr = Array.isArray(parsed) ? parsed : [parsed];
         arr.forEach((item, idx) => {
-          const deviceId = String(item.deviceId || '').trim();
-          const name = String(item.name || '').trim();
-          const serial = String(item.serial || '').trim();
-          if (!deviceId || !name || !serial) {
-            invalid.push({ line: idx + 1, reason: 'Missing required name, deviceId, or serial' });
-            return;
-          }
-          if (seenIds.has(deviceId.toLowerCase()) || seenSerials.has(serial.toLowerCase())) {
-            invalid.push({
-              line: idx + 1,
-              reason: `Duplicate Sensor ID (${deviceId}) or serial (${serial})`
-            });
-            return;
-          }
-          seenIds.add(deviceId.toLowerCase());
-          seenSerials.add(serial.toLowerCase());
-          const sType: SensorCategory =
-            item.kind === 'Fuel Sensor' ? 'Fuel Sensor' : 'Temperature Sensor';
-          valid.push({
-            deviceId,
-            name,
-            kind: sType,
-            manufacturer: item.manufacturer || (sType === 'Fuel Sensor' ? 'Escort' : 'Teltonika'),
-            modelText: item.modelText || (sType === 'Fuel Sensor' ? 'TD-BLE' : 'EYE Sensor'),
-            serial,
-            measurementCapability: sType === 'Fuel Sensor' ? 'Fuel level' : 'Temperature',
-            measurementUnit: item.measurementUnit || (sType === 'Fuel Sensor' ? 'L' : '°C'),
-            measurementRange: item.measurementRange || (sType === 'Fuel Sensor' ? '0–600 L' : '−40 to +85 °C'),
-            company: item.company || 'Adani Port',
-            inventoryLocation: item.inventoryLocation || 'Mundra CT2',
-            hardwareLifecycle: item.hardwareLifecycle || 'Inventory'
+          validateAndBuildRow(idx + 1, {
+            name: String(item.name || ''),
+            deviceId: String(item.deviceId || ''),
+            kind: String(item.kind || item.category || ''),
+            manufacturer: String(item.manufacturer || ''),
+            modelText: String(item.modelText || item.model || ''),
+            serial: String(item.serial || item.identifierValue || ''),
+            measurementCapability: String(item.measurementCapability || ''),
+            measurementUnit: String(item.measurementUnit || ''),
+            measurementRange: String(item.measurementRange || ''),
+            company: String(item.company || item.organization || ''),
+            inventoryLocation: String(item.inventoryLocation || '')
           });
         });
       } catch {
@@ -874,6 +1286,32 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
           return;
         }
         const [
+          name = '',
+          deviceId = '',
+          kind = '',
+          manufacturer = '',
+          modelText = '',
+          serial = '',
+          measurementCapability = '',
+          measurementUnit = '',
+          measurementRange = '',
+          company = '',
+          col11 = '',
+          col12 = ''
+        ] = cols;
+        // Support optional Inventory location either in col12 or col11 if col11 is not a lifecycle word
+        const lifecycleKeywords = new Set([
+          'inventory',
+          'active',
+          'in maintenance',
+          'suspended',
+          'decommissioned',
+          'pending hardware review'
+        ]);
+        const inventoryLocation =
+          col12.trim() ||
+          (!lifecycleKeywords.has(col11.trim().toLowerCase()) ? col11.trim() : '');
+        validateAndBuildRow(idx + 1, {
           name,
           deviceId,
           kind,
@@ -884,110 +1322,43 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
           measurementUnit,
           measurementRange,
           company,
-          hardwareLifecycle
-        ] = cols;
-        if (!name || !deviceId || !serial) {
-          invalid.push({
-            line: idx + 1,
-            reason: 'CSV row requires at least Sensor name, Sensor ID, and Serial number'
-          });
-          return;
-        }
-        if (seenIds.has(deviceId.toLowerCase()) || seenSerials.has(serial.toLowerCase())) {
-          invalid.push({
-            line: idx + 1,
-            reason: `Duplicate Sensor ID (${deviceId}) or Serial (${serial})`
-          });
-          return;
-        }
-        seenIds.add(deviceId.toLowerCase());
-        seenSerials.add(serial.toLowerCase());
-        const sType: SensorCategory =
-          kind === 'Fuel Sensor' ? 'Fuel Sensor' : 'Temperature Sensor';
-        valid.push({
-          name,
-          deviceId,
-          kind: sType,
-          manufacturer: manufacturer || (sType === 'Fuel Sensor' ? 'Escort' : 'Teltonika'),
-          modelText: modelText || (sType === 'Fuel Sensor' ? 'TD-BLE' : 'EYE Sensor'),
-          serial,
-          measurementCapability:
-            measurementCapability === 'Fuel level' || sType === 'Fuel Sensor'
-              ? 'Fuel level'
-              : 'Temperature',
-          measurementUnit: (['°C', '°F', 'L', '%'].includes(measurementUnit)
-            ? measurementUnit
-            : sType === 'Fuel Sensor'
-            ? 'L'
-            : '°C') as SensorRecord['measurementUnit'],
-          measurementRange:
-            measurementRange || (sType === 'Fuel Sensor' ? '0–600 L' : '−40 to +85 °C'),
-          company: company || 'Adani Port',
-          inventoryLocation: 'Mundra CT2',
-          hardwareLifecycle: (HARDWARE_LIFECYCLE_OPTIONS.includes(
-            hardwareLifecycle as HardwareLifecycleStatus
-          )
-            ? hardwareLifecycle
-            : 'Inventory') as HardwareLifecycleStatus
+          inventoryLocation
         });
       });
     }
 
     if (valid.length === 0) {
       sensorUpload.fail(
-        invalid[0]?.reason || 'No valid new sensor rows found (duplicates or missing required fields).'
+        invalid[0]?.reason || 'No valid new sensor rows found (duplicates, unenabled models, or missing required fields).'
       );
       return;
     }
 
     sensorUpload.startUploading(fileName, formatUploadFileSize(fileSize), () => {
-      const todayStr = new Date().toISOString().slice(0, 10);
-      const created: SensorRecord[] = valid.map((v, i) => ({
-        id: `sen-import-${Date.now()}-${i}`,
-        deviceId: v.deviceId!,
-        name: v.name!,
-        kind: (v.kind as SensorCategory) || 'Temperature Sensor',
-        role: 'peripheral',
-        category: (v.kind as SensorCategory) || 'Temperature Sensor',
-        manufacturer: v.manufacturer || 'Teltonika',
-        modelText: v.modelText || 'EYE Sensor',
-        serial: v.serial!,
-        capabilities: ['BLE'],
-        measurementCapability: v.measurementCapability || 'Temperature',
-        measurementUnit: (v.measurementUnit as SensorRecord['measurementUnit']) || '°C',
-        measurementRange: v.measurementRange || '−40 to +85 °C',
-        company: v.company || 'Adani Port',
-        inventoryLocation: v.inventoryLocation || 'Mundra CT2',
-        hardwareLifecycle: (v.hardwareLifecycle as HardwareLifecycleStatus) || 'Inventory',
-        registeredAt: todayStr,
-        updatedAt: todayStr,
-        notes: 'Imported via bulk CSV/JSON'
-      }));
-
       setStore((prev) => ({
         ...prev,
-        sensors: [...created, ...prev.sensors]
+        sensors: [...valid, ...prev.sensors]
       }));
       setSortKey('');
       setCurrentPage(1);
-      showToast(`Imported ${created.length} Sensor(s) (${invalid.length} skipped).`);
+      showToast(`Imported ${valid.length} Sensor(s) into Inventory (${invalid.length} skipped).`);
       return {
         headline: 'Sensors uploaded successfully',
-        description: `${created.length} sensor record${created.length === 1 ? '' : 's'} imported from ${fileName}.${
-          invalid.length > 0 ? ` ${invalid.length} duplicate or invalid row${invalid.length === 1 ? '' : 's'} skipped.` : ''
+        description: `${valid.length} sensor record${valid.length === 1 ? '' : 's'} imported from ${fileName}.${
+          invalid.length > 0 ? ` ${invalid.length} invalid or duplicate row${invalid.length === 1 ? '' : 's'} skipped.` : ''
         }`,
         stats: [
-          { label: 'Uploaded', value: created.length, tone: 'emerald' },
+          { label: 'Uploaded', value: valid.length, tone: 'emerald' },
           { label: 'Skipped', value: invalid.length, tone: invalid.length > 0 ? 'amber' : 'slate' }
         ]
       };
     });
   };
 
-  // Lifecycle pill styling
-  const renderLifecycleBadge = (status: HardwareLifecycleStatus) => {
+  // Lifecycle pill styling (4 effective statuses only)
+  const renderLifecycleBadge = (status: EffectiveSensorStatus) => {
     const map: Record<
-      HardwareLifecycleStatus,
+      EffectiveSensorStatus,
       { bg: string; text: string; border: string; dot: string }
     > = {
       Active: {
@@ -1008,23 +1379,11 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
         border: 'border-[#fed7aa]',
         dot: 'bg-[#b45309]'
       },
-      Suspended: {
-        bg: 'bg-[#fef2f2]',
-        text: 'text-[#dc2626]',
-        border: 'border-[#fecaca]',
-        dot: 'bg-[#dc2626]'
-      },
       Decommissioned: {
         bg: 'bg-[#f1f5f9]',
         text: 'text-[#475569]',
         border: 'border-[#cbd5e1]',
         dot: 'bg-[#475569]'
-      },
-      'Pending Hardware Review': {
-        bg: 'bg-[#fefce8]',
-        text: 'text-[#a16207]',
-        border: 'border-[#fde047]',
-        dot: 'bg-[#ca8a04]'
       }
     };
     const style = map[status] || map.Inventory;
@@ -1038,13 +1397,11 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     );
   };
 
-  // Linked connections for inspected sensor
+  // Linked connections for inspected sensor via mapping references
   const inspectedConnections = useMemo(() => {
     if (!inspectedSensor) return [];
-    return store.connections.filter(
-      (c) => c.memberIds?.includes(inspectedSensor.id) || c.hardwareId === inspectedSensor.id
-    );
-  }, [inspectedSensor, store.connections]);
+    return getSensorMappingReferences(inspectedSensor.id, store).allConnections;
+  }, [inspectedSensor, store]);
 
   return (
     <div className="h-full flex flex-col bg-[#f5f7fa] text-[#17212b] overflow-hidden relative">
@@ -1116,7 +1473,12 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                 <select
                   value={filterCompany}
                   onChange={(e) => {
-                    setFilterCompany(e.target.value);
+                    const nextOrg = e.target.value;
+                    setFilterCompany(nextOrg);
+                    setAdvancedFilters((prev) => ({
+                      ...prev,
+                      organizations: nextOrg === 'All' ? [] : [nextOrg]
+                    }));
                     setCurrentPage(1);
                   }}
                   className="bg-transparent text-[12px] font-semibold text-[#17212b] focus:outline-none cursor-pointer pr-1"
@@ -1205,13 +1567,8 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
             <button
               onClick={() => {
                 setSearchQuery('');
-                setFilterCompany('All');
-                setFilterKind('All');
-                setFilterManufacturer('All');
-                setFilterUnit('All');
-                setFilterLifecycle('All');
+                clearAllSensorFilters();
                 setSelectedIds(new Set());
-                setCurrentPage(1);
                 showToast('Sensors table refreshed.');
               }}
               className="h-[33px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-medium text-[#17212b] hover:bg-[#f8fafc] inline-flex items-center gap-1.5 cursor-pointer"
@@ -1252,9 +1609,13 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
             {/* 8. Export */}
             <button
               onClick={() => {
-                downloadModalCsv('FleetRobo_sensors_export.csv', visibleColumns, sortedSensors);
+                const exportRows = sortedSensors.map((s) => ({
+                  ...s,
+                  hardwareLifecycle: getEffectiveStatus(s)
+                }));
+                downloadModalCsv('FleetRobo_sensors_export.csv', visibleColumns, exportRows);
                 showToast(
-                  `Exported ${sortedSensors.length} Sensor records to FleetRobo_sensors_export.csv`
+                  `Exported ${exportRows.length} Sensor records to FleetRobo_sensors_export.csv`
                 );
               }}
               className="h-[33px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-medium text-[#17212b] hover:bg-[#f8fafc] inline-flex items-center gap-1.5 cursor-pointer"
@@ -1302,19 +1663,256 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
             </span>
             {activeFilterCount > 0 && (
               <button
-                onClick={() => {
-                  setFilterCompany('All');
-                  setFilterKind('All');
-                  setFilterManufacturer('All');
-                  setFilterUnit('All');
-                  setFilterLifecycle('All');
-                }}
+                onClick={clearAllSensorFilters}
                 className="text-[#9e431c] hover:underline font-medium cursor-pointer"
               >
-                Clear active filters ({activeFilterCount})
+                Clear All ({activeFilterCount})
               </button>
             )}
           </div>
+
+          {/* Removable Applied-Filter Chips Row */}
+          {activeFilterCount > 0 && (
+            <div className="px-4 py-2 bg-slate-50 border-b border-[#e3e8ee] flex items-center gap-2 flex-wrap text-xs shrink-0">
+              <span className="text-slate-500 font-medium">Applied Filters:</span>
+              {isPlatformAdmin && effectiveAdvancedFilters.organizations.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Organization: {effectiveAdvancedFilters.organizations.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilterCompany('All');
+                      setAdvancedFilters((p) => ({ ...p, organizations: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.kinds.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Type: {effectiveAdvancedFilters.kinds.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, kinds: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.manufacturers.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Manufacturer: {effectiveAdvancedFilters.manufacturers.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, manufacturers: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.models.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Model: {effectiveAdvancedFilters.models.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, models: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.identifierTypes.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Identifier: {effectiveAdvancedFilters.identifierTypes.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, identifierTypes: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.measurementCapabilities.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Capability: {effectiveAdvancedFilters.measurementCapabilities.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, measurementCapabilities: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.measurementUnits.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Unit: {effectiveAdvancedFilters.measurementUnits.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, measurementUnits: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {(effectiveAdvancedFilters.measurementRanges.length > 0 ||
+                effectiveAdvancedFilters.measurementRangeQuery.trim()) && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Range:{' '}
+                  {[
+                    ...effectiveAdvancedFilters.measurementRanges,
+                    effectiveAdvancedFilters.measurementRangeQuery.trim()
+                  ]
+                    .filter(Boolean)
+                    .join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({
+                        ...p,
+                        measurementRanges: [],
+                        measurementRangeQuery: ''
+                      }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.connectionModes.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Connection Mode: {effectiveAdvancedFilters.connectionModes.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, connectionModes: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.sensorStatuses.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Sensor Status: {effectiveAdvancedFilters.sensorStatuses.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, sensorStatuses: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.mappingStatuses.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Mapping Status: {effectiveAdvancedFilters.mappingStatuses.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, mappingStatuses: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.inventoryLocations.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Location: {effectiveAdvancedFilters.inventoryLocations.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, inventoryLocations: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {(effectiveAdvancedFilters.registeredFrom ||
+                effectiveAdvancedFilters.registeredTo) && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Registered: {effectiveAdvancedFilters.registeredFrom || '…'} →{' '}
+                  {effectiveAdvancedFilters.registeredTo || '…'}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({
+                        ...p,
+                        registeredFrom: '',
+                        registeredTo: ''
+                      }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {(effectiveAdvancedFilters.updatedFrom || effectiveAdvancedFilters.updatedTo) && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Updated: {effectiveAdvancedFilters.updatedFrom || '…'} →{' '}
+                  {effectiveAdvancedFilters.updatedTo || '…'}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, updatedFrom: '', updatedTo: '' }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={clearAllSensorFilters}
+                className="text-slate-500 hover:text-slate-900 font-semibold ml-auto cursor-pointer"
+              >
+                Clear All
+              </button>
+            </div>
+          )}
 
           {/* Scrollable Table Viewport */}
           <div className="flex-1 overflow-auto min-h-0">
@@ -1406,7 +2004,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                                   className="text-left group cursor-pointer"
                                 >
                                   <div className="font-semibold text-[#17212b] group-hover:text-[#9e431c] transition-colors">
-                                    {row.name.replace(/\s*·\s*.*$/, '')}
+                                    {row.name}
                                   </div>
                                   <div className="text-[11px] text-[#8291a0]">
                                     {row.deviceId} · {row.manufacturer} {row.modelText}
@@ -1418,7 +2016,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                           if (col.key === 'hardwareLifecycle') {
                             return (
                               <td key={col.key} className="px-3 py-2.5 whitespace-nowrap">
-                                {renderLifecycleBadge(row.hardwareLifecycle)}
+                                {renderLifecycleBadge(getEffectiveStatus(row))}
                               </td>
                             );
                           }
@@ -1553,157 +2151,6 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
         <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/35 backdrop-blur-[1px]">
           <div className="flex-1" onClick={() => setActiveDrawer(null)} />
 
-          {/* 1. FILTERS DRAWER */}
-          {activeDrawer === 'filters' && (
-            <div className="w-[520px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
-              <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
-                <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">Filter Sensors</h2>
-                  <p className="text-[12px] text-[#5c6b7a] mt-0.5">
-                    Filter registered Temperature and Fuel Sensors by type, manufacturer, unit, or status.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="p-1.5 rounded-lg text-[#5c6b7a] hover:bg-slate-100 cursor-pointer"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-5 space-y-4">
-                {isPlatformAdmin && (
-                  <div>
-                    <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                      Organization Name
-                    </label>
-                    <select
-                      value={filterCompany}
-                      onChange={(e) => {
-                        setFilterCompany(e.target.value);
-                        setCurrentPage(1);
-                      }}
-                      className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                    >
-                      <option value="All">All Organizations</option>
-                      {availableOrganizations.map((org) => (
-                        <option key={org} value={org}>
-                          {org}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Sensor type
-                  </label>
-                  <select
-                    value={filterKind}
-                    onChange={(e) => {
-                      setFilterKind(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    {SENSOR_CATEGORIES.map((cat) => (
-                      <option key={cat} value={cat}>
-                        {cat}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Manufacturer
-                  </label>
-                  <select
-                    value={filterManufacturer}
-                    onChange={(e) => {
-                      setFilterManufacturer(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    {ALL_SENSOR_MANUFACTURERS.map((mfg) => (
-                      <option key={mfg} value={mfg}>
-                        {mfg}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Measurement unit
-                  </label>
-                  <select
-                    value={filterUnit}
-                    onChange={(e) => {
-                      setFilterUnit(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    <option value="°C">°C</option>
-                    <option value="L">L</option>
-                    <option value="%">%</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Inventory status
-                  </label>
-                  <select
-                    value={filterLifecycle}
-                    onChange={(e) => {
-                      setFilterLifecycle(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    {HARDWARE_LIFECYCLE_OPTIONS.map((st) => (
-                      <option key={st} value={st}>
-                        {st}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="px-5 py-3.5 border-t border-[#e3e8ee] bg-[#f8fafc] flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFilterCompany('All');
-                    setFilterKind('All');
-                    setFilterManufacturer('All');
-                    setFilterUnit('All');
-                    setFilterLifecycle('All');
-                    setCurrentPage(1);
-                  }}
-                  className="px-3.5 py-2 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-semibold text-[#5c6b7a] hover:text-[#17212b] cursor-pointer"
-                >
-                  Reset filters
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveDrawer(null)}
-                  className="px-4 py-2 rounded-[7px] bg-[#e56b38] hover:bg-[#d15b2a] text-white text-[12px] font-semibold cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* 3. SAVED VIEWS DRAWER */}
           {activeDrawer === 'saved-views' && (
             <div className="w-[520px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
@@ -1744,10 +2191,12 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                           name: newViewName.trim(),
                           query: searchQuery,
                           filters: {
-                            kind: filterKind,
-                            manufacturer: filterManufacturer,
-                            measurementUnit: filterUnit,
-                            hardwareLifecycle: filterLifecycle
+                            kind: effectiveAdvancedFilters.kinds[0] || 'All',
+                            manufacturer: effectiveAdvancedFilters.manufacturers[0] || 'All',
+                            measurementUnit: effectiveAdvancedFilters.measurementUnits[0] || 'All',
+                            hardwareLifecycle: effectiveAdvancedFilters.sensorStatuses[0] || 'All',
+                            filterCompany: isPlatformAdmin ? filterCompany : 'All',
+                            advancedSensorsJson: JSON.stringify(effectiveAdvancedFilters)
                           },
                           sortKey,
                           sortDir,
@@ -1780,20 +2229,88 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                             {view.name}
                           </div>
                           <div className="text-[11px] text-[#5c6b7a]">
-                            Query: {view.query || 'None'} · Sort: {view.sortKey} ({view.sortDir})
+                            Query: {view.query || 'None'} · Sort: {view.sortKey || 'Default'} ({view.sortDir})
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5">
                           <button
                             onClick={() => {
                               setSearchQuery(view.query || '');
-                              setFilterKind(view.filters.kind || 'All');
-                              setFilterManufacturer(view.filters.manufacturer || 'All');
-                              setFilterUnit(view.filters.measurementUnit || 'All');
-                              setFilterLifecycle(view.filters.hardwareLifecycle || 'All');
+                              const legacy = (view.filters || {}) as Record<string, any>;
+                              let parsedAdvanced: Partial<SensorsAdvancedFilters> | null =
+                                legacy.advancedSensors || null;
+                              if (!parsedAdvanced && typeof legacy.advancedSensorsJson === 'string') {
+                                try {
+                                  parsedAdvanced = JSON.parse(legacy.advancedSensorsJson);
+                                } catch {
+                                  parsedAdvanced = null;
+                                }
+                              }
+                              if (parsedAdvanced) {
+                                const restored: SensorsAdvancedFilters = {
+                                  ...DEFAULT_SENSORS_FILTERS,
+                                  ...parsedAdvanced,
+                                  organizations: isPlatformAdmin
+                                    ? parsedAdvanced.organizations || []
+                                    : [],
+                                  sensorStatuses: (
+                                    parsedAdvanced.sensorStatuses || []
+                                  ).filter((st: EffectiveSensorStatus) =>
+                                    SENSOR_EFFECTIVE_STATUS_OPTIONS.includes(st)
+                                  )
+                                };
+                                setAdvancedFilters(restored);
+                                setFilterCompany(
+                                  isPlatformAdmin
+                                    ? legacy.filterCompany ||
+                                        (restored.organizations.length === 1
+                                          ? restored.organizations[0]
+                                          : 'All')
+                                    : 'All'
+                                );
+                              } else {
+                                const mappedStatus: EffectiveSensorStatus[] =
+                                  legacy.hardwareLifecycle &&
+                                  legacy.hardwareLifecycle !== 'All'
+                                    ? legacy.hardwareLifecycle === 'Suspended'
+                                      ? ['In Maintenance']
+                                      : SENSOR_EFFECTIVE_STATUS_OPTIONS.includes(
+                                          legacy.hardwareLifecycle as EffectiveSensorStatus
+                                        )
+                                      ? [legacy.hardwareLifecycle as EffectiveSensorStatus]
+                                      : []
+                                    : [];
+                                setFilterCompany(
+                                  isPlatformAdmin && legacy.filterCompany
+                                    ? legacy.filterCompany
+                                    : 'All'
+                                );
+                                setAdvancedFilters({
+                                  ...DEFAULT_SENSORS_FILTERS,
+                                  organizations:
+                                    isPlatformAdmin &&
+                                    legacy.filterCompany &&
+                                    legacy.filterCompany !== 'All'
+                                      ? [legacy.filterCompany]
+                                      : [],
+                                  kinds:
+                                    legacy.kind && legacy.kind !== 'All' ? [legacy.kind] : [],
+                                  manufacturers:
+                                    legacy.manufacturer && legacy.manufacturer !== 'All'
+                                      ? [legacy.manufacturer]
+                                      : [],
+                                  measurementUnits:
+                                    legacy.measurementUnit && legacy.measurementUnit !== 'All'
+                                      ? [legacy.measurementUnit]
+                                      : [],
+                                  sensorStatuses: mappedStatus
+                                });
+                              }
                               setSortKey(view.sortKey || 'deviceId');
                               setSortDir(view.sortDir || 'asc');
-                              setHiddenCols(view.hiddenCols || []);
+                              setHiddenCols(
+                                (view.hiddenCols || []).filter((k) => k !== 'inventoryLocation')
+                              );
                               setCurrentPage(1);
                               setActiveDrawer(null);
                               showToast(`Applied view "${view.name}".`);
@@ -1981,7 +2498,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                   <div className="grid grid-cols-3 gap-4">
                     <div>
                       <FieldLabel
-                        label="Vendor / Manufacturer"
+                        label="Brand"
                         required
                         tooltip={MODAL_FIELD_TOOLTIPS.sensor.manufacturer}
                       />
@@ -2078,7 +2595,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                     <h2 className="text-[16px] font-bold text-[#17212b]">
                       {inspectedSensor.name}
                     </h2>
-                    {renderLifecycleBadge(inspectedSensor.hardwareLifecycle)}
+                    {renderLifecycleBadge(getEffectiveStatus(inspectedSensor))}
                   </div>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5 font-mono">
                     {inspectedSensor.deviceId} · {inspectedSensor.kind} · {inspectedSensor.manufacturer}{' '}
@@ -2141,17 +2658,19 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                   <>
                     <div className="grid grid-cols-2 gap-3.5 p-4 rounded-xl border border-[#e3e8ee] bg-[#f8fafc]">
                       {[
-                        ['Sensor name', inspectedSensor.name.replace(/\s*·\s*.*$/, '')],
+                        ['Sensor name', inspectedSensor.name],
                         ['Sensor ID', inspectedSensor.deviceId],
                         ['Sensor type', inspectedSensor.kind],
                         ['Role', inspectedSensor.role],
                         ['Manufacturer', inspectedSensor.manufacturer],
                         ['Model', inspectedSensor.modelText],
-                        ['Serial number', inspectedSensor.serial],
-                        ['Measurement capability', inspectedSensor.measurementCapability],
-                        ['Measurement unit', inspectedSensor.measurementUnit],
-                        ['Range', inspectedSensor.measurementRange],
-                        ['Inventory status', inspectedSensor.hardwareLifecycle],
+                        ['Identifier type', inspectedSensor.identifierType || '—'],
+                        ['Serial / Identifier', inspectedSensor.serial],
+                        ['Measurement capability', inspectedSensor.measurementCapability || '—'],
+                        ['Measurement unit', inspectedSensor.measurementUnit || '—'],
+                        ['Range', inspectedSensor.measurementRange || '—'],
+                        ['Sensor status', getEffectiveStatus(inspectedSensor)],
+                        ['Mapping status', mappingStatusById.get(inspectedSensor.id) || 'Unmapped'],
                         ['Registered', inspectedSensor.registeredAt],
                         ['Updated', inspectedSensor.updatedAt]
                       ].map(([k, v]) => (
@@ -2167,14 +2686,18 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                           Derived model capabilities
                         </div>
                         <div className="flex flex-wrap gap-1.5">
-                          {inspectedSensor.capabilities.map((cap) => (
-                            <span
-                              key={cap}
-                              className="px-2 py-0.5 rounded bg-white border border-[#d6dfe8] text-[11px] font-medium text-[#17212b]"
-                            >
-                              {cap}
-                            </span>
-                          ))}
+                          {(inspectedSensor.capabilities || []).length === 0 ? (
+                            <span className="text-[11px] text-[#8291a0]">Not specified</span>
+                          ) : (
+                            inspectedSensor.capabilities.map((cap) => (
+                              <span
+                                key={cap}
+                                className="px-2 py-0.5 rounded bg-white border border-[#d6dfe8] text-[11px] font-medium text-[#17212b]"
+                              >
+                                {cap}
+                              </span>
+                            ))
+                          )}
                         </div>
                       </div>
                       <div className="col-span-2">
@@ -2212,6 +2735,8 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                                 className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
                                   conn.status === 'Active'
                                     ? 'bg-[#eaf8f0] text-[#0f7b4b]'
+                                    : conn.status === 'Scheduled'
+                                    ? 'bg-sky-50 text-sky-700'
                                     : 'bg-slate-100 text-slate-600'
                                 }`}
                               >
@@ -2251,6 +2776,8 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                                 className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
                                   conn.status === 'Active'
                                     ? 'bg-[#eaf8f0] text-[#0f7b4b]'
+                                    : conn.status === 'Scheduled'
+                                    ? 'bg-sky-50 text-sky-700'
                                     : 'bg-slate-100 text-slate-600'
                                 }`}
                               >
@@ -2270,203 +2797,61 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
 
                 {inspectorTab === 'activity' && (
                   <div className="space-y-3">
-                    {[
-                      {
-                        date: inspectedSensor.updatedAt,
-                        title: 'Sensor calibration & inventory state verified',
-                        detail: `Measurement ${inspectedSensor.measurementCapability} (${inspectedSensor.measurementUnit}, ${inspectedSensor.measurementRange}) verified at ${inspectedSensor.inventoryLocation}.`
-                      },
-                      {
-                        date: inspectedSensor.registeredAt,
-                        title: 'Sensor hardware onboarded in Sensor Master',
-                        detail: `Registered ${inspectedSensor.manufacturer} ${inspectedSensor.modelText} with serial ${inspectedSensor.serial}.`
-                      }
-                    ].map((ev, i) => (
-                      <div
-                        key={i}
-                        className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3"
-                      >
-                        <div className="w-2 h-2 rounded-full bg-[#e56b38] mt-1.5 shrink-0" />
-                        <div>
-                          <div className="text-[12px] font-semibold text-[#17212b]">
-                            {ev.title}
-                          </div>
-                          <div className="text-[11px] text-[#5c6b7a] mt-0.5">{ev.detail}</div>
-                          <div className="text-[10px] font-mono text-[#8291a0] mt-1">{ev.date}</div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* 6. BULK OPERATIONS DRAWER */}
-          {activeDrawer === 'bulk' && (
-            <div className="w-[560px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
-              <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
-                <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">
-                    Bulk Operations · Sensors
-                  </h2>
-                  <p className="text-[12px] text-[#5c6b7a] mt-0.5">
-                    {selectedSensorRecords.length} Sensor record(s) currently selected.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="p-1.5 rounded-lg text-[#5c6b7a] hover:bg-slate-100 cursor-pointer"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="p-5 flex-1 overflow-y-auto space-y-5">
-                {selectedSensorRecords.length === 0 ? (
-                  <div className="p-6 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] text-center text-[12px] text-[#5c6b7a]">
-                    Select one or more Sensors in the table first to run a bulk operation.
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                        Bulk action
-                      </label>
-                      <select
-                        value={bulkAction}
-                        onChange={(e) => setBulkAction(e.target.value as any)}
-                        className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
-                      >
-                        <option value="Update ownership">Update ownership</option>
-                        <option value="Update inventory status">Update inventory status</option>
-                        <option value="Decommission eligible">Decommission eligible</option>
-                        <option value="Delete eligible">Delete eligible</option>
-                      </select>
-                    </div>
-
-                    {bulkAction === 'Update ownership' && (
-                      <div>
-                        <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                          Target owner / customer
-                        </label>
-                        <select
-                          value={bulkTargetOwner}
-                          onChange={(e) => setBulkTargetOwner(e.target.value)}
-                          className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
+                    {inspectedSensor.auditHistory && inspectedSensor.auditHistory.length > 0 ? (
+                      inspectedSensor.auditHistory.map((ev) => (
+                        <div
+                          key={ev.id}
+                          className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3"
                         >
-                          {MODAL_OWNERS.map((o) => (
-                            <option key={o} value={o}>
-                              {o}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {bulkAction === 'Update inventory status' && (
-                      <div>
-                        <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                          Target inventory status
-                        </label>
-                        <select
-                          value={bulkTargetStatus}
-                          onChange={(e) =>
-                            setBulkTargetStatus(e.target.value as HardwareLifecycleStatus)
-                          }
-                          className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
-                        >
-                          {HARDWARE_LIFECYCLE_OPTIONS.map((st) => (
-                            <option key={st} value={st}>
-                              {st}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {(bulkAction === 'Decommission eligible' || bulkAction === 'Delete eligible') && (
-                      <div className="p-3.5 rounded-lg border border-[#fed7aa] bg-[#fff7ed] text-[12px] text-[#b45309]">
-                        Sensors linked to an <strong>Active</strong> connection in Modal Mapping are
-                        protected and automatically skipped during bulk{' '}
-                        {bulkAction === 'Delete eligible' ? 'deletion' : 'decommissioning'}.
-                      </div>
-                    )}
-
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-slate-200 bg-slate-100 text-slate-700">
-                        {selectedSensorRecords.length} Selected
-                      </span>
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-emerald-200 bg-emerald-50 text-emerald-700">
-                        <CheckCircle2 size={12} /> {bulkEligibility.eligible.length} Eligible
-                      </span>
-                      {bulkEligibility.skipped.length > 0 && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-amber-200 bg-amber-50 text-amber-800">
-                          <AlertTriangle size={12} /> {bulkEligibility.skipped.length} Protected / Skipped
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="p-3 rounded-lg border border-[#b9ebd0] bg-[#eaf8f0]">
-                        <div className="text-[11px] text-[#0f7b4b] font-semibold">
-                          {bulkAction === 'Delete eligible' ? 'Eligible to delete' : 'Eligible to update'}
-                        </div>
-                        <div className="text-[20px] font-bold text-[#0f7b4b]">
-                          {bulkEligibility.eligible.length}
-                        </div>
-                      </div>
-                      <div className="p-3 rounded-lg border border-[#fed7aa] bg-[#fff7ed]">
-                        <div className="text-[11px] text-[#b45309] font-semibold">
-                          Skipped (active connection)
-                        </div>
-                        <div className="text-[20px] font-bold text-[#b45309]">
-                          {bulkEligibility.skipped.length}
-                        </div>
-                      </div>
-                    </div>
-
-                    {bulkEligibility.skipped.length > 0 && (
-                      <div className="space-y-1.5">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-[#5c6b7a]">
-                          Skipped Records
-                        </div>
-                        <div className="max-h-[160px] overflow-y-auto divide-y divide-[#edf1f5] border border-[#e3e8ee] rounded-lg">
-                          {bulkEligibility.skipped.map(({ record, reason }) => (
-                            <div key={record.id} className="px-3 py-2 text-[11px]">
-                              <span className="font-semibold text-[#17212b]">
-                                {record.deviceId} ({record.name})
-                              </span>
-                              <span className="text-[#dc2626] ml-1.5">— {reason}</span>
+                          <div className="w-2 h-2 rounded-full bg-[#e56b38] mt-1.5 shrink-0" />
+                          <div>
+                            <div className="text-[12px] font-semibold text-[#17212b]">
+                              {ev.action}
                             </div>
-                          ))}
+                            <div className="text-[11px] text-[#5c6b7a] mt-0.5">{ev.summary}</div>
+                            <div className="text-[10px] font-mono text-[#8291a0] mt-1">
+                              {ev.timestamp.slice(0, 19).replace('T', ' ')} · {ev.actor}
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="space-y-2.5">
+                        <div className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3">
+                          <div className="w-2 h-2 rounded-full bg-[#e56b38] mt-1.5 shrink-0" />
+                          <div>
+                            <div className="text-[12px] font-semibold text-[#17212b]">
+                              Effective status derived: {getEffectiveStatus(inspectedSensor)}
+                            </div>
+                            <div className="text-[11px] text-[#5c6b7a] mt-0.5">
+                              Mapping status: {mappingStatusById.get(inspectedSensor.id) || 'Unmapped'}
+                              {inspectedSensor.legacyStatusMetadata?.originalHardwareLifecycle
+                                ? ` · Migrated from legacy status "${inspectedSensor.legacyStatusMetadata.originalHardwareLifecycle}"`
+                                : ''}
+                            </div>
+                            <div className="text-[10px] font-mono text-[#8291a0] mt-1">
+                              Updated {inspectedSensor.updatedAt}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3">
+                          <div className="w-2 h-2 rounded-full bg-slate-400 mt-1.5 shrink-0" />
+                          <div>
+                            <div className="text-[12px] font-semibold text-[#17212b]">
+                              Registered in Sensors Master
+                            </div>
+                            <div className="text-[11px] text-[#5c6b7a] mt-0.5">
+                              {inspectedSensor.manufacturer} {inspectedSensor.modelText} ({inspectedSensor.identifierType || 'Identifier'}: {inspectedSensor.serial})
+                            </div>
+                            <div className="text-[10px] font-mono text-[#8291a0] mt-1">
+                              Registered {inspectedSensor.registeredAt}
+                            </div>
+                          </div>
                         </div>
                       </div>
                     )}
-                  </>
+                  </div>
                 )}
-              </div>
-
-              <div className="px-5 py-3.5 border-t border-[#e3e8ee] bg-[#f8fafc] flex items-center justify-end gap-2">
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="px-4 py-2 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-semibold text-[#5c6b7a] cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  disabled={bulkEligibility.eligible.length === 0}
-                  onClick={handleApplyBulk}
-                  className={`px-4 py-2 rounded-[7px] disabled:opacity-40 text-white text-[12px] font-semibold cursor-pointer ${
-                    bulkAction === 'Delete eligible'
-                      ? 'bg-rose-600 hover:bg-rose-700'
-                      : 'bg-[#e56b38] hover:bg-[#d15b2a]'
-                  }`}
-                >
-                  {bulkAction === 'Delete eligible'
-                    ? `Delete ${bulkEligibility.eligible.length} eligible sensor(s)`
-                    : `Apply to ${bulkEligibility.eligible.length} eligible record(s)`}
-                </button>
               </div>
             </div>
           )}
@@ -2476,7 +2861,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
             <div className="w-[620px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
               <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
                 <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">Import Sensors</h2>
+                  <h2 className="text-[16px] font-bold text-[#17212b]">Import</h2>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5">
                     Upload a CSV or JSON file to register sensors directly into inventory.
                   </p>
@@ -2499,7 +2884,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                   doneSummary={sensorUpload.doneSummary}
                   accept=".csv,.json,text/csv,application/json"
                   dropTitle="Choose CSV / JSON or drag & drop"
-                  dropSubtitle="Import sensors directly. Duplicate IDs or Serials are skipped automatically."
+                  dropSubtitle="Import sensors directly. Duplicate IDs or invalid models are skipped automatically."
                   chooseButtonLabel="Choose file"
                   downloadLabel="Download template"
                   sampleLabel="Use sample CSV"
@@ -2520,9 +2905,16 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                     reader.readAsText(file);
                   }}
                   onDownloadTemplate={() => {
+                    const sampleOrg = isPlatformAdmin
+                      ? availableOrganizations[0] || ''
+                      : currentCompany;
+                    const sampleModel =
+                      getEnabledModelsForCompanyName(sampleOrg).find(
+                        (m) => m.category === 'Sensor'
+                      ) || enabledSensorModels[0];
                     const csv =
-                      'Sensor name,Sensor ID,Sensor type,Manufacturer,Model,Serial number,Measurement capability,Measurement unit,Range,Ownership,Inventory status\n' +
-                      'Fuel Sensor — Tank fuel level · Mundra CT2,SENS-9101,Fuel Sensor,Escort,TD-BLE,SN-SENSOR-9101,Fuel level,L,0–600 L,Adani Port,Inventory';
+                      'Sensor name,Sensor ID,Sensor type,Manufacturer,Model,Identifier value,Measurement capability,Measurement unit,Range,Organization,Inventory location\n' +
+                      `Tank Sensor Sample,SENS-9101,${sampleModel?.typeName || 'Fuel Level Sensor'},${sampleModel?.manufacturer || 'Escort'},${sampleModel?.modelReference || 'TD-BLE'},TD-BLE-9101,${sampleModel?.measurementType || 'Fuel Level'},${sampleModel?.measurementUnit || 'L'},,${sampleOrg},`;
                     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -2532,10 +2924,23 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                     URL.revokeObjectURL(url);
                   }}
                   onUseSample={() => {
+                    const sampleOrg = isPlatformAdmin
+                      ? availableOrganizations[0] || ''
+                      : currentCompany;
+                    const sampleModel =
+                      getEnabledModelsForCompanyName(sampleOrg).find(
+                        (m) => m.category === 'Sensor'
+                      ) || enabledSensorModels[0];
+                    if (!sampleModel || !sampleOrg) {
+                      sensorUpload.fail(
+                        'No active Sensor model is enabled for the current organization.'
+                      );
+                      return;
+                    }
                     const suffix = Math.floor(100 + Math.random() * 899);
                     const sampleCsv =
-                      `Sensor name,Sensor ID,Sensor type,Manufacturer,Model,Serial number,Measurement capability,Measurement unit,Range,Ownership,Inventory status\n` +
-                      `Fuel Sensor — Tank fuel level · Mundra CT2 ${suffix},SENS-9${suffix},Fuel Sensor,Escort,TD-BLE,SN-SENSOR-9${suffix},Fuel level,L,0–600 L,Adani Port,Inventory`;
+                      'Sensor name,Sensor ID,Sensor type,Manufacturer,Model,Identifier value,Measurement capability,Measurement unit,Range,Organization,Inventory location\n' +
+                      `${sampleModel.typeName} Sample ${suffix},SENS-9${suffix},${sampleModel.typeName},${sampleModel.manufacturer},${sampleModel.modelReference || sampleModel.typeName},SEN-ID-9${suffix},${sampleModel.measurementType || ''},${sampleModel.measurementUnit || ''},,${sampleOrg},`;
                     processSensorsUpload('csv', sampleCsv, `sample_sensors_${suffix}.csv`, sampleCsv.length);
                   }}
                   onReset={sensorUpload.reset}
@@ -2547,14 +2952,39 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
         </div>
       )}
 
-      {/* Delete Sensor Confirmation Modal with Confirmation Chips */}
+      {/* Upgraded Sectional Filter Sensors Right-Side Drawer */}
+      <SensorsFilterDrawer
+        isOpen={activeDrawer === 'filters'}
+        onClose={() => setActiveDrawer(null)}
+        appliedFilters={effectiveAdvancedFilters}
+        onApplyFilters={handleApplyAdvancedFilters}
+        authorizedSensors={scopedSensors}
+        enabledSensorModels={enabledSensorModels}
+        effectiveStatusById={effectiveStatusById}
+        mappingStatusById={mappingStatusById}
+        isPlatformAdmin={isPlatformAdmin}
+      />
+
+      {/* Upgraded Sectional Bulk Operations Right-Side Drawer */}
+      <SensorsBulkDrawer
+        isOpen={activeDrawer === 'bulk'}
+        isPlatformAdmin={isPlatformAdmin}
+        selectedRecords={selectedSensorRecords}
+        store={store}
+        effectiveStatusById={effectiveStatusById}
+        availableLocations={availableLocations}
+        availableOrganizations={availableOrganizations}
+        onClose={() => setActiveDrawer(null)}
+        onClearSelection={() => setSelectedIds(new Set())}
+        onExportSelected={handleBulkExportSelected}
+        onApplyBulkUpdate={handleApplySensorsBulkUpdate}
+      />
+
+      {/* Delete Sensor Confirmation Modal (strictly blocks active, scheduled, AND historical mapping references) */}
       {(() => {
         if (!sensorToDelete) return null;
-        const activeLinks = store.connections.filter(
-          (c) =>
-            c.status === 'Active' &&
-            (c.memberIds?.includes(sensorToDelete.id) || c.hardwareId === sensorToDelete.id)
-        );
+        const refs = getSensorMappingReferences(sensorToDelete.id, store);
+        const effStatus = getEffectiveStatus(sensorToDelete);
         return (
           <DeleteConfirmationModal
             isOpen={Boolean(sensorToDelete)}
@@ -2566,7 +2996,8 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                 {sensorToDelete.deviceId})? This sensor will be permanently removed from inventory.
               </>
             }
-            confirmLabel="Delete Sensor"
+            confirmLabel={refs.hasAnyReference ? 'Deletion Blocked' : 'Delete Sensor'}
+            confirmDisabled={refs.hasAnyReference}
             targetChips={[
               { id: 'senId', label: sensorToDelete.deviceId, tone: 'orange' },
               { id: 'kind', label: sensorToDelete.kind, tone: 'purple' },
@@ -2578,20 +3009,26 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
               { id: 'org', label: sensorToDelete.company, tone: 'blue' },
               {
                 id: 'status',
-                label: sensorToDelete.hardwareLifecycle,
-                tone: sensorToDelete.hardwareLifecycle === 'Active' ? 'emerald' : 'slate',
+                label: effStatus,
+                tone: effStatus === 'Active' ? 'emerald' : 'slate',
               },
             ]}
             confirmationChips={[
-              activeLinks.length > 0
+              refs.hasActiveOrScheduledReference
                 ? {
                     id: 'conn-link',
-                    label: `Linked in ${activeLinks.length} Active Connection(s)`,
+                    label: `Blocked · ${refs.activeOrScheduledConnections.length} Active/Scheduled Mapping(s)`,
+                    tone: 'rose',
+                  }
+                : refs.hasAnyReference
+                ? {
+                    id: 'conn-link',
+                    label: `Blocked · ${refs.allConnections.length || refs.allBindings.length || refs.allAllocations.length} Historical Mapping Reference(s)`,
                     tone: 'amber',
                   }
                 : {
                     id: 'conn-link',
-                    label: 'Safe to Delete · No Active Connection',
+                    label: 'Safe to Delete · No Asset Mapping References',
                     tone: 'emerald',
                   },
               {
@@ -2601,11 +3038,15 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
               },
             ]}
             warningNote={
-              activeLinks.length > 0 ? (
+              refs.hasAnyReference ? (
                 <>
-                  This sensor is linked in{' '}
-                  <strong>{activeLinks.map((c) => c.connectionId || c.id).join(', ')}</strong>.
-                  Deleting it will remove it from active sensor telemetry inventory.
+                  This sensor is referenced in Asset Mapping (
+                  <strong>
+                    {refs.allConnections.map((c) => c.connectionId || c.id).join(', ') ||
+                      'binding/allocation history'}
+                  </strong>
+                  ) and cannot be deleted. End any active mappings and{' '}
+                  <strong>Decommission</strong> it instead to preserve historical audit records.
                 </>
               ) : undefined
             }
@@ -2614,54 +3055,6 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
           />
         );
       })()}
-
-      {/* Bulk Delete Sensors Confirmation Modal with Confirmation Chips */}
-      <DeleteConfirmationModal
-        isOpen={pendingBulkDelete}
-        title={`Delete ${bulkEligibility.eligible.length} Eligible Sensor(s)?`}
-        description="Permanently remove eligible selected sensors from inventory. Sensors linked to Active Modal Mapping connections are automatically excluded."
-        confirmLabel={`Confirm Delete (${bulkEligibility.eligible.length})`}
-        targetChips={[
-          ...bulkEligibility.eligible.slice(0, 5).map((s) => ({
-            id: s.id,
-            label: s.deviceId,
-            sublabel: s.name,
-            tone: 'purple' as const,
-          })),
-          ...(bulkEligibility.eligible.length > 5
-            ? [
-                {
-                  id: 'more-sens',
-                  label: `+${bulkEligibility.eligible.length - 5} more`,
-                  tone: 'slate' as const,
-                },
-              ]
-            : []),
-        ]}
-        confirmationChips={[
-          {
-            id: 'selected',
-            label: `${selectedSensorRecords.length} Selected`,
-            tone: 'slate',
-          },
-          {
-            id: 'eligible',
-            label: `${bulkEligibility.eligible.length} Eligible to Delete`,
-            tone: 'emerald',
-          },
-          ...(bulkEligibility.skipped.length > 0
-            ? [
-                {
-                  id: 'skipped',
-                  label: `${bulkEligibility.skipped.length} Skipped (Active Connection)`,
-                  tone: 'amber' as const,
-                },
-              ]
-            : []),
-        ]}
-        onCancel={() => setPendingBulkDelete(false)}
-        onConfirm={executeBulkDeleteSensors}
-      />
     </div>
   );
 };

@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, FileDown, CheckCircle2, History, AlertCircle } from 'lucide-react';
 import { Driver, deriveDriverBadges, TransferHistoryJob } from '../types/driver';
 import { DRIVER_COLUMNS_CATALOGUE } from '../types/driverFilters';
+import { ModalMasterStore, loadModalMasterStore } from '../types/modalMaster';
 
 interface DriverExportModalProps {
   isOpen: boolean;
@@ -9,8 +10,18 @@ interface DriverExportModalProps {
   filteredDrivers: Driver[];
   selectedDrivers: Driver[];
   visibleColumnIds: string[];
+  modalStore?: Pick<ModalMasterStore, 'connections' | 'resourceAllocations' | 'resourceRelationships'>;
+  allDriverIds?: Set<string>;
   onLogHistory: (job: Omit<TransferHistoryJob, 'id' | 'timestamp'>) => void;
   onOpenHistory: () => void;
+}
+
+function escapeHtmlCell(val: string): string {
+  return val
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 export const DriverExportModal: React.FC<DriverExportModalProps> = ({
@@ -19,6 +30,8 @@ export const DriverExportModal: React.FC<DriverExportModalProps> = ({
   filteredDrivers,
   selectedDrivers,
   visibleColumnIds,
+  modalStore,
+  allDriverIds,
   onLogHistory,
   onOpenHistory
 }) => {
@@ -31,6 +44,15 @@ export const DriverExportModal: React.FC<DriverExportModalProps> = ({
   const [exportedCount, setExportedCount] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (isOpen) {
+      setScope(selectedDrivers.length > 0 ? 'selected' : 'filtered');
+      setExportSuccess(false);
+      setExportedCount(0);
+      setErrorMessage(null);
+    }
+  }, [isOpen, selectedDrivers.length]);
+
   if (!isOpen) return null;
 
   const targetDrivers = scope === 'selected' ? selectedDrivers : filteredDrivers;
@@ -42,6 +64,7 @@ export const DriverExportModal: React.FC<DriverExportModalProps> = ({
       return;
     }
 
+    const activeStore = modalStore || loadModalMasterStore();
     const columnsToExport =
       columnScope === 'visible'
         ? DRIVER_COLUMNS_CATALOGUE.filter((c) => visibleColumnIds.includes(c.key))
@@ -50,7 +73,7 @@ export const DriverExportModal: React.FC<DriverExportModalProps> = ({
     const columnHeaders = columnsToExport.map((c) => c.label);
 
     const getDriverCellValue = (driver: Driver, key: string): string => {
-      const badges = deriveDriverBadges(driver);
+      const badges = deriveDriverBadges(driver, activeStore, Date.now(), allDriverIds);
       switch (key) {
         case 'name':
           return driver.name || '';
@@ -63,7 +86,9 @@ export const DriverExportModal: React.FC<DriverExportModalProps> = ({
         case 'status':
           return driver.status || '';
         case 'reg':
-          return driver.reg || 'Unassigned';
+          return badges.mappedVehicleRegs.length > 0
+            ? badges.mappedVehicleRegs.join(', ')
+            : 'Unassigned';
         case 'licenceTo':
           return driver.licenceTo || '';
         case 'accountStatus':
@@ -138,7 +163,7 @@ export const DriverExportModal: React.FC<DriverExportModalProps> = ({
 
     if (format === 'html') {
       const tableRows = rows
-        .map((r) => `<tr>${r.map((c) => `<td style="padding: 6px 12px; border: 1px solid #e2e8f0;">${c}</td>`).join('')}</tr>`)
+        .map((r) => `<tr>${r.map((c) => `<td style="padding: 6px 12px; border: 1px solid #e2e8f0;">${escapeHtmlCell(c || '')}</td>`).join('')}</tr>`)
         .join('');
       fileContent = `<!DOCTYPE html>
 <html>

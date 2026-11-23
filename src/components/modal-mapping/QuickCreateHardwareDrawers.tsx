@@ -131,8 +131,7 @@ export const FullCreateDeviceDrawer: React.FC<FullCreateDeviceDrawerProps> = ({
   );
 
   const formEnabledCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(formEnabledDeviceModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : ['GPS', 'ADAS/DMS', 'E-Lock', 'CCTV', 'IP Camera', 'Face Terminal'];
+    return Array.from(new Set(formEnabledDeviceModels.map((m) => m.typeName)));
   }, [formEnabledDeviceModels]);
 
   const seedModel = initialModelDef || formEnabledDeviceModels[0] || null;
@@ -224,8 +223,8 @@ export const FullCreateDeviceDrawer: React.FC<FullCreateDeviceDrawerProps> = ({
       const list = byMfg.length > 0 ? byMfg : modelsForSelectedCategory;
       return list.map((m) => ({
         model: m.modelReference,
-        defaultProtocol: 'MQTT',
-        channelCount: 4
+        defaultProtocol: m.supportedProtocols?.[0] || 'MQTT',
+        channelCount: m.maxCameraChannels != null ? m.maxCameraChannels : 1
       }));
     }
     const catDef = DEVICE_CATALOGUE[formKind];
@@ -651,7 +650,7 @@ export const FullCreateDeviceDrawer: React.FC<FullCreateDeviceDrawerProps> = ({
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <FieldLabel
-                  label="Vendor / Manufacturer"
+                  label="Brand"
                   required
                   tooltip={MODAL_FIELD_TOOLTIPS.device.manufacturer}
                 />
@@ -1091,23 +1090,25 @@ export const FullCreateSensorDrawer: React.FC<FullCreateSensorDrawerProps> = ({
     seedModel ? `${seedModel.typeName} — ${seedModel.manufacturer} ${seedModel.modelReference || ''}`.trim() : ''
   );
   const [formDeviceId, setFormDeviceId] = useState(() => `SENS-${nextNum}`);
-  const [formSerial, setFormSerial] = useState(() =>
-    initialSearchText.trim() || `SN-SENSOR-${260000 + existingSensors.length}`
-  );
-  const [formManufacturer, setFormManufacturer] = useState(() => seedModel?.manufacturer || 'Teltonika');
+  const [formSerial, setFormSerial] = useState(() => initialSearchText.trim());
+  const [formManufacturer, setFormManufacturer] = useState(() => seedModel?.manufacturer || '');
   const [formModelText, setFormModelText] = useState(
-    () => seedModel?.modelReference || seedModel?.typeName || 'EYE Sensor'
+    () => seedModel?.modelReference || seedModel?.typeName || ''
   );
   const [formMeasurementCap, setFormMeasurementCap] = useState<string>(
-    () => seedModel?.measurementType || 'Temperature'
+    () => seedModel?.measurementType || ''
   );
-  const [formUnit, setFormUnit] = useState<string>(() => seedModel?.measurementUnit || '°C');
+  const [formUnit, setFormUnit] = useState<string>(() => seedModel?.measurementUnit || '');
   const [formRange, setFormRange] = useState(() =>
-    seedModel?.measurementType === 'Temperature' ? '−40 to +85 °C' : '0–600 L'
+    seedModel?.measurementType === 'Temperature'
+      ? '−40 to +85 °C'
+      : seedModel?.measurementType === 'Fuel Level'
+      ? '0–600 L'
+      : ''
   );
-  const [formCapabilities, setFormCapabilities] = useState<string[]>(['BLE']);
-  const [formLocation, setFormLocation] = useState(site || MODAL_LOCATIONS[0]);
-  const [formLifecycle, setFormLifecycle] = useState<HardwareLifecycleStatus>('Active');
+  const [formCapabilities, setFormCapabilities] = useState<string[]>([]);
+  const [formLocation, setFormLocation] = useState(site || '');
+  const [formLifecycle, setFormLifecycle] = useState<HardwareLifecycleStatus>('Inventory');
   const [formNotes, setFormNotes] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -1247,9 +1248,16 @@ export const FullCreateSensorDrawer: React.FC<FullCreateSensorDrawerProps> = ({
 
     const trimmedName = formName.trim();
     const trimmedId = formDeviceId.trim();
-    const trimmedSerial = formSerial.trim() || `SN-${trimmedId}`;
+    const trimmedSerial = formSerial.trim();
 
-    if (!trimmedName || !trimmedId) {
+    if (formEnabledSensorModels.length === 0 || !selectedSensorModelSpec) {
+      setFormError(
+        `No active Sensor models are currently available for "${formCompany || targetClient}".`
+      );
+      return;
+    }
+
+    if (!trimmedName || !trimmedId || !trimmedSerial) {
       setFormError('Please complete all required fields marked with *.');
       return;
     }
@@ -1287,8 +1295,9 @@ export const FullCreateSensorDrawer: React.FC<FullCreateSensorDrawerProps> = ({
       measurementUnit: formUnit,
       measurementRange: formRange.trim(),
       company: formCompany || targetClient,
-      inventoryLocation: formLocation || site || MODAL_LOCATIONS[0],
-      hardwareLifecycle: formLifecycle,
+      inventoryLocation: formLocation || site || '',
+      hardwareLifecycle: 'Inventory',
+      statusOverride: null,
       registeredAt: todayStr,
       updatedAt: todayStr,
       notes: formNotes.trim()
@@ -1425,7 +1434,7 @@ export const FullCreateSensorDrawer: React.FC<FullCreateSensorDrawerProps> = ({
             <div className="grid grid-cols-3 gap-4">
               <div>
                 <FieldLabel
-                  label="Vendor / Manufacturer"
+                  label="Brand"
                   required
                   tooltip={MODAL_FIELD_TOOLTIPS.sensor.manufacturer}
                 />
@@ -1559,44 +1568,47 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
   onClose
 }) => {
   const availableOrganizations = useMemo(() => {
-    const dynamic = getAvailableClientCompanies();
-    const list = dynamic.length > 0 ? dynamic : MODAL_OWNERS;
-    return Array.from(new Set([targetClient, ...list].filter(Boolean)));
+    return targetClient ? [targetClient] : getAvailableClientCompanies();
   }, [targetClient]);
 
-  const [formOwner, setFormOwner] = useState(targetClient || availableOrganizations[0] || MODAL_OWNERS[0]);
+  const [formOwner, setFormOwner] = useState(targetClient || availableOrganizations[0] || '');
   const formEnabledSimModels = useMemo(
     () => getEnabledModelsForCompanyName(formOwner).filter((m) => m.category === 'SIM'),
     [formOwner]
   );
   const formEnabledSimCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(formEnabledSimModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : ['M2M SIM', 'Standard SIM', 'IoT eSIM'];
+    return Array.from(new Set(formEnabledSimModels.map((m) => m.typeName)));
   }, [formEnabledSimModels]);
 
-  const seedModel = initialModelDef || formEnabledSimModels[0] || null;
-  const nextSuffix = (existingSims.length + 1).toString().padStart(5, '0');
-  const seedIdType = getRecordIdentifierTypes(seedModel)[0] || 'ICCID';
+  const seedModel =
+    (initialModelDef &&
+      formEnabledSimModels.find((m) => m.id === initialModelDef.id)) ||
+    formEnabledSimModels[0] ||
+    null;
 
-  const [formCategory, setFormCategory] = useState(() => seedModel?.typeName || formEnabledSimCategories[0] || 'M2M SIM');
-  const [formOperator, setFormOperator] = useState(() => seedModel?.manufacturer || 'Airtel');
+  const [formCategory, setFormCategory] = useState(
+    () => seedModel?.typeName || formEnabledSimCategories[0] || ''
+  );
+  const [formOperator, setFormOperator] = useState(() => seedModel?.manufacturer || '');
   const [formModelRef, setFormModelRef] = useState(() => seedModel?.modelReference || '');
   const [formMode, setFormMode] = useState<string>(() => seedModel?.simType || 'M2M');
   const [formFormFactor, setFormFormFactor] = useState<SimRecord['formFactor']>(() =>
     seedModel?.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)'
   );
-  const [formIccid, setFormIccid] = useState(() =>
-    initialSearchText.trim() || (seedIdType === 'ICCID' ? `899186104312451${nextSuffix}` : '')
-  );
+  const [formIccid, setFormIccid] = useState(() => initialSearchText.trim());
   const [formMsisdn, setFormMsisdn] = useState('');
   const [formPlan, setFormPlan] = useState(() =>
     seedModel?.manufacturer === 'Jio' ? 'Enterprise M2M 2GB' : 'IoT Business 10GB'
   );
-  const [formStatus, setFormStatus] = useState<SimLifecycleStatus>('Active');
-  const [formActivationDate, setFormActivationDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [formStatus, setFormStatus] = useState<SimLifecycleStatus>('Inventory');
+  const [formActivationDate, setFormActivationDate] = useState('');
   const [formRenewalDate, setFormRenewalDate] = useState('');
   const [formNotes, setFormNotes] = useState('');
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(
+    seedModel
+      ? null
+      : `No active SIM models are enabled for "${formOwner || targetClient}". Enable SIM models in Company Management > Model Access.`
+  );
 
   const modelsForSelectedCategory = useMemo(
     () => formEnabledSimModels.filter((m) => m.typeName === formCategory),
@@ -1604,10 +1616,7 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
   );
 
   const availableOperators = useMemo<string[]>(() => {
-    if (modelsForSelectedCategory.length > 0) {
-      return Array.from(new Set(modelsForSelectedCategory.map((m) => m.manufacturer)));
-    }
-    return SIM_OPERATORS;
+    return Array.from(new Set(modelsForSelectedCategory.map((m) => m.manufacturer).filter(Boolean)));
   }, [modelsForSelectedCategory]);
 
   const modelsForSelectedOperator = useMemo(
@@ -1616,16 +1625,16 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
   );
 
   const selectedSimModelSpec = useMemo(() => {
-    return (
-      modelsForSelectedCategory.find(
-        (m) => m.manufacturer === formOperator && (!formModelRef || m.modelReference === formModelRef)
-      ) ||
-      modelsForSelectedCategory.find((m) => m.manufacturer === formOperator) ||
-      modelsForSelectedCategory[0] ||
-      formEnabledSimModels[0] ||
-      null
-    );
-  }, [modelsForSelectedCategory, formOperator, formModelRef, formEnabledSimModels]);
+    if (!formCategory || !formOperator) return null;
+    if (formModelRef) {
+      return (
+        modelsForSelectedCategory.find(
+          (m) => m.manufacturer === formOperator && m.modelReference === formModelRef
+        ) || null
+      );
+    }
+    return modelsForSelectedOperator.length === 1 ? modelsForSelectedOperator[0] : null;
+  }, [formCategory, formOperator, formModelRef, modelsForSelectedCategory, modelsForSelectedOperator]);
 
   const activeIdentifierType = getRecordIdentifierTypes(selectedSimModelSpec)[0] || 'ICCID';
 
@@ -1634,17 +1643,16 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
     const matching = formEnabledSimModels.filter((m) => m.typeName === newCat);
     if (matching.length > 0) {
       const first = matching[0];
-      const nextIdType = getRecordIdentifierTypes(first)[0] || 'ICCID';
       setFormOperator(first.manufacturer);
       setFormModelRef(first.modelReference || '');
       setFormMode(first.simType || 'M2M');
       setFormFormFactor(first.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)');
-      if (nextIdType !== 'ICCID' && /^899186\d+$/.test(formIccid.trim())) {
-        setFormIccid('');
-      }
       if (first.manufacturer === 'Jio') setFormPlan('Enterprise M2M 2GB');
       else if (first.manufacturer === 'Vodafone Idea' || first.manufacturer === 'Vi') setFormPlan('IoT 5GB');
       else setFormPlan('IoT Business 10GB');
+    } else {
+      setFormOperator('');
+      setFormModelRef('');
     }
   };
 
@@ -1656,6 +1664,8 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
       setFormModelRef(first.modelReference || '');
       setFormMode(first.simType || 'M2M');
       setFormFormFactor(first.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)');
+    } else {
+      setFormModelRef('');
     }
   };
 
@@ -1673,13 +1683,32 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
+    if (formEnabledSimModels.length === 0 || !selectedSimModelSpec) {
+      setFormError(
+        `No valid enabled SIM model selected for "${formOwner || targetClient}".`
+      );
+      return;
+    }
     const trimmedPrimaryId = formIccid.trim();
     if (!trimmedPrimaryId) {
       setFormError(`${activeIdentifierType} is required.`);
       return;
     }
-    if (activeIdentifierType.trim().toUpperCase() === 'ICCID' && !/^\d{18,22}$/.test(trimmedPrimaryId)) {
+    const idUpper = activeIdentifierType.trim().toUpperCase();
+    if (idUpper === 'ICCID' && !/^\d{18,22}$/.test(trimmedPrimaryId)) {
       setFormError('ICCID must be 18–22 digits.');
+      return;
+    }
+    if (idUpper === 'EID' && !/^[A-Za-z0-9]{32}$/.test(trimmedPrimaryId)) {
+      setFormError('EID must be 32 alphanumeric characters.');
+      return;
+    }
+    if (idUpper === 'IMSI' && !/^\d{15}$/.test(trimmedPrimaryId)) {
+      setFormError('IMSI must be 15 digits.');
+      return;
+    }
+    if (idUpper === 'MSISDN' && !/^[+\d\s()-]{7,20}$/.test(trimmedPrimaryId)) {
+      setFormError('Enter a valid MSISDN / mobile number.');
       return;
     }
     const dup = existingSims.some((s) => s.iccid.trim().toLowerCase() === trimmedPrimaryId.toLowerCase());
@@ -1688,26 +1717,37 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
       return;
     }
 
+    const nowIso = new Date().toISOString();
     const newRecord: SimRecord = {
       id: `SIM-rt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       iccid: trimmedPrimaryId,
       msisdn:
-        activeIdentifierType.trim().toUpperCase() === 'MSISDN' && !formMsisdn.trim()
+        idUpper === 'MSISDN' && !formMsisdn.trim()
           ? trimmedPrimaryId
           : formMsisdn.trim(),
-      operator: formOperator,
+      operator: selectedSimModelSpec.manufacturer || formOperator,
       plan: formPlan,
       formFactor: formFormFactor,
-      network: '4G LTE',
+      network: '',
       owner: formOwner || targetClient,
       location: '',
       status: formStatus,
       activationDate: formActivationDate,
       renewalDate: formRenewalDate,
       notes: formNotes.trim(),
-      category: formCategory,
-      modelTypeId: selectedSimModelSpec?.id,
-      identifierType: activeIdentifierType
+      category: selectedSimModelSpec.typeName || formCategory,
+      modelTypeId: selectedSimModelSpec.id,
+      identifierType: activeIdentifierType,
+      serviceMode: formMode,
+      auditHistory: [
+        {
+          id: `aud-sim-${Date.now()}`,
+          timestamp: nowIso,
+          actor: formOwner || targetClient,
+          action: 'Created',
+          summary: `Registered ${selectedSimModelSpec.typeName} (${activeIdentifierType}: ${trimmedPrimaryId}) with carrier lifecycle "${formStatus}".`
+        }
+      ]
     };
 
     onSave(newRecord);
@@ -1757,8 +1797,9 @@ export const FullCreateSimDrawer: React.FC<FullCreateSimDrawerProps> = ({
                 />
                 <select
                   value={formOwner}
+                  disabled
                   onChange={(e) => setFormOwner(e.target.value)}
-                  className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-semibold text-[#17212b] focus:outline-none focus:border-[#e56b38]"
+                  className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-[#f8fafc] text-[12px] font-semibold text-[#475569] cursor-not-allowed focus:outline-none focus:border-[#e56b38]"
                 >
                   {availableOrganizations.map((org) => (
                     <option key={org} value={org}>

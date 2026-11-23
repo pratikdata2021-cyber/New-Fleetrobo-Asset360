@@ -6,12 +6,14 @@ import {
   ArrowUpDown,
   Check,
   CheckCircle2,
+  CheckSquare,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Edit2,
   Eye,
   FileDown,
+  Filter,
   Image as ImageIcon,
   Layers,
   MapPin,
@@ -21,6 +23,8 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
+  Square,
   Trash2,
   Truck,
   Upload,
@@ -50,6 +54,12 @@ import {
   saveVehicleModelStore,
 } from '../types/vehicleModelMaster';
 import { loadVehicleMasterStore } from '../types/vehicle';
+import {
+  VehicleModelFiltersDrawer,
+  VehicleModelFilterState,
+  INITIAL_VEHICLE_MODEL_FILTERS,
+} from './vehicle-model/VehicleModelFiltersDrawer';
+import { VehicleModelBulkDrawer } from './vehicle-model/VehicleModelBulkDrawer';
 
 interface VehicleModelMasterContentProps {
   currentCompany?: string;
@@ -118,6 +128,38 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
   const [sortDir, setSortDir] = useState<1 | -1>(1);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<10 | 25 | 50>(10);
+
+  const checkPlatformAdmin = (): boolean => {
+    if (!isPlatformAdmin) {
+      showToast('Platform Admin permission required for global vehicle model catalog changes.', 'error');
+      return false;
+    }
+    return true;
+  };
+
+  const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
+  const [isFiltersDrawerOpen, setIsFiltersDrawerOpen] = useState(false);
+  const [isBulkDrawerOpen, setIsBulkDrawerOpen] = useState(false);
+  const [advancedFilters, setAdvancedFilters] = useState<VehicleModelFilterState>(
+    INITIAL_VEHICLE_MODEL_FILTERS
+  );
+
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (advancedFilters.manufacturer !== 'All') count++;
+    if (advancedFilters.modelName.trim()) count++;
+    if (advancedFilters.variant !== 'All') count++;
+    if (typeFilter !== 'All') count++;
+    if (segmentFilter !== 'All') count++;
+    if (statusFilter !== 'All') count++;
+    if (advancedFilters.fuelType !== 'All') count++;
+    if (advancedFilters.yearFrom.trim() || advancedFilters.yearTo.trim()) count++;
+    if (advancedFilters.isAcVehicle !== 'All') count++;
+    if (advancedFilters.iconSetup !== 'All') count++;
+    if (advancedFilters.linkedVehicles !== 'All') count++;
+    if (advancedFilters.createdFrom || advancedFilters.createdTo) count++;
+    return count;
+  }, [advancedFilters, typeFilter, segmentFilter, statusFilter]);
 
   // Toast feedback
   const [toast, setToast] = useState<{
@@ -254,11 +296,75 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
   const filteredRecords = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const list = records.filter((rec) => {
+      // Toolbar / Drawer synchronized filters
       if (typeFilter !== 'All' && rec.vehicleType !== typeFilter) return false;
       if (segmentFilter !== 'All' && rec.vehicleSegment !== segmentFilter)
         return false;
       if (statusFilter === 'Active' && !rec.isActive) return false;
       if (statusFilter === 'Inactive' && rec.isActive) return false;
+
+      // Identity filters
+      if (
+        advancedFilters.manufacturer !== 'All' &&
+        rec.manufacturer !== advancedFilters.manufacturer
+      ) {
+        return false;
+      }
+      if (
+        advancedFilters.modelName.trim() &&
+        !rec.modelName.toLowerCase().includes(advancedFilters.modelName.trim().toLowerCase())
+      ) {
+        return false;
+      }
+      if (
+        advancedFilters.variant !== 'All' &&
+        rec.variant !== advancedFilters.variant
+      ) {
+        return false;
+      }
+
+      // Classification
+      if (
+        advancedFilters.fuelType !== 'All' &&
+        rec.fuelType !== advancedFilters.fuelType
+      ) {
+        return false;
+      }
+
+      // Specifications & Icons
+      if (advancedFilters.yearFrom.trim()) {
+        const yr = Number(rec.modelYear);
+        if (!yr || yr < Number(advancedFilters.yearFrom)) return false;
+      }
+      if (advancedFilters.yearTo.trim()) {
+        const yr = Number(rec.modelYear);
+        if (!yr || yr > Number(advancedFilters.yearTo)) return false;
+      }
+      if (advancedFilters.isAcVehicle === 'Yes' && !rec.isAcVehicle) return false;
+      if (advancedFilters.isAcVehicle === 'No' && rec.isAcVehicle) return false;
+
+      if (advancedFilters.iconSetup !== 'All') {
+        const iconSum = getIconSetupSummary(rec);
+        if (advancedFilters.iconSetup === 'default' && iconSum.customCount !== 0) return false;
+        if (
+          advancedFilters.iconSetup === 'partial' &&
+          (iconSum.customCount === 0 || iconSum.customCount === 7)
+        )
+          return false;
+        if (advancedFilters.iconSetup === 'full' && iconSum.customCount !== 7) return false;
+      }
+
+      // Lifecycle & Usage
+      if (advancedFilters.linkedVehicles !== 'All') {
+        const depCount = countDependentVehicles(rec, vehiclesList);
+        if (advancedFilters.linkedVehicles === 'unused' && depCount > 0) return false;
+        if (advancedFilters.linkedVehicles === 'in_use' && depCount === 0) return false;
+      }
+
+      if (advancedFilters.createdFrom && rec.createdAt < advancedFilters.createdFrom) return false;
+      if (advancedFilters.createdTo && rec.createdAt > advancedFilters.createdTo) return false;
+
+      // Free text search
       if (q) {
         const haystack = [
           rec.id,
@@ -287,7 +393,17 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
       const bv = String(b[sortKey] || '').toLowerCase();
       return av.localeCompare(bv) * sortDir;
     });
-  }, [records, searchQuery, typeFilter, segmentFilter, statusFilter, sortKey, sortDir]);
+  }, [
+    records,
+    searchQuery,
+    typeFilter,
+    segmentFilter,
+    statusFilter,
+    advancedFilters,
+    vehiclesList,
+    sortKey,
+    sortDir,
+  ]);
 
   const totalPages = Math.max(1, Math.ceil(filteredRecords.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -373,6 +489,7 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
   };
 
   const handleOpenAdd = () => {
+    if (!checkPlatformAdmin()) return;
     const nextId = generateNextVehicleModelId(records);
     const today = new Date().toISOString().split('T')[0];
     setDrawerMode('add');
@@ -468,32 +585,56 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      if (!dataUrl) return;
-      const today = new Date().toISOString().split('T')[0];
-      setFormIcons((prev) => ({
-        ...prev,
-        [stateKey]: {
-          stateKey,
-          source: 'custom',
-          assetId: file.name,
-          previewUrl: dataUrl,
-          updatedAt: today,
-          updatedBy: isPlatformAdmin ? 'Platform Admin' : `${currentCompany} Admin`,
-        },
-      }));
-      setIconUploadErrors((prev) => {
-        const next = { ...prev };
-        delete next[stateKey];
-        return next;
-      });
-      setActivePreviewState(stateKey);
-      setIsDirty(true);
-      showToast(`Updated custom icon for "${VEHICLE_STATE_DEFINITIONS.find((d) => d.key === stateKey)?.label}"`, 'info');
+    const processImageUpload = (cleanFile: File) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+        if (!dataUrl) return;
+        const today = new Date().toISOString().split('T')[0];
+        setFormIcons((prev) => ({
+          ...prev,
+          [stateKey]: {
+            stateKey,
+            source: 'custom',
+            assetId: cleanFile.name,
+            previewUrl: dataUrl,
+            updatedAt: today,
+            updatedBy: isPlatformAdmin ? 'Platform Admin' : `${currentCompany} Admin`,
+          },
+        }));
+        setIconUploadErrors((prev) => {
+          const next = { ...prev };
+          delete next[stateKey];
+          return next;
+        });
+        setActivePreviewState(stateKey);
+        setIsDirty(true);
+        showToast(
+          `Updated custom icon for "${VEHICLE_STATE_DEFINITIONS.find((d) => d.key === stateKey)?.label}"`,
+          'info'
+        );
+      };
+      reader.readAsDataURL(cleanFile);
     };
-    reader.readAsDataURL(file);
+
+    if (ext === 'svg' || file.type.includes('svg')) {
+      const textReader = new FileReader();
+      textReader.onload = () => {
+        const text = typeof textReader.result === 'string' ? textReader.result : '';
+        if (/<script|javascript:|onload=|onerror=|onclick=/i.test(text)) {
+          setIconUploadErrors((prev) => ({
+            ...prev,
+            [stateKey]: 'Unsafe SVG content detected. Embedded scripts or event handlers are prohibited.',
+          }));
+          resetInput();
+          return;
+        }
+        processImageUpload(file);
+      };
+      textReader.readAsText(file);
+    } else {
+      processImageUpload(file);
+    }
     resetInput();
   };
 
@@ -519,6 +660,7 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
   };
 
   const validateAndSave = () => {
+    if (!checkPlatformAdmin()) return;
     const errors: Record<string, string> = {};
     const mfg = formManufacturer.trim();
     const modelName = formModelName.trim();
@@ -544,22 +686,34 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
 
     if (formModelYear.trim()) {
       const yr = Number(formModelYear);
-      if (isNaN(yr) || yr < 1980 || yr > 2100) {
-        errors.modelYear = 'Enter a valid year between 1980 and 2100.';
+      if (isNaN(yr) || !Number.isInteger(yr) || yr < 1980 || yr > 2100) {
+        errors.modelYear = 'Enter a valid year integer between 1980 and 2100.';
       }
     }
 
-    if (formFuelTankCapacityL.trim() && Number(formFuelTankCapacityL) < 0) {
-      errors.fuelTankCapacityL = 'Fuel Tank Capacity must be ≥ 0.';
+    if (formFuelTankCapacityL.trim()) {
+      const val = Number(formFuelTankCapacityL);
+      if (isNaN(val) || !isFinite(val) || val < 0) {
+        errors.fuelTankCapacityL = 'Fuel Tank Capacity must be a valid number ≥ 0.';
+      }
     }
-    if (formPayloadCapacityKg.trim() && Number(formPayloadCapacityKg) < 0) {
-      errors.payloadCapacityKg = 'Payload Capacity must be ≥ 0.';
+    if (formPayloadCapacityKg.trim()) {
+      const val = Number(formPayloadCapacityKg);
+      if (isNaN(val) || !isFinite(val) || val < 0) {
+        errors.payloadCapacityKg = 'Payload Capacity must be a valid number ≥ 0.';
+      }
     }
-    if (formSeatingCapacity.trim() && Number(formSeatingCapacity) < 0) {
-      errors.seatingCapacity = 'Seating Capacity must be ≥ 0.';
+    if (formSeatingCapacity.trim()) {
+      const val = Number(formSeatingCapacity);
+      if (isNaN(val) || !Number.isInteger(val) || val < 0) {
+        errors.seatingCapacity = 'Seating Capacity must be a non-negative integer.';
+      }
     }
-    if (formAxleCount.trim() && Number(formAxleCount) < 0) {
-      errors.axleCount = 'Number of Axles must be ≥ 0.';
+    if (formAxleCount.trim()) {
+      const val = Number(formAxleCount);
+      if (isNaN(val) || !Number.isInteger(val) || val < 0) {
+        errors.axleCount = 'Number of Axles must be a non-negative integer.';
+      }
     }
 
     // Check duplicate Manufacturer + Model Name + Variant combination (PRD §6A)
@@ -647,6 +801,7 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
 
   // Status activation / deactivation handler
   const handleConfirmStatusToggle = () => {
+    if (!checkPlatformAdmin()) return;
     if (!pendingStatusToggle) return;
     const target = pendingStatusToggle;
     const nextActive = !target.isActive;
@@ -676,15 +831,26 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
     setPendingStatusToggle(null);
   };
 
-  // Delete confirmation handler (warns if vehicles reference it)
+  // Delete confirmation handler (blocks if vehicles reference it)
   const handleConfirmDelete = () => {
+    if (!checkPlatformAdmin()) return;
     if (!pendingDelete) return;
     const target = pendingDelete;
+    const depCount = countDependentVehicles(target, vehiclesList);
+    if (depCount > 0) {
+      showToast(
+        `Cannot delete ${target.id}: ${depCount} vehicle(s) depend on it. Please deactivate the model instead.`,
+        'error'
+      );
+      setPendingDelete(null);
+      return;
+    }
     setRecords((prev) => {
       const next = prev.filter((r) => r.id !== target.id);
       saveVehicleModelStore(next);
       return next;
     });
+    setSelectedRecordIds((prev) => prev.filter((id) => id !== target.id));
     showToast(
       `Deleted vehicle model ${target.id} ("${target.manufacturer} – ${target.modelName}").`,
       'success'
@@ -692,7 +858,7 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
     setPendingDelete(null);
   };
 
-  const handleExportCSV = () => {
+  const exportModelsToCsv = (modelsToExport: VehicleModelRecord[], filename: string) => {
     const headers = [
       'Model ID',
       'Manufacturer',
@@ -712,7 +878,7 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
       'Status',
       'Created Date',
     ];
-    const rows = filteredRecords.map((r) => {
+    const rows = modelsToExport.map((r) => {
       const iconSum = getIconSetupSummary(r).label;
       return [
         r.id,
@@ -741,17 +907,121 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `fleetrobo-vehicle-models-${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleExportCSV = () => {
+    exportModelsToCsv(
+      filteredRecords,
+      `fleetrobo-vehicle-models-${new Date().toISOString().split('T')[0]}.csv`
+    );
     showToast(`Exported ${filteredRecords.length} vehicle model(s) to CSV`, 'info');
   };
 
-  const handleResetDemo = () => {
+  const handleExportSelected = () => {
+    const selected = records.filter((r) => selectedRecordIds.includes(r.id));
+    if (selected.length === 0) {
+      showToast('No models selected for export.', 'error');
+      return;
+    }
+    exportModelsToCsv(
+      selected,
+      `fleetrobo-vehicle-models-selected-${new Date().toISOString().split('T')[0]}.csv`
+    );
+    showToast(`Exported ${selected.length} selected vehicle model(s) to CSV`, 'info');
+  };
+
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+
+  const handleRequestResetDemo = () => {
+    if (!checkPlatformAdmin()) return;
+    setShowResetConfirm(true);
+  };
+
+  const handleConfirmResetDemo = () => {
+    if (!checkPlatformAdmin()) return;
     const seeded = resetVehicleModelStore();
     setRecords(seeded);
+    setSelectedRecordIds([]);
     setPage(1);
+    setShowResetConfirm(false);
     showToast('Restored default Vehicle Model Master sample catalog', 'info');
+  };
+
+  const handleToggleSelectRow = (id: string) => {
+    setSelectedRecordIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleToggleSelectAllPage = () => {
+    const pageIds = paginatedRecords.map((r) => r.id);
+    const allSelected =
+      pageIds.length > 0 && pageIds.every((id) => selectedRecordIds.includes(id));
+    if (allSelected) {
+      setSelectedRecordIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+    } else {
+      setSelectedRecordIds((prev) => Array.from(new Set([...prev, ...pageIds])));
+    }
+  };
+
+  const handleApplyBulkStatus = (ids: string[], nextActive: boolean) => {
+    if (!checkPlatformAdmin()) return;
+    const today = new Date().toISOString().split('T')[0];
+    const actor = isPlatformAdmin ? 'Platform Admin' : `${currentCompany} Admin`;
+
+    setRecords((prev) => {
+      const next = prev.map((r) =>
+        ids.includes(r.id)
+          ? {
+              ...r,
+              isActive: nextActive,
+              updatedAt: today,
+              updatedBy: actor,
+            }
+          : r
+      );
+      saveVehicleModelStore(next);
+      return next;
+    });
+
+    showToast(
+      nextActive
+        ? `Bulk Activated ${ids.length} vehicle model(s). Now selectable in Add Vehicle.`
+        : `Bulk Deactivated ${ids.length} vehicle model(s). Existing vehicles remain linked.`,
+      'info'
+    );
+    setSelectedRecordIds([]);
+  };
+
+  const handleApplyBulkDelete = (ids: string[]) => {
+    if (!checkPlatformAdmin()) return;
+    const unlinkedIds = ids.filter((id) => {
+      const rec = records.find((r) => r.id === id);
+      return rec ? countDependentVehicles(rec, vehiclesList) === 0 : false;
+    });
+
+    if (unlinkedIds.length === 0) {
+      showToast(
+        'No models could be deleted because all selected models have dependent vehicles.',
+        'error'
+      );
+      return;
+    }
+
+    setRecords((prev) => {
+      const next = prev.filter((r) => !unlinkedIds.includes(r.id));
+      saveVehicleModelStore(next);
+      return next;
+    });
+
+    setSelectedRecordIds((prev) => prev.filter((id) => !unlinkedIds.includes(id)));
+    showToast(
+      `Successfully deleted ${unlinkedIds.length} vehicle model(s).`,
+      'success'
+    );
   };
 
   const currentFormIconSummary = useMemo(() => {
@@ -837,9 +1107,20 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            {selectedRecordIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setIsBulkDrawerOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-orange-50 border border-orange-200 hover:bg-orange-100 text-[#B85324] text-xs font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
+              >
+                <SlidersHorizontal size={13} className="text-[#FA8A63]" />
+                <span>Bulk Actions ({selectedRecordIds.length})</span>
+              </button>
+            )}
+
             <button
               type="button"
-              onClick={handleResetDemo}
+              onClick={handleRequestResetDemo}
               title="Reset sample vehicle models to default catalog"
               className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-lg shadow-2xs transition-colors cursor-pointer"
             >
@@ -899,13 +1180,34 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
             )}
           </div>
 
+          {/* Filters Drawer Trigger */}
+          <button
+            type="button"
+            onClick={() => setIsFiltersDrawerOpen(true)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
+              activeFilterCount > 0
+                ? 'bg-orange-50 border-[#FA8A63] text-[#B85324]'
+                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            <Filter size={13} className={activeFilterCount > 0 ? 'text-[#FA8A63]' : 'text-slate-500'} />
+            <span>Filters</span>
+            {activeFilterCount > 0 && (
+              <span className="w-4 h-4 rounded-full bg-[#FA8A63] text-white text-[10px] flex items-center justify-center font-bold">
+                {activeFilterCount}
+              </span>
+            )}
+          </button>
+
           {/* Vehicle Type Filter */}
           <div className="flex items-center gap-1.5 shrink-0">
             <span className="text-xs font-semibold text-slate-500">Type:</span>
             <select
               value={typeFilter}
               onChange={(e) => {
-                setTypeFilter(e.target.value);
+                const val = e.target.value;
+                setTypeFilter(val);
+                setAdvancedFilters((p) => ({ ...p, vehicleType: val, vehicleSegment: 'All' }));
                 setPage(1);
               }}
               className="h-[31px] px-2.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 font-medium focus:outline-none focus:border-[#FA8A63] cursor-pointer hover:border-slate-300"
@@ -925,7 +1227,9 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
             <select
               value={segmentFilter}
               onChange={(e) => {
-                setSegmentFilter(e.target.value);
+                const val = e.target.value;
+                setSegmentFilter(val);
+                setAdvancedFilters((p) => ({ ...p, vehicleSegment: val }));
                 setPage(1);
               }}
               className="h-[31px] px-2.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 font-medium focus:outline-none focus:border-[#FA8A63] cursor-pointer hover:border-slate-300"
@@ -945,7 +1249,9 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
             <select
               value={statusFilter}
               onChange={(e) => {
-                setStatusFilter(e.target.value as StatusFilter);
+                const val = e.target.value as StatusFilter;
+                setStatusFilter(val);
+                setAdvancedFilters((p) => ({ ...p, status: val }));
                 setPage(1);
               }}
               className="h-[31px] px-2.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-700 font-medium focus:outline-none focus:border-[#FA8A63] cursor-pointer hover:border-slate-300"
@@ -959,7 +1265,8 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
           {(searchQuery ||
             typeFilter !== 'All' ||
             segmentFilter !== 'All' ||
-            statusFilter !== 'All') && (
+            statusFilter !== 'All' ||
+            activeFilterCount > 0) && (
             <button
               type="button"
               onClick={() => {
@@ -967,6 +1274,7 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
                 setTypeFilter('All');
                 setSegmentFilter('All');
                 setStatusFilter('All');
+                setAdvancedFilters(INITIAL_VEHICLE_MODEL_FILTERS);
                 setPage(1);
               }}
               className="text-xs text-[#FA8A63] font-semibold hover:underline cursor-pointer whitespace-nowrap"
@@ -1005,6 +1313,18 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
             <table className="w-full min-w-[1260px] text-left border-collapse text-xs">
               <thead className="bg-slate-50/90 border-b border-slate-200 sticky top-0 z-10 select-none">
                 <tr>
+                  <th className="px-3 py-3 w-10 text-center select-none">
+                    <input
+                      type="checkbox"
+                      checked={
+                        paginatedRecords.length > 0 &&
+                        paginatedRecords.every((r) => selectedRecordIds.includes(r.id))
+                      }
+                      onChange={handleToggleSelectAllPage}
+                      className="w-3.5 h-3.5 rounded border-slate-300 text-[#FA8A63] focus:ring-[#FA8A63] cursor-pointer"
+                      title="Select all on this page"
+                    />
+                  </th>
                   <th className="px-3.5 py-3 font-semibold text-slate-600 whitespace-nowrap w-[62px]">
                     S.No.
                   </th>
@@ -1151,7 +1471,7 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
               <tbody className="divide-y divide-slate-100">
                 {paginatedRecords.length === 0 ? (
                   <tr>
-                    <td colSpan={14} className="py-12 text-center text-slate-400">
+                    <td colSpan={15} className="py-12 text-center text-slate-400">
                       <div className="max-w-sm mx-auto space-y-2">
                         <Truck className="w-8 h-8 text-slate-300 mx-auto" />
                         <div className="text-sm font-semibold text-slate-700">
@@ -1176,6 +1496,17 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
                         onClick={() => populateDrawerFromRecord(rec, 'view')}
                         className="hover:bg-slate-50/80 transition-colors group cursor-pointer"
                       >
+                        <td
+                          className="px-3 py-3 text-center select-none"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedRecordIds.includes(rec.id)}
+                            onChange={() => handleToggleSelectRow(rec.id)}
+                            className="w-3.5 h-3.5 rounded border-slate-300 text-[#FA8A63] focus:ring-[#FA8A63] cursor-pointer"
+                          />
+                        </td>
                         <td className="px-3.5 py-3 text-slate-500 font-medium tabular-nums">
                           {serialNo}
                         </td>
@@ -2415,7 +2746,8 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
                 from Vehicle Model Master?
               </>
             }
-            confirmLabel="Delete Model"
+            confirmDisabled={depCount > 0}
+            confirmLabel={depCount > 0 ? 'Deletion Blocked' : 'Delete Model'}
             targetChips={[
               { id: 'id', label: pendingDelete.id, tone: 'orange' },
               {
@@ -2476,6 +2808,76 @@ export const VehicleModelMasterContent: React.FC<VehicleModelMasterContentProps>
           />
         );
       })()}
+
+      {/* Filters Drawer */}
+      <VehicleModelFiltersDrawer
+        isOpen={isFiltersDrawerOpen}
+        filters={advancedFilters}
+        records={records}
+        vehiclesList={vehiclesList}
+        onApply={(nextFilters) => {
+          setAdvancedFilters(nextFilters);
+          setTypeFilter(nextFilters.vehicleType);
+          setSegmentFilter(nextFilters.vehicleSegment);
+          setStatusFilter(nextFilters.status as StatusFilter);
+          setPage(1);
+        }}
+        onReset={() => {
+          setAdvancedFilters(INITIAL_VEHICLE_MODEL_FILTERS);
+          setTypeFilter('All');
+          setSegmentFilter('All');
+          setStatusFilter('All');
+          setPage(1);
+        }}
+        onClose={() => setIsFiltersDrawerOpen(false)}
+      />
+
+      {/* Bulk Operations Drawer */}
+      <VehicleModelBulkDrawer
+        isOpen={isBulkDrawerOpen}
+        selectedRecords={records.filter((r) => selectedRecordIds.includes(r.id))}
+        vehiclesList={vehiclesList}
+        isPlatformAdmin={isPlatformAdmin}
+        onClose={() => setIsBulkDrawerOpen(false)}
+        onClearSelection={() => setSelectedRecordIds([])}
+        onApplyBulkStatus={handleApplyBulkStatus}
+        onApplyBulkDelete={handleApplyBulkDelete}
+        onExportSelected={handleExportSelected}
+      />
+
+      {/* Reset Sample Models Confirmation Modal */}
+      {showResetConfirm && (
+        <div className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-900/45 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-5 border border-slate-200 space-y-3.5">
+            <div className="flex items-center gap-2 text-rose-600 font-bold text-sm">
+              <AlertTriangle className="w-4 h-4" />
+              <span>Reset Vehicle Model Sample Catalog?</span>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              This will overwrite all customized vehicle model records and custom uploaded state icons with the initial factory baseline demo models. Any models registered by your organization will be replaced.
+            </p>
+            <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-[11px] text-rose-800">
+              <strong>Warning:</strong> This action is permanent and cannot be undone.
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(false)}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmResetDemo}
+                className="px-4 py-1.5 text-xs font-semibold bg-rose-600 hover:bg-rose-700 text-white rounded-lg cursor-pointer"
+              >
+                Confirm Reset Catalog
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

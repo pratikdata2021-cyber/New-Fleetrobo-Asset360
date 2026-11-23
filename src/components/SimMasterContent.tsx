@@ -31,11 +31,11 @@ import { DeleteConfirmationModal } from './common/DeleteConfirmationModal';
 import {
   SimRecord,
   SimLifecycleStatus,
+  EffectiveSimInventoryStatus,
+  SimComputedAssignment,
+  HardwareAuditEntry,
   SIM_COLUMNS,
-  MODAL_OWNERS,
-  MODAL_LOCATIONS,
   SIM_LIFECYCLE_OPTIONS,
-  SIM_OPERATORS,
   SIM_PLANS,
   SIM_FORM_FACTORS,
   MODAL_FIELD_TOOLTIPS,
@@ -45,14 +45,29 @@ import {
   loadSavedModalViews,
   saveSavedModalViews,
   downloadModalCsv,
-  parseCsvLine
+  parseCsvLine,
+  deriveSimEffectiveInventoryStatus,
+  getSimMappingReferences,
+  resolveSimComputedAssignment,
+  computeHardwareBindingStatus
 } from '../types/modalMaster';
 import {
   getEnabledModelsForCompanyName,
-  getAvailableClientCompanies
+  getAvailableClientCompanies,
+  isCompanyEligibleForNewRegistration,
+  resolveClientCompanyByNameOrId
 } from '../types/companyModelEnablement';
-import { getRecordIdentifierTypes } from '../types/modelCategoryMaster';
+import { getModelCategoryById, getRecordIdentifierTypes } from '../types/modelCategoryMaster';
 import { ColumnCataloguePopover } from './ColumnCataloguePopover';
+import {
+  SimFilterDrawer,
+  SimAdvancedFilters,
+  DEFAULT_SIM_FILTERS,
+  countActiveSimFilters,
+  matchesSimFilters,
+  resolveSimCategoryLabel
+} from './sim-master/SimFilterDrawer';
+import { SimBulkDrawer, SimBulkActionMode } from './sim-master/SimBulkDrawer';
 
 const FieldLabel: React.FC<{
   label: string;
@@ -100,8 +115,9 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     });
   };
 
-  // Model access sync from Binary Platform Admin -> Company Management
+  // Model access sync from Binary Platform Admin -> Company Management + 60s time-window tick
   const [modelAccessTick, setModelAccessTick] = useState(0);
+  const [statusTick, setStatusTick] = useState(0);
   useEffect(() => {
     const handleSync = () => setModelAccessTick((t) => t + 1);
     const handleStoreSync = () => {
@@ -113,11 +129,13 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     window.addEventListener('fleetrobo:modal-store-updated', handleStoreSync);
     window.addEventListener('storage', handleSync);
     window.addEventListener('storage', handleStoreSync);
+    const interval = window.setInterval(() => setStatusTick((t) => t + 1), 60000);
     return () => {
       window.removeEventListener('fleetrobo:model-access-updated', handleSync);
       window.removeEventListener('fleetrobo:modal-store-updated', handleStoreSync);
       window.removeEventListener('storage', handleSync);
       window.removeEventListener('storage', handleStoreSync);
+      window.clearInterval(interval);
     };
   }, []);
 
@@ -129,26 +147,29 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
 
   // Toolbar & Table states
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterOperator, setFilterOperator] = useState<string>('All');
-  const [filterCategory, setFilterCategory] = useState<string>('All');
-  const [filterStatus, setFilterStatus] = useState<string>('All');
   const [filterOwner, setFilterOwner] = useState<string>('All');
+  const [advancedFilters, setAdvancedFilters] = useState<SimAdvancedFilters>(DEFAULT_SIM_FILTERS);
 
   useEffect(() => {
     setFilterOwner('All');
+    setAdvancedFilters(DEFAULT_SIM_FILTERS);
+    setSelectedIds(new Set());
+    setCurrentPage(1);
   }, [currentCompany]);
 
-  // Enabled SIM models for the active company (or selected Organization filter in Platform Admin)
+  const effectiveAdvancedFilters = useMemo<SimAdvancedFilters>(() => {
+    if (isPlatformAdmin) return advancedFilters;
+    return { ...advancedFilters, organizations: [] };
+  }, [advancedFilters, isPlatformAdmin]);
+
+  // Enabled SIM models for the active company (strict tenant scope; no generic fallback)
   const enabledSimModels = useMemo(() => {
     const scopeCompany = isPlatformAdmin && filterOwner !== 'All' ? filterOwner : currentCompany;
-    return getEnabledModelsForCompanyName(scopeCompany).filter(
-      (m) => m.category === 'SIM'
-    );
+    return getEnabledModelsForCompanyName(scopeCompany).filter((m) => m.category === 'SIM');
   }, [currentCompany, isPlatformAdmin, filterOwner, modelAccessTick]);
 
   const enabledSimCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(enabledSimModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : ['M2M SIM', 'Standard SIM', 'IoT eSIM'];
+    return Array.from(new Set(enabledSimModels.map((m) => m.typeName)));
   }, [enabledSimModels]);
 
   const [sortKey, setSortKey] = useState<string>('');
@@ -172,28 +193,22 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     null | 'filters' | 'saved-views' | 'form' | 'inspector' | 'bulk' | 'import'
   >(null);
 
-  // Inspector state
-  const [inspectedSim, setInspectedSim] = useState<(SimRecord & { assigned: string; connection: string }) | null>(null);
+  // Inspector state (live synced by record ID)
+  const [inspectedSimId, setInspectedSimId] = useState<string | null>(null);
   const [inspectorTab, setInspectorTab] = useState<'overview' | 'linked' | 'activity'>('overview');
 
-  // Form state (Create / Edit SIM)
+  // Form state (Create / Edit SIM — exact frozen UI fields preserved)
   const [editingSim, setEditingSim] = useState<SimRecord | null>(null);
   const [formIccid, setFormIccid] = useState('');
   const [formSimId, setFormSimId] = useState('');
   const [formMsisdn, setFormMsisdn] = useState('');
-  const [formCategory, setFormCategory] = useState<string>(
-    () => enabledSimCategories[0] || 'M2M SIM'
-  );
-  const [formOperator, setFormOperator] = useState<string>(
-    () => enabledSimModels[0]?.manufacturer || 'Airtel'
-  );
-  const [formModelRef, setFormModelRef] = useState<string>(
-    () => enabledSimModels[0]?.modelReference || ''
-  );
-  const [formPlan, setFormPlan] = useState<string>('IoT Business 10GB');
+  const [formCategory, setFormCategory] = useState<string>('');
+  const [formOperator, setFormOperator] = useState<string>('');
+  const [formModelRef, setFormModelRef] = useState<string>('');
+  const [formPlan, setFormPlan] = useState<string>(SIM_PLANS[0] || 'IoT Business 10GB');
   const [formFormFactor, setFormFormFactor] = useState<SimRecord['formFactor']>('Nano (4FF)');
   const [formMode, setFormMode] = useState('M2M');
-  const [formStatus, setFormStatus] = useState<SimLifecycleStatus>('Active');
+  const [formStatus, setFormStatus] = useState<SimLifecycleStatus>('Inventory');
   const [formActivationDate, setFormActivationDate] = useState('');
   const [formRenewalDate, setFormRenewalDate] = useState('');
   const [formNotes, setFormNotes] = useState('');
@@ -201,12 +216,12 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
   const [formOwner, setFormOwner] = useState(() =>
     currentCompany && currentCompany !== 'Platform Admin' && currentCompany !== 'Binary'
       ? currentCompany
-      : availableOrganizations[0] || MODAL_OWNERS[0]
+      : availableOrganizations[0] || ''
   );
   const [formError, setFormError] = useState<string | null>(null);
 
   const effectiveFormOwner = isPlatformAdmin
-    ? formOwner || availableOrganizations[0] || 'Adani Mundra'
+    ? formOwner || availableOrganizations[0] || ''
     : currentCompany;
 
   const formEnabledSimModels = useMemo(() => {
@@ -215,22 +230,27 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     );
   }, [effectiveFormOwner, modelAccessTick]);
 
+  const formSelectableSimModels = useMemo(() => {
+    if (!editingSim) return formEnabledSimModels;
+    const historical = editingSim.modelTypeId
+      ? getModelCategoryById(editingSim.modelTypeId)
+      : undefined;
+    if (historical && !formEnabledSimModels.some((m) => m.id === historical.id)) {
+      return [historical, ...formEnabledSimModels];
+    }
+    return formEnabledSimModels;
+  }, [editingSim, formEnabledSimModels]);
+
   const formEnabledSimCategories = useMemo<string[]>(() => {
-    const cats = Array.from(new Set(formEnabledSimModels.map((m) => m.typeName)));
-    return cats.length > 0 ? cats : ['M2M SIM', 'Standard SIM', 'IoT eSIM'];
-  }, [formEnabledSimModels]);
+    const cats = Array.from(new Set(formSelectableSimModels.map((m) => m.typeName)));
+    if (editingSim?.category && !cats.includes(editingSim.category)) {
+      return [editingSim.category, ...cats];
+    }
+    return cats;
+  }, [formSelectableSimModels, editingSim]);
 
   // Saved view creation state
   const [newViewName, setNewViewName] = useState('');
-
-  // Bulk operation state
-  const [bulkAction, setBulkAction] = useState<
-    'Update owner' | 'Update lifecycle' | 'Update plan' | 'Retire eligible' | 'Delete eligible'
-  >('Update owner');
-  const [bulkTargetOwner, setBulkTargetOwner] = useState(MODAL_OWNERS[0]);
-  const [bulkTargetLifecycle, setBulkTargetLifecycle] = useState<SimLifecycleStatus>('Active');
-  const [bulkTargetPlan, setBulkTargetPlan] = useState<SimRecord['plan']>('IoT Business 10GB');
-  const [pendingBulkDelete, setPendingBulkDelete] = useState(false);
 
   // Direct upload state
   const simUpload = useDirectUploadState(activeDrawer === 'import');
@@ -241,15 +261,22 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
 
   // Derived options based on selected SIM category
   const modelsForSelectedCategory = useMemo(() => {
-    return formEnabledSimModels.filter((m) => m.typeName === formCategory);
-  }, [formEnabledSimModels, formCategory]);
+    return formSelectableSimModels.filter((m) => m.typeName === formCategory);
+  }, [formSelectableSimModels, formCategory]);
 
   const availableOperators = useMemo<string[]>(() => {
     if (modelsForSelectedCategory.length > 0) {
-      return Array.from(new Set(modelsForSelectedCategory.map((m) => m.manufacturer)));
+      const ops = Array.from(new Set(modelsForSelectedCategory.map((m) => m.manufacturer).filter(Boolean)));
+      if (editingSim?.operator && !ops.includes(editingSim.operator)) {
+        return [editingSim.operator, ...ops];
+      }
+      return ops;
     }
-    return SIM_OPERATORS;
-  }, [modelsForSelectedCategory]);
+    if (editingSim?.operator) {
+      return [editingSim.operator];
+    }
+    return [];
+  }, [modelsForSelectedCategory, editingSim]);
 
   const modelsForSelectedOperator = useMemo(() => {
     return modelsForSelectedCategory.filter((m) => m.manufacturer === formOperator);
@@ -257,25 +284,25 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
 
   const selectedSimModelSpec = useMemo(() => {
     if (editingSim?.modelTypeId) {
-      const byId = modelsForSelectedCategory.find(
-        (m) => m.id === editingSim.modelTypeId && m.manufacturer === formOperator
-      );
-      if (byId && (!formModelRef || byId.modelReference === formModelRef)) {
-        return byId;
-      }
-    }
-    return (
-      modelsForSelectedCategory.find(
+      const byId = formSelectableSimModels.find(
         (m) =>
+          m.id === editingSim.modelTypeId &&
+          m.typeName === formCategory &&
           m.manufacturer === formOperator &&
-          (!formModelRef || m.modelReference === formModelRef)
-      ) ||
-      modelsForSelectedCategory.find((m) => m.manufacturer === formOperator) ||
-      modelsForSelectedCategory[0] ||
-      formEnabledSimModels[0] ||
-      null
+          (!formModelRef || (m.modelReference || '') === formModelRef)
+      );
+      if (byId) return byId;
+    }
+    const operatorMatches = modelsForSelectedCategory.filter(
+      (m) => m.manufacturer === formOperator
     );
-  }, [modelsForSelectedCategory, formOperator, formModelRef, formEnabledSimModels, editingSim]);
+    if (formModelRef) {
+      return (
+        operatorMatches.find((m) => (m.modelReference || '') === formModelRef) || null
+      );
+    }
+    return operatorMatches[0] || null;
+  }, [modelsForSelectedCategory, formCategory, formOperator, formModelRef, formSelectableSimModels, editingSim]);
 
   const availableIdentifierTypes = useMemo(() => {
     const fromSpec = getRecordIdentifierTypes(selectedSimModelSpec);
@@ -359,92 +386,132 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
   // Keep defaults aligned when company or enabled models change
   useEffect(() => {
     if (editingSim) return;
-    if (formEnabledSimModels.length > 0) {
-      const first = formEnabledSimModels.find((m) => m.typeName === formCategory) || formEnabledSimModels[0];
-      setFormCategory(first.typeName);
-      setFormOperator(first.manufacturer);
-      setFormModelRef(first.modelReference || '');
-      setFormMode(first.simType || 'M2M');
-      setFormFormFactor(first.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)');
+    if (formEnabledSimModels.length === 0) {
+      setFormCategory('');
+      setFormOperator('');
+      setFormModelRef('');
+      setFormIdentifierType('ICCID');
+      return;
     }
-  }, [effectiveFormOwner, formEnabledSimModels, editingSim]);
+    const stillValid = formEnabledSimModels.find(
+      (m) =>
+        m.typeName === formCategory &&
+        m.manufacturer === formOperator &&
+        (!formModelRef || (m.modelReference || '') === formModelRef)
+    );
+    if (stillValid) return;
 
-  // Active assignment lookup map by simId
-  const activeAssignmentBySimId = useMemo(() => {
-    const map = new Map<string, { hardwareName: string; connectionId: string }>();
-    store.simAssignments.forEach((sa) => {
-      if (!sa.end) {
-        map.set(sa.simId, {
-          hardwareName: sa.hardwareName,
-          connectionId: sa.connectionId
-        });
-      }
-    });
-    return map;
-  }, [store.simAssignments]);
+    const first =
+      formEnabledSimModels.find((m) => m.typeName === formCategory) || formEnabledSimModels[0];
+    const firstIds = getRecordIdentifierTypes(first);
+    setFormCategory(first.typeName);
+    setFormOperator(first.manufacturer);
+    setFormModelRef(first.modelReference || '');
+    setFormMode(first.simType || 'M2M');
+    setFormFormFactor(first.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)');
+    setFormIdentifierType(firstIds[0] || 'ICCID');
+  }, [effectiveFormOwner, formEnabledSimModels, editingSim, formCategory, formOperator, formModelRef]);
 
-  // Enriched SIM rows with computed `assigned` and `connection`
-  const enrichedSims = useMemo(() => {
-    return store.sims.map((sim) => {
-      const active = activeAssignmentBySimId.get(sim.id);
+  // Tenant-scoped SIMs + authoritative computed assignment & effective inventory status
+  const authorizedSims = useMemo(() => {
+    const companyTarget =
+      currentCompany && currentCompany !== 'Platform Admin' && currentCompany !== 'Binary'
+        ? currentCompany.trim().toLowerCase()
+        : null;
+    if (!companyTarget) return store.sims;
+    return store.sims.filter((s) => (s.owner || '').trim().toLowerCase() === companyTarget);
+  }, [store.sims, currentCompany]);
+
+  const { assignmentById, effectiveStatusById, enrichedSims } = useMemo(() => {
+    void statusTick;
+    const nowMs = Date.now();
+    const aMap = new Map<string, SimComputedAssignment>();
+    const eMap = new Map<string, EffectiveSimInventoryStatus>();
+    const rows = authorizedSims.map((sim) => {
+      const computedAssignment = resolveSimComputedAssignment(sim.id, store, nowMs);
+      const effectiveStatus = deriveSimEffectiveInventoryStatus(sim, store, nowMs);
+      aMap.set(sim.id, computedAssignment);
+      eMap.set(sim.id, effectiveStatus);
       return {
         ...sim,
-        assigned: active ? active.hardwareName : 'Unassigned',
-        connection: active ? active.connectionId : '—'
+        assigned: computedAssignment.assignedHardwareName,
+        connection: computedAssignment.assignedConnectionId,
+        effectiveStatus,
+        assignmentStatus: computedAssignment.assignmentStatus,
+        computedAssignment
       };
     });
-  }, [store.sims, activeAssignmentBySimId]);
+    return { assignmentById: aMap, effectiveStatusById: eMap, enrichedSims: rows };
+  }, [authorizedSims, store, statusTick]);
 
-  // Open Create SIM Form
+  const inspectedSim = useMemo(
+    () => (inspectedSimId ? enrichedSims.find((s) => s.id === inspectedSimId) || null : null),
+    [enrichedSims, inspectedSimId]
+  );
+
+  // Open Create SIM Form (Create/Edit UI fields remain strictly frozen)
   const handleOpenCreate = () => {
     setEditingSim(null);
     const targetOrg = isPlatformAdmin
       ? filterOwner !== 'All'
         ? filterOwner
-        : availableOrganizations[0] || MODAL_OWNERS[0]
-      : currentCompany || MODAL_OWNERS[0];
+        : availableOrganizations[0] || ''
+      : currentCompany;
     const targetModels = getEnabledModelsForCompanyName(targetOrg).filter(
       (m) => m.category === 'SIM'
     );
-    const nextNum = 1000 + store.sims.length;
-    const firstEnabled = targetModels[0] || enabledSimModels[0];
-    const cat = firstEnabled ? firstEnabled.typeName : 'M2M SIM';
-    const op = firstEnabled ? firstEnabled.manufacturer : 'Airtel';
+    const firstEnabled = targetModels[0];
+    const cat = firstEnabled ? firstEnabled.typeName : '';
+    const op = firstEnabled ? firstEnabled.manufacturer : '';
     const modelRef = firstEnabled?.modelReference || '';
     const modeVal = firstEnabled ? firstEnabled.simType || 'M2M' : 'M2M';
     const ffVal: SimRecord['formFactor'] = firstEnabled?.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)';
     const firstIds = getRecordIdentifierTypes(firstEnabled);
     const idType = firstIds[0] || 'ICCID';
 
-    const nextSuffix = (store.sims.length + 1).toString().padStart(5, '0');
     setFormOwner(targetOrg);
     setFormIdentifierType(idType);
-    setFormIccid(idType === 'ICCID' ? `899186104312451${nextSuffix}` : '');
+    setFormIccid('');
     setFormSimId(`SIM-rt-${Date.now()}`);
     setFormMsisdn('');
     setFormCategory(cat);
     setFormOperator(op);
     setFormModelRef(modelRef);
-    setFormPlan(op === 'Jio' ? 'Enterprise M2M 2GB' : 'IoT Business 10GB');
+    setFormPlan(
+      op === 'Jio'
+        ? 'Enterprise M2M 2GB'
+        : op === 'Vi' || op === 'Vodafone Idea'
+        ? 'IoT 5GB'
+        : SIM_PLANS[0] || 'IoT Business 10GB'
+    );
     setFormFormFactor(ffVal);
     setFormMode(modeVal);
-    setFormStatus('Active');
-    setFormActivationDate(new Date().toISOString().slice(0, 10));
+    setFormStatus('Inventory');
+    setFormActivationDate('');
     setFormRenewalDate('');
     setFormNotes('');
-    setFormError(null);
+    setFormError(
+      firstEnabled
+        ? null
+        : 'No active SIM models are enabled for this company. Enable a SIM model in Company Model Access first.'
+    );
     setActiveDrawer('form');
   };
 
   // Open Edit SIM Form
   const handleOpenEdit = (record: SimRecord) => {
     setEditingSim(record);
-    setFormOwner(record.owner || availableOrganizations[0] || 'Adani Mundra');
+    setFormOwner(record.owner || availableOrganizations[0] || '');
     setFormIccid(record.iccid);
     setFormSimId(record.id);
     setFormMsisdn(record.msisdn);
-    const cat = record.category || (record.formFactor === 'eSIM' ? 'IoT eSIM' : record.plan.includes('M2M') ? 'M2M SIM' : 'Standard SIM');
-    const matchedModel = enabledSimModels.find((m) => m.id === record.modelTypeId);
+    const matchedModel =
+      getModelCategoryById(record.modelTypeId) ||
+      enabledSimModels.find((m) => m.id === record.modelTypeId);
+    const cat =
+      record.category ||
+      matchedModel?.typeName ||
+      '';
     const modelIds = getRecordIdentifierTypes(matchedModel);
     setFormIdentifierType(record.identifierType || modelIds[0] || 'ICCID');
     setFormCategory(cat);
@@ -452,7 +519,11 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     setFormOperator(record.operator);
     setFormModelRef(matchedModel?.modelReference || '');
     setFormPlan(record.plan);
-    setFormMode(matchedModel?.simType || (record.plan.includes('M2M') ? 'M2M' : 'Standard'));
+    setFormMode(
+      record.serviceMode ||
+        matchedModel?.simType ||
+        (record.plan.includes('M2M') ? 'M2M' : 'Standard')
+    );
     setFormStatus(record.status);
     setFormActivationDate(record.activationDate);
     setFormRenewalDate(record.renewalDate);
@@ -461,23 +532,67 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     setActiveDrawer('form');
   };
 
+  const validatePrimarySimIdentifier = (idType: string, value: string): string | null => {
+    const trimmed = value.trim();
+    const norm = idType.trim().toUpperCase();
+    if (!trimmed) return `${idType} is required.`;
+    if (norm === 'ICCID' && !/^\d{18,22}$/.test(trimmed)) {
+      return 'ICCID must be 18–22 ASCII digits.';
+    }
+    if (norm === 'EID' && !/^[0-9A-Za-z]{32}$/.test(trimmed)) {
+      return 'EID must be 32 alphanumeric characters.';
+    }
+    if (norm === 'IMSI' && !/^\d{15}$/.test(trimmed)) {
+      return 'IMSI must be 15 ASCII digits.';
+    }
+    if (norm === 'MSISDN') {
+      const digits = trimmed.replace(/\D/g, '');
+      if (!/^\+?[\d\s-]{8,18}$/.test(trimmed) || digits.length < 8 || digits.length > 15) {
+        return 'MSISDN must be a valid mobile number (8–15 digits).';
+      }
+    }
+    return null;
+  };
+
   // Save SIM (Create or Edit)
   const handleSaveSim = (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
 
     const trimmedPrimaryId = formIccid.trim();
+    const resolvedOwnerName = isPlatformAdmin
+      ? (formOwner || '').trim()
+      : currentCompany;
+    const ownerCompany = resolveClientCompanyByNameOrId(resolvedOwnerName);
 
-    if (!trimmedPrimaryId) {
-      setFormError(`${activeIdentifierType} is required.`);
+    if (
+      !ownerCompany ||
+      ownerCompany.isPlatformOwner ||
+      (!editingSim && !isCompanyEligibleForNewRegistration(ownerCompany))
+    ) {
+      setFormError(
+        `Organization "${resolvedOwnerName || '—'}" is inactive or ineligible for SIM registration.`
+      );
       return;
     }
 
-    if (
-      activeIdentifierType.trim().toUpperCase() === 'ICCID' &&
-      !/^\d{18,22}$/.test(trimmedPrimaryId)
-    ) {
-      setFormError('ICCID must be 18–22 digits.');
+    if (!editingSim && formEnabledSimModels.length === 0) {
+      setFormError(
+        `No active SIM models are currently available for "${ownerCompany.name}". Enable SIM models or verify company status in Company Management.`
+      );
+      return;
+    }
+
+    if (!editingSim && !selectedSimModelSpec) {
+      setFormError(
+        `Select a valid enabled SIM category, operator, and model enabled for "${ownerCompany.name}".`
+      );
+      return;
+    }
+
+    const idErr = validatePrimarySimIdentifier(activeIdentifierType, trimmedPrimaryId);
+    if (idErr) {
+      setFormError(idErr);
       return;
     }
 
@@ -491,25 +606,91 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
       return;
     }
 
+    const trimmedMsisdn = formMsisdn.trim();
+    if (trimmedMsisdn && activeIdentifierType.trim().toUpperCase() !== 'MSISDN') {
+      const msisdnDigits = trimmedMsisdn.replace(/\D/g, '');
+      if (!/^\+?[\d\s-]{8,18}$/.test(trimmedMsisdn) || msisdnDigits.length < 8 || msisdnDigits.length > 15) {
+        setFormError('Mobile number / MSISDN must contain 8–15 digits.');
+        return;
+      }
+    }
+
+    if (formActivationDate && formRenewalDate && formRenewalDate < formActivationDate) {
+      setFormError('Expiry / renewal date cannot be earlier than Activation date.');
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const actorLabel = isPlatformAdmin ? 'Platform Admin' : currentCompany;
+
     if (editingSim) {
+      const refs = getSimMappingReferences(editingSim.id, store);
+      const ownerChanged =
+        ownerCompany.name.toLowerCase() !== (editingSim.owner || '').trim().toLowerCase();
+      if (ownerChanged && refs.hasAnyReference) {
+        setFormError(
+          'Cannot change SIM organization while referenced in active, scheduled, or historical Asset Mapping records.'
+        );
+        return;
+      }
+      if (refs.hasActiveOrScheduledReference && formStatus !== 'Active') {
+        setFormError(
+          `Cannot set carrier lifecycle to "${formStatus}" while this SIM has an active or scheduled Asset Mapping (${refs.activeOrScheduledConnections.map((c) => c.connectionId || c.id).join(', ') || 'binding'}). End the mapping first.`
+        );
+        return;
+      }
+      if (
+        ownerChanged &&
+        editingSim.modelTypeId &&
+        !getEnabledModelsForCompanyName(ownerCompany.name).some(
+          (m) => m.category === 'SIM' && m.id === editingSim.modelTypeId
+        )
+      ) {
+        setFormError(
+          `Target organization "${ownerCompany.name}" does not have this SIM model enabled in Company Model Access.`
+        );
+        return;
+      }
+
+      const changeNotes: string[] = [];
+      if (editingSim.status !== formStatus) {
+        changeNotes.push(`carrier lifecycle ${editingSim.status} → ${formStatus}`);
+      }
+      if (editingSim.plan !== formPlan) {
+        changeNotes.push(`plan "${editingSim.plan}" → "${formPlan}"`);
+      }
+      if (ownerChanged) {
+        changeNotes.push(`owner ${editingSim.owner} → ${ownerCompany.name}`);
+      }
+      const auditEntry: HardwareAuditEntry = {
+        id: `aud-sim-${Date.now()}`,
+        timestamp: nowIso,
+        actor: actorLabel,
+        action: 'Updated SIM',
+        summary:
+          changeNotes.length > 0
+            ? `Updated ${trimmedPrimaryId}: ${changeNotes.join('; ')}.`
+            : `Updated SIM metadata for ${trimmedPrimaryId}.`
+      };
+
       const updatedRecord: SimRecord = {
         ...editingSim,
         id: editingSim.id,
         iccid: trimmedPrimaryId,
-        msisdn: formMsisdn.trim(),
+        msisdn: trimmedMsisdn,
         formFactor: formFormFactor,
-        operator: formOperator,
+        operator: formOperator || editingSim.operator,
         plan: formPlan,
-        owner: isPlatformAdmin
-          ? formOwner || availableOrganizations[0] || 'Adani Mundra'
-          : currentCompany || editingSim.owner,
+        owner: ownerCompany.name,
         status: formStatus,
         activationDate: formActivationDate,
         renewalDate: formRenewalDate,
         notes: formNotes.trim(),
-        category: formCategory,
+        category: formCategory || editingSim.category,
         modelTypeId: selectedSimModelSpec?.id || editingSim.modelTypeId,
-        identifierType: activeIdentifierType
+        identifierType: activeIdentifierType,
+        serviceMode: formMode,
+        auditHistory: [auditEntry, ...(editingSim.auditHistory || [])].slice(0, 25)
       };
       setStore((prev) => ({
         ...prev,
@@ -517,31 +698,39 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
       }));
       showToast(`SIM (${activeIdentifierType}: ${trimmedPrimaryId}) updated.`);
     } else {
-      const generatedRecordId = formSimId.trim() && !store.sims.some((s) => s.id === formSimId.trim())
-        ? formSimId.trim()
-        : `SIM-rt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const generatedRecordId =
+        formSimId.trim() && !store.sims.some((s) => s.id === formSimId.trim())
+          ? formSimId.trim()
+          : `SIM-rt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const auditEntry: HardwareAuditEntry = {
+        id: `aud-sim-${Date.now()}`,
+        timestamp: nowIso,
+        actor: actorLabel,
+        action: 'Registered SIM',
+        summary: `Registered ${formCategory || selectedSimModelSpec?.typeName} (${activeIdentifierType}: ${trimmedPrimaryId}) for ${ownerCompany.name} with carrier lifecycle "${formStatus}".`
+      };
       const newRecord: SimRecord = {
         id: generatedRecordId,
         iccid: trimmedPrimaryId,
         msisdn:
-          activeIdentifierType.trim().toUpperCase() === 'MSISDN' && !formMsisdn.trim()
+          activeIdentifierType.trim().toUpperCase() === 'MSISDN' && !trimmedMsisdn
             ? trimmedPrimaryId
-            : formMsisdn.trim(),
-        operator: formOperator,
+            : trimmedMsisdn,
+        operator: formOperator || selectedSimModelSpec!.manufacturer,
         plan: formPlan,
         formFactor: formFormFactor,
-        network: '4G LTE',
-        owner: isPlatformAdmin
-          ? formOwner || availableOrganizations[0] || 'Adani Mundra'
-          : currentCompany || 'Adani Mundra',
+        network: '',
+        owner: ownerCompany.name,
         location: '',
         status: formStatus,
         activationDate: formActivationDate,
         renewalDate: formRenewalDate,
         notes: formNotes.trim(),
-        category: formCategory,
-        modelTypeId: selectedSimModelSpec?.id,
-        identifierType: activeIdentifierType
+        category: formCategory || selectedSimModelSpec!.typeName,
+        modelTypeId: selectedSimModelSpec!.id,
+        identifierType: activeIdentifierType,
+        serviceMode: formMode,
+        auditHistory: [auditEntry]
       };
       setStore((prev) => ({
         ...prev,
@@ -557,28 +746,32 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
 
   const filteredSims = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    const companyTarget = currentCompany && currentCompany !== 'Platform Admin' && currentCompany !== 'Binary' ? currentCompany.trim().toLowerCase() : null;
     return enrichedSims.filter((s) => {
-      if (companyTarget && (s.owner || '').trim().toLowerCase() !== companyTarget) return false;
-      if (filterOperator !== 'All' && s.operator !== filterOperator) return false;
-      if (filterCategory !== 'All') {
-        const cat = s.category || (s.formFactor === 'eSIM' ? 'IoT eSIM' : s.plan.includes('M2M') ? 'M2M SIM' : 'Standard SIM');
-        if (cat !== filterCategory) return false;
+      if (
+        !matchesSimFilters(
+          s,
+          effectiveAdvancedFilters,
+          s.effectiveStatus,
+          s.computedAssignment,
+          isPlatformAdmin
+        )
+      ) {
+        return false;
       }
-      if (filterStatus !== 'All' && s.status !== filterStatus) return false;
-      if (filterOwner !== 'All' && s.owner !== filterOwner) return false;
       if (q) {
+        const cat = resolveSimCategoryLabel(s);
         const hay = [
           s.id,
           s.iccid,
           s.msisdn,
-          s.category || '',
+          cat,
           s.operator,
           s.plan,
           s.formFactor,
           s.owner,
           s.location,
           s.status,
+          s.effectiveStatus,
           s.assigned,
           s.connection
         ]
@@ -588,14 +781,41 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
       }
       return true;
     });
-  }, [enrichedSims, currentCompany, searchQuery, filterOperator, filterCategory, filterStatus, filterOwner]);
+  }, [enrichedSims, effectiveAdvancedFilters, isPlatformAdmin, searchQuery]);
+
+  // Prune stale / hidden / cross-tenant selected IDs whenever visible filtered rows change
+  useEffect(() => {
+    const visibleIds = new Set(filteredSims.map((s) => s.id));
+    setSelectedIds((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (visibleIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [filteredSims]);
 
   const sortedSims = useMemo(() => {
     if (!sortKey) return filteredSims;
     const copy = [...filteredSims];
     copy.sort((a, b) => {
-      const av = String((a as any)[sortKey] ?? '').toLowerCase();
-      const bv = String((b as any)[sortKey] ?? '').toLowerCase();
+      const av = String(
+        sortKey === 'status'
+          ? a.effectiveStatus
+          : sortKey === 'category'
+          ? resolveSimCategoryLabel(a)
+          : (a as any)[sortKey] ?? ''
+      ).toLowerCase();
+      const bv = String(
+        sortKey === 'status'
+          ? b.effectiveStatus
+          : sortKey === 'category'
+          ? resolveSimCategoryLabel(b)
+          : (b as any)[sortKey] ?? ''
+      ).toLowerCase();
       if (av < bv) return sortDir === 'asc' ? -1 : 1;
       if (av > bv) return sortDir === 'asc' ? 1 : -1;
       return 0;
@@ -614,10 +834,24 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     [hiddenCols]
   );
 
-  const activeFilterCount =
-    (filterOperator !== 'All' ? 1 : 0) +
-    (filterStatus !== 'All' ? 1 : 0) +
-    (filterOwner !== 'All' ? 1 : 0);
+  const activeFilterCount = useMemo(
+    () => countActiveSimFilters(effectiveAdvancedFilters, isPlatformAdmin),
+    [effectiveAdvancedFilters, isPlatformAdmin]
+  );
+
+  const clearAllSimFilters = () => {
+    setFilterOwner('All');
+    setAdvancedFilters(DEFAULT_SIM_FILTERS);
+    setCurrentPage(1);
+  };
+
+  const handleApplyAdvancedFilters = (next: SimAdvancedFilters) => {
+    setAdvancedFilters(next);
+    if (isPlatformAdmin) {
+      setFilterOwner(next.organizations.length === 1 ? next.organizations[0] : 'All');
+    }
+    setCurrentPage(1);
+  };
 
   // Selection helpers
   const allCurrentSelected =
@@ -651,8 +885,8 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
   };
 
   // Inspector opener
-  const openInspector = (rec: SimRecord & { assigned: string; connection: string }) => {
-    setInspectedSim(rec);
+  const openInspector = (rec: SimRecord) => {
+    setInspectedSimId(rec.id);
     setInspectorTab('overview');
     setActiveDrawer('inspector');
   };
@@ -661,10 +895,18 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
 
   const handleConfirmDeleteSim = () => {
     if (!simToDelete) return;
+    const refs = getSimMappingReferences(simToDelete.id, store);
+    if (refs.hasAnyReference) {
+      showToast(
+        `Cannot delete ${simToDelete.iccid}: referenced in ${refs.allConnections.length || refs.allBindings.length || refs.allSimAssignments.length} Asset Mapping / assignment record(s).`,
+        'error'
+      );
+      return;
+    }
     const idToDelete = simToDelete.id;
     setStore((prev) => ({
       ...prev,
-      sims: prev.sims.filter((s) => s.id !== idToDelete),
+      sims: prev.sims.filter((s) => s.id !== idToDelete)
     }));
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -673,103 +915,221 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     });
     showToast(`SIM "${simToDelete.iccid}" (${simToDelete.operator}) deleted successfully`);
     setSimToDelete(null);
-    if (inspectedSim?.id === idToDelete) {
+    if (inspectedSimId === idToDelete) {
       setActiveDrawer(null);
-      setInspectedSim(null);
+      setInspectedSimId(null);
     }
   };
 
-  // Bulk eligibility calculation
+  // Selected SIMs strictly scoped to visible authorized records
   const selectedSimRecords = useMemo(
-    () => enrichedSims.filter((s) => selectedIds.has(s.id)),
-    [enrichedSims, selectedIds]
+    () => filteredSims.filter((s) => selectedIds.has(s.id)),
+    [filteredSims, selectedIds]
   );
 
-  const bulkEligibility = useMemo(() => {
-    const eligible: (SimRecord & { assigned: string; connection: string })[] = [];
-    const skipped: {
-      record: SimRecord & { assigned: string; connection: string };
-      reason: string;
-    }[] = [];
+  const availableLocations = useMemo(
+    () =>
+      Array.from(
+        new Set(authorizedSims.map((s) => (s.location || '').trim()).filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b)),
+    [authorizedSims]
+  );
 
-    selectedSimRecords.forEach((sim) => {
-      if (bulkAction === 'Retire eligible' || bulkAction === 'Delete eligible') {
-        const hasOpenAssignment = activeAssignmentBySimId.has(sim.id);
-        if (hasOpenAssignment) {
-          skipped.push({
-            record: sim,
-            reason: `Currently assigned to ${sim.assigned} (${sim.connection})`
-          });
-        } else {
-          eligible.push(sim);
-        }
-      } else {
-        eligible.push(sim);
-      }
-    });
-
-    return { eligible, skipped };
-  }, [selectedSimRecords, bulkAction, activeAssignmentBySimId]);
-
-  const executeBulkDeleteSims = (reason?: string) => {
-    const eligibleIds = new Set(bulkEligibility.eligible.map((s) => s.id));
-    if (eligibleIds.size === 0) return;
-
-    setStore((prev) => ({
-      ...prev,
-      sims: prev.sims.filter((s) => !eligibleIds.has(s.id))
+  const handleBulkExportSelected = (recordsToExport: SimRecord[]) => {
+    if (recordsToExport.length === 0) return;
+    const exportRows = recordsToExport.map((s) => ({
+      ...s,
+      category: resolveSimCategoryLabel(s),
+      status: effectiveStatusById.get(s.id) || deriveSimEffectiveInventoryStatus(s, store)
     }));
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      eligibleIds.forEach((id) => next.delete(id));
-      return next;
-    });
-    if (inspectedSim && eligibleIds.has(inspectedSim.id)) {
-      setInspectedSim(null);
-    }
+    downloadModalCsv('FleetRobo_sims_selected_export.csv', visibleColumns, exportRows);
     showToast(
-      `Deleted ${eligibleIds.size} SIM card(s)${bulkEligibility.skipped.length > 0 ? `, ${bulkEligibility.skipped.length} skipped` : ''}${reason ? ` · ${reason}` : ''}`
+      `Exported ${exportRows.length} selected SIM record(s) to FleetRobo_sims_selected_export.csv`
     );
-    setPendingBulkDelete(false);
-    setActiveDrawer(null);
   };
 
-  const handleApplyBulk = () => {
-    if (selectedSimRecords.length === 0) return;
-    if (bulkAction === 'Delete eligible') {
-      if (bulkEligibility.eligible.length === 0) return;
-      setPendingBulkDelete(true);
+  const handleApplySimBulkUpdate = (
+    mode: Exclude<SimBulkActionMode, 'export_selected'>,
+    eligibleIds: string[],
+    options?: {
+      targetOwner?: string;
+      targetLifecycle?: SimLifecycleStatus;
+      targetPlan?: string;
+      targetLocation?: string;
+    }
+  ) => {
+    const allowedScopeIds = new Set(filteredSims.map((s) => s.id));
+    const safeIds = new Set(eligibleIds.filter((id) => allowedScopeIds.has(id)));
+    if (safeIds.size === 0) return;
+
+    const nowMs = Date.now();
+    const nowIso = new Date().toISOString();
+    const actorLabel = isPlatformAdmin ? 'Platform Admin' : currentCompany;
+
+    if (mode === 'delete') {
+      let deletedCount = 0;
+      const deletedSet = new Set<string>();
+      setStore((prev) => ({
+        ...prev,
+        sims: prev.sims.filter((s) => {
+          if (!safeIds.has(s.id)) return true;
+          const refs = getSimMappingReferences(s.id, prev, nowMs);
+          if (refs.hasAnyReference) return true;
+          deletedSet.add(s.id);
+          deletedCount += 1;
+          return false;
+        })
+      }));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        deletedSet.forEach((id) => next.delete(id));
+        return next;
+      });
+      if (inspectedSimId && deletedSet.has(inspectedSimId)) {
+        setInspectedSimId(null);
+      }
+      showToast(`Deleted ${deletedCount} unreferenced SIM card(s).`);
       return;
     }
-    const eligibleIds = new Set(bulkEligibility.eligible.map((s) => s.id));
 
+    if (mode === 'update_owner') {
+      if (!isPlatformAdmin) {
+        showToast('Only Platform Admin can transfer SIM ownership.', 'error');
+        return;
+      }
+      const nextOwnerName = (options?.targetOwner || '').trim();
+      const targetComp = resolveClientCompanyByNameOrId(nextOwnerName);
+      if (!targetComp || targetComp.isPlatformOwner || !isCompanyEligibleForNewRegistration(targetComp)) {
+        showToast(`Target organization "${nextOwnerName}" is invalid or ineligible.`, 'error');
+        return;
+      }
+      const targetEnabledModels = getEnabledModelsForCompanyName(targetComp.name).filter(
+        (m) => m.category === 'SIM'
+      );
+      let transferred = 0;
+
+      setStore((prev) => ({
+        ...prev,
+        sims: prev.sims.map((s) => {
+          if (!safeIds.has(s.id)) return s;
+          if ((s.owner || '').trim().toLowerCase() === targetComp.name.toLowerCase()) return s;
+          const refs = getSimMappingReferences(s.id, prev, nowMs);
+          if (refs.hasAnyReference) return s;
+          if (s.modelTypeId && !targetEnabledModels.some((m) => m.id === s.modelTypeId)) {
+            return s;
+          }
+          transferred += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-sim-own-${Date.now()}-${transferred}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Ownership Transfer',
+            summary: `Transferred ownership from ${s.owner} to ${targetComp.name}.`
+          };
+          return {
+            ...s,
+            owner: targetComp.name,
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25)
+          };
+        })
+      }));
+      showToast(`Transferred ownership on ${transferred} eligible SIM(s) to ${targetComp.name}.`);
+      return;
+    }
+
+    let updatedCount = 0;
     setStore((prev) => ({
       ...prev,
       sims: prev.sims.map((s) => {
-        if (!eligibleIds.has(s.id)) return s;
-        if (bulkAction === 'Update owner') {
-          return { ...s, owner: bulkTargetOwner };
+        if (!safeIds.has(s.id)) return s;
+        const refs = getSimMappingReferences(s.id, prev, nowMs);
+
+        if (mode === 'update_lifecycle') {
+          const nextLifecycle = options?.targetLifecycle;
+          if (!nextLifecycle || s.status === nextLifecycle) return s;
+          if (refs.hasActiveOrScheduledReference && nextLifecycle !== 'Active') return s;
+          updatedCount += 1;
+          const projectedEff = deriveSimEffectiveInventoryStatus(
+            { ...s, status: nextLifecycle },
+            prev,
+            nowMs
+          );
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-sim-lc-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Carrier Lifecycle Updated',
+            summary: `Carrier lifecycle changed ${s.status} → ${nextLifecycle} (effective inventory status: ${projectedEff}).`
+          };
+          return {
+            ...s,
+            status: nextLifecycle,
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25)
+          };
         }
-        if (bulkAction === 'Update lifecycle') {
-          return { ...s, status: bulkTargetLifecycle };
+
+        if (mode === 'update_plan') {
+          if (s.status === 'Retired') return s;
+          const nextPlan = (options?.targetPlan || '').trim();
+          if (!nextPlan || s.plan === nextPlan) return s;
+          updatedCount += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-sim-pln-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Plan Metadata Updated',
+            summary: `Updated inventory plan metadata from "${s.plan}" to "${nextPlan}".`
+          };
+          return {
+            ...s,
+            plan: nextPlan,
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25)
+          };
         }
-        if (bulkAction === 'Update plan') {
-          return { ...s, plan: bulkTargetPlan };
+
+        if (mode === 'update_location') {
+          if (s.status === 'Retired') return s;
+          const nextLoc = (options?.targetLocation || '').trim();
+          if (!nextLoc) return s;
+          updatedCount += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-sim-loc-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Location Updated',
+            summary: `Updated Inventory Location to "${nextLoc}".`
+          };
+          return {
+            ...s,
+            location: nextLoc,
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25)
+          };
         }
-        if (bulkAction === 'Retire eligible') {
-          return { ...s, status: 'Retired' };
+
+        if (mode === 'retire') {
+          if (s.status === 'Retired' || refs.hasActiveOrScheduledReference) return s;
+          updatedCount += 1;
+          const auditEntry: HardwareAuditEntry = {
+            id: `aud-sim-ret-${Date.now()}-${updatedCount}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'SIM Retired',
+            summary: `Carrier lifecycle set to Retired (previous carrier state: ${s.status}).`
+          };
+          return {
+            ...s,
+            status: 'Retired',
+            auditHistory: [auditEntry, ...(s.auditHistory || [])].slice(0, 25)
+          };
         }
+
         return s;
       })
     }));
-
-    showToast(
-      `Bulk action completed: ${bulkEligibility.eligible.length} updated, ${bulkEligibility.skipped.length} skipped.`
-    );
-    setActiveDrawer(null);
+    showToast(`Bulk operation updated ${updatedCount} eligible SIM(s).`);
   };
 
-  // Direct CSV/JSON upload execution
+  // Direct CSV/JSON upload execution (strict tenant/model validation; zero fabricated defaults)
   const processSimsUpload = (fmt: 'csv' | 'json', rawText: string, fileName: string, fileSize?: number) => {
     const raw = rawText.trim();
     if (!raw) {
@@ -777,44 +1137,216 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
       return;
     }
 
-    const valid: Partial<SimRecord>[] = [];
+    const valid: SimRecord[] = [];
     const invalid: { line: number; reason: string }[] = [];
-    const seenIccids = new Set(store.sims.map((s) => s.iccid));
+    const seenPrimaryIds = new Set(store.sims.map((s) => s.iccid.trim().toLowerCase()));
+    const nowIso = new Date().toISOString();
+    const actorLabel = isPlatformAdmin ? 'Platform Admin' : currentCompany;
+
+    const validateAndBuildRow = (
+      lineNo: number,
+      input: {
+        primaryId: string;
+        msisdn: string;
+        operator: string;
+        plan: string;
+        formFactor: string;
+        owner: string;
+        location: string;
+        status: string;
+        category: string;
+        modelRef: string;
+        identifierType: string;
+        serviceMode: string;
+        activationDate: string;
+        renewalDate: string;
+      }
+    ) => {
+      const ownerInput = input.owner.trim();
+      const targetOwnerName = isPlatformAdmin
+        ? ownerInput
+        : currentCompany;
+
+      if (!isPlatformAdmin && ownerInput && ownerInput.toLowerCase() !== currentCompany.trim().toLowerCase()) {
+        invalid.push({
+          line: lineNo,
+          reason: `Cross-tenant owner "${ownerInput}" is blocked in ${currentCompany} view`
+        });
+        return;
+      }
+
+      if (!targetOwnerName) {
+        invalid.push({ line: lineNo, reason: 'Organization / Owner is required' });
+        return;
+      }
+
+      const ownerCompany = resolveClientCompanyByNameOrId(targetOwnerName);
+      if (
+        !ownerCompany ||
+        ownerCompany.isPlatformOwner ||
+        !isCompanyEligibleForNewRegistration(ownerCompany)
+      ) {
+        invalid.push({
+          line: lineNo,
+          reason: `Organization "${targetOwnerName}" is inactive or invalid`
+        });
+        return;
+      }
+
+      const companyModels = getEnabledModelsForCompanyName(ownerCompany.name).filter(
+        (m) => m.category === 'SIM'
+      );
+      if (companyModels.length === 0) {
+        invalid.push({
+          line: lineNo,
+          reason: `No active SIM models enabled for "${ownerCompany.name}"`
+        });
+        return;
+      }
+
+      const opInput = input.operator.trim();
+      const catInput = input.category.trim();
+      const refInput = input.modelRef.trim();
+
+      if (!opInput && !refInput && !catInput) {
+        invalid.push({
+          line: lineNo,
+          reason: 'Network operator / SIM model is required'
+        });
+        return;
+      }
+
+      const matchedModels = companyModels.filter((m) => {
+        if (opInput && m.manufacturer.trim().toLowerCase() !== opInput.toLowerCase()) return false;
+        if (catInput && m.typeName.trim().toLowerCase() !== catInput.toLowerCase()) return false;
+        if (refInput && (m.modelReference || '').trim().toLowerCase() !== refInput.toLowerCase()) {
+          return false;
+        }
+        return true;
+      });
+
+      if (matchedModels.length === 0) {
+        invalid.push({
+          line: lineNo,
+          reason: `No enabled SIM model matches (${[catInput, opInput, refInput].filter(Boolean).join(' · ')}) for "${ownerCompany.name}"`
+        });
+        return;
+      }
+
+      const resolvedModel = matchedModels[0];
+      const allowedIdTypes = getRecordIdentifierTypes(resolvedModel);
+      const requestedIdType = input.identifierType.trim();
+      const idType = requestedIdType
+        ? allowedIdTypes.find((t) => t.toLowerCase() === requestedIdType.toLowerCase()) || ''
+        : allowedIdTypes[0] || 'ICCID';
+
+      if (!idType) {
+        invalid.push({
+          line: lineNo,
+          reason: `Identifier type "${requestedIdType}" is not supported by ${resolvedModel.typeName}`
+        });
+        return;
+      }
+
+      const primaryId = input.primaryId.trim();
+      const idErr = validatePrimarySimIdentifier(idType, primaryId);
+      if (idErr) {
+        invalid.push({ line: lineNo, reason: idErr });
+        return;
+      }
+
+      if (seenPrimaryIds.has(primaryId.toLowerCase())) {
+        invalid.push({ line: lineNo, reason: `Duplicate ${idType} (${primaryId})` });
+        return;
+      }
+
+      const planInput = input.plan.trim();
+      if (!planInput) {
+        invalid.push({ line: lineNo, reason: 'Plan / data package is required' });
+        return;
+      }
+
+      const ffInput = input.formFactor.trim();
+      const matchedFormFactor = ffInput
+        ? SIM_FORM_FACTORS.find((f) => f.toLowerCase() === ffInput.toLowerCase())
+        : resolvedModel.simFormFactor === 'eSIM'
+        ? 'eSIM'
+        : 'Nano (4FF)';
+      if (!matchedFormFactor) {
+        invalid.push({ line: lineNo, reason: `Invalid form factor "${ffInput}"` });
+        return;
+      }
+
+      const statusInput = input.status.trim();
+      const matchedLifecycle = statusInput
+        ? SIM_LIFECYCLE_OPTIONS.find((st) => st.toLowerCase() === statusInput.toLowerCase())
+        : 'Inventory';
+      if (!matchedLifecycle) {
+        invalid.push({ line: lineNo, reason: `Invalid lifecycle status "${statusInput}"` });
+        return;
+      }
+
+      const msisdn = input.msisdn.trim();
+      if (msisdn && idType.toUpperCase() !== 'MSISDN') {
+        const digits = msisdn.replace(/\D/g, '');
+        if (!/^\+?[\d\s-]{8,18}$/.test(msisdn) || digits.length < 8 || digits.length > 15) {
+          invalid.push({ line: lineNo, reason: `Invalid MSISDN "${msisdn}"` });
+          return;
+        }
+      }
+
+      seenPrimaryIds.add(primaryId.toLowerCase());
+      const indexOffset = valid.length;
+      valid.push({
+        id: `SIM-imp-${Date.now()}-${indexOffset}-${Math.random().toString(36).substring(2, 6)}`,
+        iccid: primaryId,
+        msisdn: idType.toUpperCase() === 'MSISDN' && !msisdn ? primaryId : msisdn,
+        operator: resolvedModel.manufacturer,
+        plan: planInput,
+        formFactor: matchedFormFactor,
+        network: '',
+        owner: ownerCompany.name,
+        location: input.location.trim(),
+        status: matchedLifecycle,
+        activationDate: input.activationDate.trim(),
+        renewalDate: input.renewalDate.trim(),
+        notes: 'Imported via bulk CSV/JSON',
+        category: resolvedModel.typeName,
+        modelTypeId: resolvedModel.id,
+        identifierType: idType,
+        serviceMode: input.serviceMode.trim() || resolvedModel.simType || '',
+        auditHistory: [
+          {
+            id: `aud-sim-imp-${Date.now()}-${indexOffset}`,
+            timestamp: nowIso,
+            actor: actorLabel,
+            action: 'Imported SIM',
+            summary: `Imported ${resolvedModel.typeName} (${idType}: ${primaryId}) for ${ownerCompany.name} from ${fileName}.`
+          }
+        ]
+      });
+    };
 
     if (fmt === 'json') {
       try {
         const parsed = JSON.parse(raw);
         const arr = Array.isArray(parsed) ? parsed : [parsed];
         arr.forEach((item, idx) => {
-          const iccid = String(item.iccid || '').trim();
-          if (!/^\d{18,22}$/.test(iccid)) {
-            invalid.push({
-              line: idx + 1,
-              reason: `ICCID "${iccid}" must be 18–22 ASCII digits`
-            });
-            return;
-          }
-          if (seenIccids.has(iccid)) {
-            invalid.push({
-              line: idx + 1,
-              reason: `Duplicate ICCID (${iccid})`
-            });
-            return;
-          }
-          seenIccids.add(iccid);
-          valid.push({
-            iccid,
-            msisdn: item.msisdn || '',
-            operator: SIM_OPERATORS.includes(item.operator) ? item.operator : 'Airtel',
-            plan: SIM_PLANS.includes(item.plan) ? item.plan : 'IoT Business 10GB',
-            formFactor: SIM_FORM_FACTORS.includes(item.formFactor)
-              ? item.formFactor
-              : 'Nano (4FF)',
-            owner: item.owner || 'Adani Port',
-            location: item.location || 'Mundra CT2',
-            status: SIM_LIFECYCLE_OPTIONS.includes(item.status) ? item.status : 'Inventory',
-            activationDate: item.activationDate || '',
-            renewalDate: item.renewalDate || ''
+          validateAndBuildRow(idx + 1, {
+            primaryId: String(item.iccid || item.identifierValue || '').trim(),
+            msisdn: String(item.msisdn || '').trim(),
+            operator: String(item.operator || '').trim(),
+            plan: String(item.plan || '').trim(),
+            formFactor: String(item.formFactor || '').trim(),
+            owner: String(item.owner || '').trim(),
+            location: String(item.location || '').trim(),
+            status: String(item.status || '').trim(),
+            category: String(item.category || '').trim(),
+            modelRef: String(item.modelReference || item.modelRef || '').trim(),
+            identifierType: String(item.identifierType || '').trim(),
+            serviceMode: String(item.serviceMode || '').trim(),
+            activationDate: String(item.activationDate || '').trim(),
+            renewalDate: String(item.renewalDate || '').trim()
           });
         });
       } catch {
@@ -823,90 +1355,82 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
       }
     } else {
       const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      let headerMap: Record<string, number> | null = null;
       lines.forEach((line, idx) => {
         const cols = parseCsvLine(line);
-        if (idx === 0 && cols[0]?.toLowerCase().includes('iccid')) {
-          return;
-        }
-        const [iccid, msisdn, operator, plan, formFactor, owner, location, status] = cols;
-        if (!iccid || !/^\d{18,22}$/.test(iccid)) {
-          invalid.push({
-            line: idx + 1,
-            reason: `ICCID "${iccid || ''}" must be 18–22 ASCII digits`
+        const lowerCols = cols.map((c) => c.trim().toLowerCase());
+        if (
+          idx === 0 &&
+          (lowerCols.some((c) => c.includes('iccid') || c.includes('identifier')) ||
+            lowerCols.some((c) => c.includes('operator')))
+        ) {
+          headerMap = {};
+          lowerCols.forEach((h, colIdx) => {
+            headerMap![h] = colIdx;
           });
           return;
         }
-        if (seenIccids.has(iccid)) {
-          invalid.push({
-            line: idx + 1,
-            reason: `Duplicate ICCID (${iccid})`
-          });
-          return;
-        }
-        seenIccids.add(iccid);
-        valid.push({
-          iccid,
-          msisdn: msisdn || '',
-          operator: (SIM_OPERATORS.includes(operator as SimRecord['operator']) ? operator : 'Airtel') as SimRecord['operator'],
-          plan: (SIM_PLANS.includes(plan as SimRecord['plan']) ? plan : 'IoT Business 10GB') as SimRecord['plan'],
-          formFactor: (SIM_FORM_FACTORS.includes(formFactor as SimRecord['formFactor'])
-            ? formFactor
-            : 'Nano (4FF)') as SimRecord['formFactor'],
-          owner: owner || 'Adani Port',
-          location: location || 'Mundra CT2',
-          status: (SIM_LIFECYCLE_OPTIONS.includes(status as SimLifecycleStatus)
-            ? status
-            : 'Inventory') as SimLifecycleStatus
+        const colBy = (aliases: string[], fallbackIndex: number): string => {
+          if (headerMap) {
+            for (const alias of aliases) {
+              const foundKey = Object.keys(headerMap).find((k) => k.includes(alias));
+              if (foundKey !== undefined) {
+                return cols[headerMap[foundKey]] ?? '';
+              }
+            }
+            return '';
+          }
+          return cols[fallbackIndex] ?? '';
+        };
+        validateAndBuildRow(idx + 1, {
+          primaryId: colBy(['iccid', 'identifier value', 'sim identifier'], 0),
+          msisdn: colBy(['mobile', 'msisdn'], 1),
+          operator: colBy(['operator', 'provider'], 2),
+          plan: colBy(['plan', 'package'], 3),
+          formFactor: colBy(['form factor', 'formfactor'], 4),
+          owner: colBy(['owner', 'organization', 'customer', 'company'], 5),
+          location: colBy(['location'], 6),
+          status: colBy(['lifecycle', 'status'], 7),
+          category: colBy(['category'], 8),
+          modelRef: colBy(['model reference', 'model ref', 'model'], 9),
+          identifierType: colBy(['identifier type'], 10),
+          serviceMode: colBy(['service mode', 'sim type'], 11),
+          activationDate: colBy(['activation'], 12),
+          renewalDate: colBy(['renewal', 'expiry'], 13)
         });
       });
     }
 
     if (valid.length === 0) {
       simUpload.fail(
-        invalid[0]?.reason || 'No valid new SIM rows found (invalid ICCID or duplicates).'
+        invalid[0]?.reason || 'No valid new SIM rows found (check tenant, enabled model, and identifier validation).'
       );
       return;
     }
 
     simUpload.startUploading(fileName, formatUploadFileSize(fileSize), () => {
-      const created: SimRecord[] = valid.map((v, i) => ({
-        id: `SIM-imp-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 6)}`,
-        iccid: v.iccid!,
-        msisdn: v.msisdn || '',
-        operator: v.operator || 'Airtel',
-        plan: v.plan || 'IoT Business 10GB',
-        formFactor: v.formFactor || 'Nano (4FF)',
-        network: '4G LTE',
-        owner: v.owner || 'Adani Port',
-        location: v.location || 'Mundra CT2',
-        status: v.status || 'Inventory',
-        activationDate: v.activationDate || '',
-        renewalDate: v.renewalDate || '',
-        notes: 'Imported via bulk CSV/JSON'
-      }));
-
       setStore((prev) => ({
         ...prev,
-        sims: [...created, ...prev.sims]
+        sims: [...valid, ...prev.sims]
       }));
       setSortKey('');
       setCurrentPage(1);
-      showToast(`Imported ${created.length} SIM(s) (${invalid.length} skipped).`);
+      showToast(`Imported ${valid.length} SIM(s) (${invalid.length} skipped).`);
       return {
         headline: 'SIM cards uploaded successfully',
-        description: `${created.length} SIM record${created.length === 1 ? '' : 's'} imported from ${fileName}.${
-          invalid.length > 0 ? ` ${invalid.length} duplicate or invalid row${invalid.length === 1 ? '' : 's'} skipped.` : ''
+        description: `${valid.length} SIM record${valid.length === 1 ? '' : 's'} imported from ${fileName}.${
+          invalid.length > 0 ? ` ${invalid.length} invalid or unauthorized row${invalid.length === 1 ? '' : 's'} skipped (${invalid[0].reason}).` : ''
         }`,
         stats: [
-          { label: 'Uploaded', value: created.length, tone: 'emerald' },
+          { label: 'Uploaded', value: valid.length, tone: 'emerald' },
           { label: 'Skipped', value: invalid.length, tone: invalid.length > 0 ? 'amber' : 'slate' }
         ]
       };
     });
   };
 
-  // Lifecycle pill styling
-  const renderSimStatusBadge = (status: SimLifecycleStatus) => {
+  // Lifecycle / Effective Inventory pill styling
+  const renderSimStatusBadge = (status: SimLifecycleStatus | EffectiveSimInventoryStatus) => {
     const map: Record<
       SimLifecycleStatus,
       { bg: string; text: string; border: string; dot: string }
@@ -953,11 +1477,12 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     );
   };
 
-  // Linked assignment events for inspected SIM
-  const inspectedSimEvents = useMemo(() => {
-    if (!inspectedSim) return [];
-    return store.simAssignments.filter((sa) => sa.simId === inspectedSim.id);
-  }, [inspectedSim, store.simAssignments]);
+  // Authoritative linked mapping/binding/assignment records for inspected SIM
+  const inspectedSimRefs = useMemo(() => {
+    if (!inspectedSim) return null;
+    void statusTick;
+    return getSimMappingReferences(inspectedSim.id, store, Date.now());
+  }, [inspectedSim, store, statusTick]);
 
   return (
     <div className="h-full flex flex-col bg-[#f5f7fa] text-[#17212b] overflow-hidden relative">
@@ -1025,7 +1550,12 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                 <select
                   value={filterOwner}
                   onChange={(e) => {
-                    setFilterOwner(e.target.value);
+                    const nextOrg = e.target.value;
+                    setFilterOwner(nextOrg);
+                    setAdvancedFilters((prev) => ({
+                      ...prev,
+                      organizations: nextOrg === 'All' ? [] : [nextOrg]
+                    }));
                     setCurrentPage(1);
                   }}
                   className="bg-transparent text-[12px] font-semibold text-[#17212b] focus:outline-none cursor-pointer pr-1"
@@ -1114,11 +1644,8 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
             <button
               onClick={() => {
                 setSearchQuery('');
-                setFilterOperator('All');
-                setFilterStatus('All');
-                setFilterOwner('All');
+                clearAllSimFilters();
                 setSelectedIds(new Set());
-                setCurrentPage(1);
                 showToast('SIM Master table refreshed.');
               }}
               className="h-[33px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-medium text-[#17212b] hover:bg-[#f8fafc] inline-flex items-center gap-1.5 cursor-pointer"
@@ -1159,8 +1686,13 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
             {/* 8. Export */}
             <button
               onClick={() => {
-                downloadModalCsv('FleetRobo_sims_export.csv', visibleColumns, sortedSims);
-                showToast(`Exported ${sortedSims.length} SIM records to FleetRobo_sims_export.csv`);
+                const exportRows = sortedSims.map((s) => ({
+                  ...s,
+                  category: resolveSimCategoryLabel(s),
+                  status: s.effectiveStatus
+                }));
+                downloadModalCsv('FleetRobo_sims_export.csv', visibleColumns, exportRows);
+                showToast(`Exported ${exportRows.length} SIM records to FleetRobo_sims_export.csv`);
               }}
               className="h-[33px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-medium text-[#17212b] hover:bg-[#f8fafc] inline-flex items-center gap-1.5 cursor-pointer"
             >
@@ -1195,17 +1727,263 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
             </span>
             {activeFilterCount > 0 && (
               <button
-                onClick={() => {
-                  setFilterOperator('All');
-                  setFilterStatus('All');
-                  setFilterOwner('All');
-                }}
+                onClick={clearAllSimFilters}
                 className="text-[#9e431c] hover:underline font-medium cursor-pointer"
               >
-                Clear active filters ({activeFilterCount})
+                Clear All ({activeFilterCount})
               </button>
             )}
           </div>
+
+          {/* Removable Applied-Filter Chips Row */}
+          {activeFilterCount > 0 && (
+            <div className="px-4 py-2 bg-slate-50 border-b border-[#e3e8ee] flex items-center gap-2 flex-wrap text-xs shrink-0">
+              <span className="text-slate-500 font-medium">Applied Filters:</span>
+              {isPlatformAdmin && effectiveAdvancedFilters.organizations.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Organization: {effectiveAdvancedFilters.organizations.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFilterOwner('All');
+                      setAdvancedFilters((p) => ({ ...p, organizations: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.categories.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Category: {effectiveAdvancedFilters.categories.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, categories: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.operators.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Operator: {effectiveAdvancedFilters.operators.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, operators: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.models.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Model: {effectiveAdvancedFilters.models.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, models: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.formFactors.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Form Factor: {effectiveAdvancedFilters.formFactors.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, formFactors: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.plans.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Plan: {effectiveAdvancedFilters.plans.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, plans: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.serviceModes.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Mode: {effectiveAdvancedFilters.serviceModes.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, serviceModes: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.carrierStatuses.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Carrier Lifecycle: {effectiveAdvancedFilters.carrierStatuses.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, carrierStatuses: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.networks.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Network: {effectiveAdvancedFilters.networks.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, networks: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.effectiveStatuses.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Effective Status: {effectiveAdvancedFilters.effectiveStatuses.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, effectiveStatuses: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.assignmentStatuses.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Assignment: {effectiveAdvancedFilters.assignmentStatuses.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, assignmentStatuses: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.assignedHardware.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Hardware: {effectiveAdvancedFilters.assignedHardware.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, assignedHardware: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.connectionIds.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Connection: {effectiveAdvancedFilters.connectionIds.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, connectionIds: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {effectiveAdvancedFilters.locations.length > 0 && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Location: {effectiveAdvancedFilters.locations.join(', ')}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, locations: [] }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {(effectiveAdvancedFilters.activationFrom || effectiveAdvancedFilters.activationTo) && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Activated: {effectiveAdvancedFilters.activationFrom || '...'} →{' '}
+                  {effectiveAdvancedFilters.activationTo || '...'}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, activationFrom: '', activationTo: '' }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+              {(effectiveAdvancedFilters.renewalFrom || effectiveAdvancedFilters.renewalTo) && (
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-orange-100 text-[#B85324] font-semibold">
+                  Renewal: {effectiveAdvancedFilters.renewalFrom || '...'} →{' '}
+                  {effectiveAdvancedFilters.renewalTo || '...'}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAdvancedFilters((p) => ({ ...p, renewalFrom: '', renewalTo: '' }));
+                      setCurrentPage(1);
+                    }}
+                    className="hover:text-rose-600 cursor-pointer"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              )}
+            </div>
+          )}
 
           {enabledSimModels.length === 0 && (
             <div className="mx-3.5 mt-2.5 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-center justify-between shrink-0">
@@ -1354,7 +2132,7 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                             if (col.key === 'status') {
                               return (
                                 <td key={col.key} className="px-3 py-2.5 whitespace-nowrap">
-                                  {renderSimStatusBadge(row.status)}
+                                  {renderSimStatusBadge(row.effectiveStatus)}
                                 </td>
                               );
                             }
@@ -1498,115 +2276,9 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
       {/* =====================================================================
           RIGHT-SIDE DRAWERS
          ===================================================================== */}
-      {activeDrawer && (
+      {activeDrawer && activeDrawer !== 'filters' && activeDrawer !== 'bulk' && (
         <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/35 backdrop-blur-[1px]">
           <div className="flex-1" onClick={() => setActiveDrawer(null)} />
-
-          {/* 1. FILTERS DRAWER */}
-          {activeDrawer === 'filters' && (
-            <div className="w-[520px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
-              <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
-                <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">Filter SIM Inventory</h2>
-                  <p className="text-[12px] text-[#5c6b7a] mt-0.5">
-                    Filter registered SIM cards by network operator, lifecycle state, or customer owner.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="p-1.5 rounded-lg text-[#5c6b7a] hover:bg-slate-100 cursor-pointer"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-5 space-y-4">
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Operator
-                  </label>
-                  <select
-                    value={filterOperator}
-                    onChange={(e) => {
-                      setFilterOperator(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    <option value="Airtel">Airtel</option>
-                    <option value="Jio">Jio</option>
-                    <option value="Vi">Vi</option>
-                    <option value="BSNL">BSNL</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Lifecycle
-                  </label>
-                  <select
-                    value={filterStatus}
-                    onChange={(e) => {
-                      setFilterStatus(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All</option>
-                    {SIM_LIFECYCLE_OPTIONS.map((st) => (
-                      <option key={st} value={st}>
-                        {st}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                    Organization Name
-                  </label>
-                  <select
-                    value={filterOwner}
-                    onChange={(e) => {
-                      setFilterOwner(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] text-[#17212b] focus:outline-none focus:border-[#e56b38]"
-                  >
-                    <option value="All">All Organizations</option>
-                    {availableOrganizations.map((o) => (
-                      <option key={o} value={o}>
-                        {o}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="px-5 py-3.5 border-t border-[#e3e8ee] bg-[#f8fafc] flex items-center justify-between">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFilterOperator('All');
-                    setFilterStatus('All');
-                    setFilterOwner('All');
-                    setCurrentPage(1);
-                  }}
-                  className="px-3.5 py-2 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-semibold text-[#5c6b7a] hover:text-[#17212b] cursor-pointer"
-                >
-                  Reset filters
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveDrawer(null)}
-                  className="px-4 py-2 rounded-[7px] bg-[#e56b38] hover:bg-[#d15b2a] text-white text-[12px] font-semibold cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* 3. SAVED VIEWS DRAWER */}
           {activeDrawer === 'saved-views' && (
@@ -1648,9 +2320,23 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                           name: newViewName.trim(),
                           query: searchQuery,
                           filters: {
-                            operator: filterOperator,
-                            status: filterStatus,
-                            owner: filterOwner
+                            advancedSimsJson: JSON.stringify(effectiveAdvancedFilters),
+                            operator:
+                              effectiveAdvancedFilters.operators.length === 1
+                                ? effectiveAdvancedFilters.operators[0]
+                                : 'All',
+                            status:
+                              effectiveAdvancedFilters.effectiveStatuses.length === 1
+                                ? effectiveAdvancedFilters.effectiveStatuses[0]
+                                : 'All',
+                            category:
+                              effectiveAdvancedFilters.categories.length === 1
+                                ? effectiveAdvancedFilters.categories[0]
+                                : 'All',
+                            owner:
+                              isPlatformAdmin && effectiveAdvancedFilters.organizations.length === 1
+                                ? effectiveAdvancedFilters.organizations[0]
+                                : 'All'
                           },
                           sortKey,
                           sortDir,
@@ -1683,19 +2369,70 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                             {view.name}
                           </div>
                           <div className="text-[11px] text-[#5c6b7a]">
-                            Query: {view.query || 'None'} · Sort: {view.sortKey} ({view.sortDir})
+                            Query: {view.query || 'None'} · Sort: {view.sortKey || 'Default'} ({view.sortDir})
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5">
                           <button
                             onClick={() => {
                               setSearchQuery(view.query || '');
-                              setFilterOperator(view.filters.operator || 'All');
-                              setFilterStatus(view.filters.status || 'All');
-                              setFilterOwner(view.filters.owner || 'All');
-                              setSortKey(view.sortKey || 'iccid');
+                              let nextFilters: SimAdvancedFilters = { ...DEFAULT_SIM_FILTERS };
+                              if (view.filters.advancedSimsJson) {
+                                try {
+                                  const parsed = JSON.parse(view.filters.advancedSimsJson);
+                                  nextFilters = {
+                                    ...DEFAULT_SIM_FILTERS,
+                                    ...parsed
+                                  };
+                                } catch {
+                                  nextFilters = { ...DEFAULT_SIM_FILTERS };
+                                }
+                              } else {
+                                if (view.filters.operator && view.filters.operator !== 'All') {
+                                  nextFilters.operators = [view.filters.operator];
+                                }
+                                if (view.filters.category && view.filters.category !== 'All') {
+                                  nextFilters.categories = [view.filters.category];
+                                }
+                                if (view.filters.status && view.filters.status !== 'All') {
+                                  if (
+                                    view.filters.status === 'Inventory' ||
+                                    view.filters.status === 'Active' ||
+                                    view.filters.status === 'Suspended' ||
+                                    view.filters.status === 'Retired'
+                                  ) {
+                                    nextFilters.effectiveStatuses = [view.filters.status];
+                                  } else if (view.filters.status === 'Inactive') {
+                                    nextFilters.carrierStatuses = ['Inactive'];
+                                  }
+                                }
+                                if (isPlatformAdmin && view.filters.owner && view.filters.owner !== 'All') {
+                                  nextFilters.organizations = [view.filters.owner];
+                                }
+                              }
+                              if (!isPlatformAdmin) {
+                                nextFilters.organizations = [];
+                              } else {
+                                setFilterOwner(
+                                  nextFilters.organizations.length === 1
+                                    ? nextFilters.organizations[0]
+                                    : 'All'
+                                );
+                              }
+                              setAdvancedFilters(nextFilters);
+                              const safeSortKey =
+                                view.sortKey === 'location' ||
+                                view.sortKey === 'assigned' ||
+                                view.sortKey === 'connection'
+                                  ? 'iccid'
+                                  : view.sortKey || 'iccid';
+                              setSortKey(safeSortKey);
                               setSortDir(view.sortDir || 'asc');
-                              setHiddenCols(view.hiddenCols || []);
+                              setHiddenCols(
+                                (view.hiddenCols || []).filter(
+                                  (k) => k !== 'location' && k !== 'assigned' && k !== 'connection'
+                                )
+                              );
                               setCurrentPage(1);
                               setActiveDrawer(null);
                               showToast(`Applied view "${view.name}".`);
@@ -2046,7 +2783,7 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                     <h2 className="text-[16px] font-bold font-mono text-[#17212b]">
                       {inspectedSim.iccid}
                     </h2>
-                    {renderSimStatusBadge(inspectedSim.status)}
+                    {renderSimStatusBadge(inspectedSim.effectiveStatus)}
                   </div>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5">
                     {inspectedSim.identifierType || 'ICCID'} · {inspectedSim.operator} ({inspectedSim.plan}) ·{' '}
@@ -2090,7 +2827,7 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                       : 'border-transparent text-[#5c6b7a] hover:text-[#17212b]'
                   }`}
                 >
-                  Linked records ({inspectedSimEvents.length})
+                  Linked records ({inspectedSimRefs?.allConnections.length || 0})
                 </button>
                 <button
                   onClick={() => setInspectorTab('activity')}
@@ -2111,11 +2848,11 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                       {[
                         [inspectedSim.identifierType || 'ICCID', inspectedSim.iccid],
                         ['Mobile number / MSISDN', inspectedSim.msisdn || '—'],
-                        ['SIM Category', inspectedSim.category || (inspectedSim.formFactor === 'eSIM' ? 'IoT eSIM' : inspectedSim.plan.includes('M2M') ? 'M2M SIM' : 'Standard SIM')],
+                        ['SIM Category', resolveSimCategoryLabel(inspectedSim) || '—'],
                         ['Operator', inspectedSim.operator],
                         ['Plan / package', inspectedSim.plan],
                         ['Form factor', inspectedSim.formFactor],
-                        ['Network', inspectedSim.network],
+                        ['Network', inspectedSim.network || '—'],
                         ['Lifecycle', inspectedSim.status],
                         ['Assigned to', inspectedSim.assigned],
                         ['Assigned connection', inspectedSim.connection],
@@ -2141,36 +2878,72 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                       <h3 className="text-[12px] font-bold uppercase tracking-wider text-[#5c6b7a] mb-2.5">
                         Connected Assignment Records (up to 32 shown)
                       </h3>
-                      {inspectedSimEvents.length === 0 ? (
+                      {(!inspectedSimRefs ||
+                        (inspectedSimRefs.allBindings.length === 0 &&
+                          inspectedSimRefs.allSimAssignments.length === 0 &&
+                          inspectedSimRefs.allConnections.length === 0)) ? (
                         <div className="p-4 rounded-lg border border-[#e3e8ee] text-[12px] text-[#5c6b7a]">
                           This SIM is currently in warehouse inventory with no assignment history.
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          {inspectedSimEvents.slice(0, 32).map((ev) => (
-                            <div
-                              key={ev.id}
-                              className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between text-[12px]"
-                            >
-                              <div>
-                                <div className="font-semibold text-[#17212b]">
-                                  {ev.connectionId} · {ev.hardwareName}
-                                </div>
-                                <div className="text-[11px] text-[#5c6b7a]">
-                                  Effective: {ev.start} → {ev.end || 'Present'}
-                                </div>
-                              </div>
-                              <span
-                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                                  !ev.end
-                                    ? 'bg-[#eaf8f0] text-[#0f7b4b]'
-                                    : 'bg-slate-100 text-slate-600'
-                                }`}
+                          {inspectedSimRefs.allBindings.slice(0, 32).map((bnd) => {
+                            const conn = store.connections.find((c) => c.id === bnd.connectionId);
+                            const parentDev = store.devices.find((d) => d.id === bnd.fromHardwareId);
+                            const liveBndStatus = computeHardwareBindingStatus(
+                              bnd,
+                              store.hardwareBindings || [],
+                              conn?.members || [],
+                              Date.now()
+                            ).status;
+                            return (
+                              <div
+                                key={bnd.id}
+                                className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between text-[12px]"
                               >
-                                {!ev.end ? 'Assigned' : 'Ended'}
-                              </span>
-                            </div>
-                          ))}
+                                <div>
+                                  <div className="font-semibold text-[#17212b]">
+                                    {conn?.connectionId || bnd.connectionId} · {parentDev?.name || bnd.fromHardwareId}
+                                  </div>
+                                  <div className="text-[11px] text-[#5c6b7a]">
+                                    Effective: {bnd.effectiveStartAt} → {bnd.endedAt || bnd.effectiveEndAt || 'Open'}
+                                  </div>
+                                </div>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                                    liveBndStatus === 'Active'
+                                      ? 'bg-[#eaf8f0] text-[#0f7b4b]'
+                                      : liveBndStatus === 'Scheduled'
+                                      ? 'bg-sky-50 text-sky-700'
+                                      : liveBndStatus === 'Conflict'
+                                      ? 'bg-amber-50 text-amber-800'
+                                      : 'bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  {liveBndStatus}
+                                </span>
+                              </div>
+                            );
+                          })}
+                          {inspectedSimRefs.allBindings.length === 0 &&
+                            inspectedSimRefs.allSimAssignments.slice(0, 32).map((ev) => (
+                              <div
+                                key={ev.id}
+                                className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between text-[12px]"
+                              >
+                                <div>
+                                  <div className="font-semibold text-[#17212b]">
+                                    {ev.connectionId} · {ev.hardwareName}
+                                  </div>
+                                  <div className="text-[11px] text-[#5c6b7a]">
+                                    Effective: {ev.start} → {ev.end || 'Open'}
+                                  </div>
+                                </div>
+                                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-600">
+                                  {ev.end ? 'Ended' : inspectedSim.computedAssignment.assignmentStatus}
+                                </span>
+                              </div>
+                            ))}
                         </div>
                       )}
                     </div>
@@ -2179,263 +2952,123 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
 
                 {inspectorTab === 'linked' && (
                   <div className="space-y-3">
-                    {inspectedSimEvents.length === 0 ? (
+                    {!inspectedSimRefs || inspectedSimRefs.allConnections.length === 0 ? (
                       <div className="p-6 text-center rounded-lg border border-[#e3e8ee] text-[12px] text-[#5c6b7a]">
-                        No linked connections or assignment events for this SIM.
+                        No linked connections found for this SIM.
                       </div>
                     ) : (
-                      inspectedSimEvents.map((ev) => (
-                        <div
-                          key={ev.id}
-                          className="p-3.5 rounded-lg border border-[#e3e8ee] bg-white space-y-1.5 text-[12px]"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-bold font-mono text-[#17212b]">
-                              {ev.connectionId}
-                            </span>
-                            <span
-                              className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                                !ev.end
-                                  ? 'bg-[#eaf8f0] text-[#0f7b4b]'
-                                  : 'bg-slate-100 text-slate-600'
-                              }`}
-                            >
-                              {!ev.end ? 'Assigned' : 'Ended'}
-                            </span>
+                      inspectedSimRefs.allConnections.map((conn) => {
+                        const peerBindings = inspectedSimRefs.allBindings.filter(
+                          (b) => b.connectionId === conn.id
+                        );
+                        return (
+                          <div
+                            key={conn.id}
+                            className="p-3.5 rounded-lg border border-[#e3e8ee] bg-white space-y-1.5 text-[12px]"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold font-mono text-[#17212b]">
+                                {conn.connectionId} · {conn.name}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                                  conn.status === 'Active'
+                                    ? 'bg-[#eaf8f0] text-[#0f7b4b]'
+                                    : conn.status === 'Scheduled'
+                                    ? 'bg-sky-50 text-sky-700'
+                                    : conn.status === 'Needs Attention'
+                                    ? 'bg-amber-50 text-amber-800'
+                                    : 'bg-slate-100 text-slate-600'
+                                }`}
+                              >
+                                {conn.status}
+                              </span>
+                            </div>
+                            <div className="text-[#5c6b7a]">
+                              Client: <strong className="text-[#17212b]">{conn.companyName}</strong> · Pairwise bindings:{' '}
+                              <strong className="text-[#17212b]">{peerBindings.length}</strong>
+                            </div>
                           </div>
-                          <div className="text-[#17212b] font-medium">{ev.hardwareName}</div>
-                          <div className="text-[11px] text-[#5c6b7a]">
-                            Effective start: {ev.start} · Effective end: {ev.end || '—'}
-                          </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 )}
 
                 {inspectorTab === 'activity' && (
                   <div className="space-y-3">
-                    {[
-                      {
-                        date: inspectedSim.activationDate || '2026-05-18',
-                        title: `Carrier subscription status: ${inspectedSim.status}`,
-                        detail: `${inspectedSim.operator} ${inspectedSim.plan} (${inspectedSim.formFactor}) held by ${inspectedSim.owner} at ${inspectedSim.location}.`
-                      },
-                      ...inspectedSimEvents.map((ev) => ({
-                        date: ev.start,
-                        title: `SIM assigned to ${ev.connectionId}`,
-                        detail: `Linked to ${ev.hardwareName} (${
-                          ev.end ? `Ended ${ev.end}` : 'Currently active'
-                        }).`
-                      }))
-                    ].map((item, i) => (
-                      <div
-                        key={i}
-                        className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3"
-                      >
-                        <div className="w-2 h-2 rounded-full bg-[#e56b38] mt-1.5 shrink-0" />
-                        <div>
-                          <div className="text-[12px] font-semibold text-[#17212b]">
-                            {item.title}
-                          </div>
-                          <div className="text-[11px] text-[#5c6b7a] mt-0.5">{item.detail}</div>
-                          <div className="text-[10px] font-mono text-[#8291a0] mt-1">
-                            {item.date}
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* 6. BULK OPERATIONS DRAWER */}
-          {activeDrawer === 'bulk' && (
-            <div className="w-[560px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
-              <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
-                <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">
-                    Bulk Operations · SIM Master
-                  </h2>
-                  <p className="text-[12px] text-[#5c6b7a] mt-0.5">
-                    {selectedSimRecords.length} SIM record(s) currently selected.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="p-1.5 rounded-lg text-[#5c6b7a] hover:bg-slate-100 cursor-pointer"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              <div className="p-5 flex-1 overflow-y-auto space-y-5">
-                {selectedSimRecords.length === 0 ? (
-                  <div className="p-6 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] text-center text-[12px] text-[#5c6b7a]">
-                    Select one or more SIM cards in the table first to run a bulk operation.
-                  </div>
-                ) : (
-                  <>
-                    <div>
-                      <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                        Bulk action
-                      </label>
-                      <select
-                        value={bulkAction}
-                        onChange={(e) => setBulkAction(e.target.value as any)}
-                        className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
-                      >
-                        <option value="Update owner">Update owner</option>
-                        <option value="Update lifecycle">Update lifecycle</option>
-                        <option value="Update plan">Update plan</option>
-                        <option value="Retire eligible">Retire eligible</option>
-                        <option value="Delete eligible">Delete eligible</option>
-                      </select>
-                    </div>
-
-                    {bulkAction === 'Update owner' && (
-                      <div>
-                        <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                          Target owner / customer
-                        </label>
-                        <select
-                          value={bulkTargetOwner}
-                          onChange={(e) => setBulkTargetOwner(e.target.value)}
-                          className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
+                    {inspectedSim.auditHistory && inspectedSim.auditHistory.length > 0 ? (
+                      inspectedSim.auditHistory.map((ev) => (
+                        <div
+                          key={ev.id}
+                          className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3"
                         >
-                          {MODAL_OWNERS.map((o) => (
-                            <option key={o} value={o}>
-                              {o}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {bulkAction === 'Update lifecycle' && (
-                      <div>
-                        <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                          Target lifecycle
-                        </label>
-                        <select
-                          value={bulkTargetLifecycle}
-                          onChange={(e) =>
-                            setBulkTargetLifecycle(e.target.value as SimLifecycleStatus)
-                          }
-                          className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
-                        >
-                          {SIM_LIFECYCLE_OPTIONS.map((st) => (
-                            <option key={st} value={st}>
-                              {st}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {bulkAction === 'Update plan' && (
-                      <div>
-                        <label className="block text-[12px] font-semibold text-[#17212b] mb-1.5">
-                          Target plan
-                        </label>
-                        <select
-                          value={bulkTargetPlan}
-                          onChange={(e) => setBulkTargetPlan(e.target.value as any)}
-                          className="w-full h-[36px] px-3 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] focus:outline-none focus:border-[#e56b38]"
-                        >
-                          {SIM_PLANS.map((pl) => (
-                            <option key={pl} value={pl}>
-                              {pl}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {(bulkAction === 'Retire eligible' || bulkAction === 'Delete eligible') && (
-                      <div className="p-3.5 rounded-lg border border-[#fed7aa] bg-[#fff7ed] text-[12px] text-[#b45309]">
-                        SIMs with an open assignment (end is blank) in Modal Mapping are protected
-                        and automatically skipped during bulk{' '}
-                        {bulkAction === 'Delete eligible' ? 'deletion' : 'retirement'}.
-                      </div>
-                    )}
-
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-slate-200 bg-slate-100 text-slate-700">
-                        {selectedSimRecords.length} Selected
-                      </span>
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-emerald-200 bg-emerald-50 text-emerald-700">
-                        <CheckCircle2 size={12} /> {bulkEligibility.eligible.length} Eligible
-                      </span>
-                      {bulkEligibility.skipped.length > 0 && (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-amber-200 bg-amber-50 text-amber-800">
-                          <AlertTriangle size={12} /> {bulkEligibility.skipped.length} Assigned / Skipped
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="p-3 rounded-lg border border-[#b9ebd0] bg-[#eaf8f0]">
-                        <div className="text-[11px] text-[#0f7b4b] font-semibold">
-                          {bulkAction === 'Delete eligible' ? 'Eligible to delete' : 'Eligible to update'}
-                        </div>
-                        <div className="text-[20px] font-bold text-[#0f7b4b]">
-                          {bulkEligibility.eligible.length}
-                        </div>
-                      </div>
-                      <div className="p-3 rounded-lg border border-[#fed7aa] bg-[#fff7ed]">
-                        <div className="text-[11px] text-[#b45309] font-semibold">
-                          Skipped (active assignment)
-                        </div>
-                        <div className="text-[20px] font-bold text-[#b45309]">
-                          {bulkEligibility.skipped.length}
-                        </div>
-                      </div>
-                    </div>
-
-                    {bulkEligibility.skipped.length > 0 && (
-                      <div className="space-y-1.5">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-[#5c6b7a]">
-                          Skipped SIMs
-                        </div>
-                        <div className="max-h-[160px] overflow-y-auto divide-y divide-[#edf1f5] border border-[#e3e8ee] rounded-lg">
-                          {bulkEligibility.skipped.map(({ record, reason }) => (
-                            <div key={record.id} className="px-3 py-2 text-[11px]">
-                              <span className="font-mono font-semibold text-[#17212b]">
-                                {record.iccid}
-                              </span>
-                              <span className="text-[#dc2626] ml-1.5">— {reason}</span>
+                          <div className="w-2 h-2 rounded-full bg-[#e56b38] mt-1.5 shrink-0" />
+                          <div>
+                            <div className="text-[12px] font-semibold text-[#17212b]">
+                              {ev.action}
                             </div>
-                          ))}
+                            <div className="text-[11px] text-[#5c6b7a] mt-0.5">{ev.summary}</div>
+                            <div className="text-[10px] font-mono text-[#8291a0] mt-1">
+                              {ev.timestamp.slice(0, 19).replace('T', ' ')} · {ev.actor}
+                            </div>
+                          </div>
                         </div>
+                      ))
+                    ) : (
+                      <div className="space-y-2.5">
+                        <div className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3">
+                          <div className="w-2 h-2 rounded-full bg-[#e56b38] mt-1.5 shrink-0" />
+                          <div>
+                            <div className="text-[12px] font-semibold text-[#17212b]">
+                              Effective status: {inspectedSim.effectiveStatus} (Carrier: {inspectedSim.status})
+                            </div>
+                            <div className="text-[11px] text-[#5c6b7a] mt-0.5">
+                              {inspectedSim.operator} · {inspectedSim.plan} ({inspectedSim.formFactor}) owned by{' '}
+                              {inspectedSim.owner}
+                              {inspectedSim.location ? ` · Location: ${inspectedSim.location}` : ''}
+                            </div>
+                            {inspectedSim.activationDate && (
+                              <div className="text-[10px] font-mono text-[#8291a0] mt-1">
+                                Activation date: {inspectedSim.activationDate}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        {inspectedSimRefs &&
+                          inspectedSimRefs.allBindings.map((bnd) => {
+                            const conn = store.connections.find((c) => c.id === bnd.connectionId);
+                            const dev = store.devices.find((d) => d.id === bnd.fromHardwareId);
+                            const bndStatus = computeHardwareBindingStatus(
+                              bnd,
+                              store.hardwareBindings || [],
+                              conn?.members || [],
+                              Date.now()
+                            ).status;
+                            return (
+                              <div
+                                key={bnd.id}
+                                className="p-3.5 rounded-lg border border-[#e3e8ee] bg-[#f8fafc] flex items-start gap-3"
+                              >
+                                <div className="w-2 h-2 rounded-full bg-slate-400 mt-1.5 shrink-0" />
+                                <div>
+                                  <div className="text-[12px] font-semibold text-[#17212b]">
+                                    Binding {bnd.id} ({conn?.connectionId || bnd.connectionId}) · {bndStatus}
+                                  </div>
+                                  <div className="text-[11px] text-[#5c6b7a] mt-0.5">
+                                    Paired with {dev?.name || bnd.fromHardwareId}
+                                  </div>
+                                  <div className="text-[10px] font-mono text-[#8291a0] mt-1">
+                                    {bnd.effectiveStartAt} → {bnd.endedAt || bnd.effectiveEndAt || 'Open'}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
                       </div>
                     )}
-                  </>
+                  </div>
                 )}
-              </div>
-
-              <div className="px-5 py-3.5 border-t border-[#e3e8ee] bg-[#f8fafc] flex items-center justify-end gap-2">
-                <button
-                  onClick={() => setActiveDrawer(null)}
-                  className="px-4 py-2 rounded-[7px] border border-[#d6dfe8] bg-white text-[12px] font-semibold text-[#5c6b7a] cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  disabled={bulkEligibility.eligible.length === 0}
-                  onClick={handleApplyBulk}
-                  className={`px-4 py-2 rounded-[7px] disabled:opacity-40 text-white text-[12px] font-semibold cursor-pointer ${
-                    bulkAction === 'Delete eligible'
-                      ? 'bg-rose-600 hover:bg-rose-700'
-                      : 'bg-[#e56b38] hover:bg-[#d15b2a]'
-                  }`}
-                >
-                  {bulkAction === 'Delete eligible'
-                    ? `Delete ${bulkEligibility.eligible.length} eligible SIM(s)`
-                    : `Apply to ${bulkEligibility.eligible.length} eligible SIM(s)`}
-                </button>
               </div>
             </div>
           )}
@@ -2445,7 +3078,7 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
             <div className="w-[620px] max-w-[96vw] h-full bg-white shadow-2xl border-l border-[#e3e8ee] flex flex-col z-50">
               <div className="px-5 py-4 border-b border-[#e3e8ee] flex items-center justify-between">
                 <div>
-                  <h2 className="text-[16px] font-bold text-[#17212b]">Import SIM Cards</h2>
+                  <h2 className="text-[16px] font-bold text-[#17212b]">Import</h2>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5">
                     Upload a CSV or JSON file to register SIM cards directly into inventory.
                   </p>
@@ -2489,9 +3122,17 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                     reader.readAsText(file);
                   }}
                   onDownloadTemplate={() => {
+                    const sampleOrg = isPlatformAdmin
+                      ? filterOwner !== 'All'
+                        ? filterOwner
+                        : availableOrganizations[0] || ''
+                      : currentCompany;
+                    const sampleModel =
+                      getEnabledModelsForCompanyName(sampleOrg).find((m) => m.category === 'SIM') ||
+                      enabledSimModels[0];
                     const csv =
-                      'ICCID,Mobile number,Operator,Plan / package,Form factor,Owner / customer,Inventory location,Lifecycle\n' +
-                      '89918610431299912345,+91 9810012345,Airtel,IoT Business 10GB,Nano (4FF),Adani Port,Mundra CT2,Inventory';
+                      'ICCID,Mobile number,Operator,Plan / package,Form factor,Owner / customer,Inventory location,Lifecycle,Category,Model reference\n' +
+                      `89918610431299912345,,${sampleModel?.manufacturer || ''},IoT Business 10GB,${sampleModel?.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)'},${sampleOrg},,Inventory,${sampleModel?.typeName || ''},${sampleModel?.modelReference || ''}`;
                     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
@@ -2501,10 +3142,32 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                     URL.revokeObjectURL(url);
                   }}
                   onUseSample={() => {
+                    const sampleOrg = isPlatformAdmin
+                      ? filterOwner !== 'All'
+                        ? filterOwner
+                        : availableOrganizations[0] || ''
+                      : currentCompany;
+                    const sampleModel =
+                      getEnabledModelsForCompanyName(sampleOrg).find((m) => m.category === 'SIM') ||
+                      enabledSimModels[0];
+                    if (!sampleModel || !sampleOrg) {
+                      simUpload.fail(
+                        'No active SIM model is enabled for the selected organization.'
+                      );
+                      return;
+                    }
                     const suffix = Math.floor(10000 + Math.random() * 89999);
+                    const idTypes = getRecordIdentifierTypes(sampleModel);
+                    const idType = idTypes[0] || 'ICCID';
+                    const samplePrimary =
+                      idType === 'EID'
+                        ? `890490320010010000000000000${suffix}`
+                        : idType === 'IMSI'
+                        ? `4041010000${suffix}`
+                        : `899186104312999${suffix}`;
                     const sampleCsv =
-                      `ICCID,Mobile number,Operator,Plan / package,Form factor,Owner / customer,Inventory location,Lifecycle\n` +
-                      `899186104312999${suffix},+91 98100${suffix},Airtel,IoT Business 10GB,Nano (4FF),Adani Port,Mundra CT2,Inventory`;
+                      `ICCID,Mobile number,Operator,Plan / package,Form factor,Owner / customer,Inventory location,Lifecycle,Category,Model reference,Identifier type\n` +
+                      `${samplePrimary},,${sampleModel.manufacturer},IoT Business 10GB,${sampleModel.simFormFactor === 'eSIM' ? 'eSIM' : 'Nano (4FF)'},${sampleOrg},,Inventory,${sampleModel.typeName},${sampleModel.modelReference || ''},${idType}`;
                     processSimsUpload('csv', sampleCsv, `sample_sims_${suffix}.csv`, sampleCsv.length);
                   }}
                   onReset={simUpload.reset}
@@ -2516,10 +3179,41 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
         </div>
       )}
 
-      {/* Delete SIM Confirmation Modal with Confirmation Chips */}
+      {/* Upgraded Sectional Filter SIM Inventory Right-Side Drawer */}
+      <SimFilterDrawer
+        isOpen={activeDrawer === 'filters'}
+        onClose={() => setActiveDrawer(null)}
+        appliedFilters={effectiveAdvancedFilters}
+        onApplyFilters={handleApplyAdvancedFilters}
+        authorizedSims={authorizedSims}
+        enabledSimModels={enabledSimModels}
+        effectiveStatusById={effectiveStatusById}
+        assignmentById={assignmentById}
+        isPlatformAdmin={isPlatformAdmin}
+      />
+
+      {/* Upgraded Sectional Bulk Operations · SIM Master Right-Side Drawer */}
+      <SimBulkDrawer
+        isOpen={activeDrawer === 'bulk'}
+        isPlatformAdmin={isPlatformAdmin}
+        selectedRecords={selectedSimRecords}
+        store={store}
+        effectiveStatusById={effectiveStatusById}
+        availableLocations={availableLocations}
+        availableOrganizations={availableOrganizations}
+        onClose={() => setActiveDrawer(null)}
+        onClearSelection={() => setSelectedIds(new Set())}
+        onExportSelected={handleBulkExportSelected}
+        onApplyBulkUpdate={handleApplySimBulkUpdate}
+      />
+
+      {/* Delete SIM Confirmation Modal (blocks active, scheduled, AND historical mapping references) */}
       {(() => {
         if (!simToDelete) return null;
-        const activeAssign = activeAssignmentBySimId.get(simToDelete.id);
+        const refs = getSimMappingReferences(simToDelete.id, store);
+        const effStatus =
+          effectiveStatusById.get(simToDelete.id) ||
+          deriveSimEffectiveInventoryStatus(simToDelete, store);
         return (
           <DeleteConfirmationModal
             isOpen={Boolean(simToDelete)}
@@ -2532,7 +3226,8 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                 removed.
               </>
             }
-            confirmLabel="Delete SIM"
+            confirmLabel={refs.hasAnyReference ? 'Deletion Blocked' : 'Delete SIM'}
+            confirmDisabled={refs.hasAnyReference}
             targetChips={[
               { id: 'iccid', label: simToDelete.iccid, tone: 'orange' },
               {
@@ -2544,20 +3239,26 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
               { id: 'org', label: simToDelete.owner, tone: 'purple' },
               {
                 id: 'status',
-                label: simToDelete.status,
-                tone: simToDelete.status === 'Active' ? 'emerald' : 'slate',
+                label: effStatus,
+                tone: effStatus === 'Active' ? 'emerald' : effStatus === 'Suspended' ? 'amber' : 'slate',
               },
             ]}
             confirmationChips={[
-              activeAssign
+              refs.hasActiveOrScheduledReference
                 ? {
                     id: 'assign-check',
-                    label: `Assigned in ${activeAssign.connectionId}`,
+                    label: `Blocked · ${refs.activeOrScheduledConnections.length} Active/Scheduled Mapping(s)`,
+                    tone: 'rose',
+                  }
+                : refs.hasAnyReference
+                ? {
+                    id: 'assign-check',
+                    label: `Blocked · ${refs.allConnections.length || refs.allBindings.length || refs.allSimAssignments.length} Historical Mapping Reference(s)`,
                     tone: 'amber',
                   }
                 : {
                     id: 'assign-check',
-                    label: 'Safe to Delete · Unassigned',
+                    label: 'Safe to Delete · No Asset Mapping References',
                     tone: 'emerald',
                   },
               {
@@ -2567,11 +3268,16 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
               },
             ]}
             warningNote={
-              activeAssign ? (
+              refs.hasAnyReference ? (
                 <>
-                  This SIM currently has an open binding in{' '}
-                  <strong>{activeAssign.connectionId}</strong> ({activeAssign.hardwareName}). Removing
-                  it will drop it from SIM Master inventory.
+                  This SIM is referenced in Asset Mapping (
+                  <strong>
+                    {refs.allConnections.map((c) => c.connectionId || c.id).join(', ') ||
+                      refs.allSimAssignments.map((sa) => sa.connectionId).join(', ') ||
+                      'binding/assignment history'}
+                  </strong>
+                  ) and cannot be deleted. End any active mappings and set carrier lifecycle to{' '}
+                  <strong>Retired</strong> instead to preserve historical audit records.
                 </>
               ) : undefined
             }
@@ -2580,54 +3286,6 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
           />
         );
       })()}
-
-      {/* Bulk Delete SIMs Confirmation Modal with Confirmation Chips */}
-      <DeleteConfirmationModal
-        isOpen={pendingBulkDelete}
-        title={`Delete ${bulkEligibility.eligible.length} Eligible SIM(s)?`}
-        description="Permanently remove eligible unassigned SIM cards from inventory. SIMs with open Modal Mapping bindings are automatically skipped."
-        confirmLabel={`Confirm Delete (${bulkEligibility.eligible.length})`}
-        targetChips={[
-          ...bulkEligibility.eligible.slice(0, 5).map((s) => ({
-            id: s.id,
-            label: s.iccid,
-            sublabel: s.operator,
-            tone: 'orange' as const,
-          })),
-          ...(bulkEligibility.eligible.length > 5
-            ? [
-                {
-                  id: 'more-sims',
-                  label: `+${bulkEligibility.eligible.length - 5} more`,
-                  tone: 'slate' as const,
-                },
-              ]
-            : []),
-        ]}
-        confirmationChips={[
-          {
-            id: 'selected',
-            label: `${selectedSimRecords.length} Selected`,
-            tone: 'slate',
-          },
-          {
-            id: 'eligible',
-            label: `${bulkEligibility.eligible.length} Eligible to Delete`,
-            tone: 'emerald',
-          },
-          ...(bulkEligibility.skipped.length > 0
-            ? [
-                {
-                  id: 'skipped',
-                  label: `${bulkEligibility.skipped.length} Skipped (Assigned)`,
-                  tone: 'amber' as const,
-                },
-              ]
-            : []),
-        ]}
-        onCancel={() => setPendingBulkDelete(false)}
-        onConfirm={executeBulkDeleteSims}
-      />
     </div>
   );
 };

@@ -1680,26 +1680,54 @@ export const INITIAL_VEHICLES: Vehicle[] = [
 ];
 
 export const VEHICLE_MASTER_STORAGE_KEY = 'fleetrobo_vehicle_master_v3';
+export const VEHICLE_MASTER_SEED_VERSION_KEY = 'fleetrobo_vehicle_master_seed_version_v1';
+const CURRENT_VEHICLE_SEED_VERSION = '2';
 
 export function loadVehicleMasterStore(): Vehicle[] {
   try {
     const raw = localStorage.getItem(VEHICLE_MASTER_STORAGE_KEY);
-    if (raw) {
+    const seedVersion = localStorage.getItem(VEHICLE_MASTER_SEED_VERSION_KEY);
+
+    if (raw !== null) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        // Ensure Adani Mundra & other client seed vehicles exist if user had older seed cache
-        const existingIds = new Set(parsed.map((v: Vehicle) => v.id));
-        const missingSeeds = INITIAL_VEHICLES.filter((v) => !existingIds.has(v.id));
-        if (missingSeeds.length > 0) {
-          const merged = [...parsed, ...missingSeeds];
-          localStorage.setItem(VEHICLE_MASTER_STORAGE_KEY, JSON.stringify(merged));
-          return merged;
+      if (Array.isArray(parsed)) {
+        // After one-time v2 seed migration has completed, NEVER resurrect deleted seeds
+        if (seedVersion === CURRENT_VEHICLE_SEED_VERSION) {
+          return parsed;
         }
-        return parsed;
+        // One-time upgrade for pre-versioned legacy cache that lacked newer client seed vehicles
+        const existingIds = new Set(parsed.map((v: Vehicle) => v.id));
+        const needsOneTimeSeedMigration = parsed.length > 0 && !existingIds.has('veh-mundra-01');
+        const result = needsOneTimeSeedMigration
+          ? [...parsed, ...INITIAL_VEHICLES.filter((v) => !existingIds.has(v.id))]
+          : parsed;
+        localStorage.setItem(VEHICLE_MASTER_STORAGE_KEY, JSON.stringify(result));
+        localStorage.setItem(VEHICLE_MASTER_SEED_VERSION_KEY, CURRENT_VEHICLE_SEED_VERSION);
+        return result;
       }
     }
   } catch {
-    // fallback
+    // fallback to initial seed below
+  }
+
+  try {
+    localStorage.setItem(VEHICLE_MASTER_STORAGE_KEY, JSON.stringify(INITIAL_VEHICLES));
+    localStorage.setItem(VEHICLE_MASTER_SEED_VERSION_KEY, CURRENT_VEHICLE_SEED_VERSION);
+  } catch {
+    // ignore storage quota errors
+  }
+  return INITIAL_VEHICLES;
+}
+
+export function resetVehicleMasterStore(): Vehicle[] {
+  try {
+    localStorage.setItem(VEHICLE_MASTER_STORAGE_KEY, JSON.stringify(INITIAL_VEHICLES));
+    localStorage.setItem(VEHICLE_MASTER_SEED_VERSION_KEY, CURRENT_VEHICLE_SEED_VERSION);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('fleetrobo:resources-updated'));
+    }
+  } catch {
+    // ignore
   }
   return INITIAL_VEHICLES;
 }
@@ -1707,12 +1735,198 @@ export function loadVehicleMasterStore(): Vehicle[] {
 export function saveVehicleMasterStore(vehicles: Vehicle[]) {
   try {
     localStorage.setItem(VEHICLE_MASTER_STORAGE_KEY, JSON.stringify(vehicles));
+    localStorage.setItem(VEHICLE_MASTER_SEED_VERSION_KEY, CURRENT_VEHICLE_SEED_VERSION);
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('fleetrobo:resources-updated'));
     }
   } catch {
     // ignore
   }
+}
+
+export function normalizeRegistrationNumber(reg: string | undefined | null): string {
+  return String(reg || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '');
+}
+
+export function getVehicleOwningCompany(v: Pick<Vehicle, 'company' | 'client'>): string {
+  return (v.company || v.client || '').trim();
+}
+
+export function isVehicleAuthorizedForCompany(
+  v: Pick<Vehicle, 'company' | 'client'>,
+  companyContext?: string
+): boolean {
+  if (
+    !companyContext ||
+    companyContext === 'All Clients' ||
+    companyContext === 'Platform Admin' ||
+    companyContext === 'Binary'
+  ) {
+    return true;
+  }
+  return getVehicleOwningCompany(v).toLowerCase() === companyContext.trim().toLowerCase();
+}
+
+export function syncVehicleOperationalActiveState(
+  status: Vehicle['status'],
+  explicitActive?: boolean
+): boolean {
+  if (status === 'Inactive') return false;
+  return explicitActive === undefined ? true : Boolean(explicitActive);
+}
+
+export interface VehicleModelCatalogRef {
+  id: string;
+  modelName: string;
+  manufacturer: string;
+  variant?: string;
+  vehicleType: string;
+  vehicleSegment?: string;
+  isActive: boolean;
+}
+
+export function formatModelCatalogLabel(m: VehicleModelCatalogRef): string {
+  return `${m.manufacturer} ${m.modelName}${m.variant ? ` (${m.variant})` : ''}`;
+}
+
+export function resolveVehicleModelFromCatalog(
+  catalog: VehicleModelCatalogRef[],
+  vehicleModelId?: string,
+  machineModelText?: string
+): VehicleModelCatalogRef | null {
+  if (vehicleModelId) {
+    const byId = catalog.find((m) => m.id === vehicleModelId);
+    if (byId) return byId;
+  }
+  const needle = (machineModelText || '').trim().toLowerCase();
+  if (!needle) return null;
+  return (
+    catalog.find(
+      (m) =>
+        formatModelCatalogLabel(m).toLowerCase() === needle ||
+        `${m.manufacturer} ${m.modelName}`.toLowerCase() === needle ||
+        m.modelName.toLowerCase() === needle
+    ) || null
+  );
+}
+
+export interface VehicleCandidateValidationInput {
+  mode: 'create' | 'edit' | 'import';
+  currentVehicleId?: string;
+  company: string;
+  registration_number: string;
+  vehicle_model_id?: string;
+  machine_model?: string;
+  chassis_number?: string;
+  vin?: string;
+  status?: string;
+  active_status?: boolean;
+  insurance_from?: string;
+  insurance_to?: string;
+  warranty_from?: string;
+  warranty_to?: string;
+  extended_warranty_from?: string;
+  extended_warranty_to?: string;
+}
+
+export interface VehicleCandidateValidationResult {
+  valid: boolean;
+  errors: Record<string, string>;
+  normalizedPlate: string;
+  resolvedModel: VehicleModelCatalogRef | null;
+}
+
+const VALID_OPERATIONAL_STATUSES: ReadonlySet<string> = new Set([
+  'Available',
+  'In Use',
+  'Maintenance',
+  'Out of Service',
+  'Reserved',
+  'Inactive',
+  'Accident / Damage',
+  'Compliance Hold',
+  'Stolen'
+]);
+
+export function validateVehicleCandidate(
+  input: VehicleCandidateValidationInput,
+  existingVehicles: Vehicle[],
+  modelCatalog: VehicleModelCatalogRef[]
+): VehicleCandidateValidationResult {
+  const errors: Record<string, string> = {};
+  const rawPlate = (input.registration_number || '').trim().toUpperCase();
+  const normalizedPlate = normalizeRegistrationNumber(rawPlate);
+  const ownerLower = (input.company || '').trim().toLowerCase();
+
+  if (!rawPlate) {
+    errors.registration_number = 'Registration number is required.';
+  } else if (normalizedPlate.length < 4 || !/^[A-Z0-9]+$/.test(normalizedPlate)) {
+    errors.registration_number = 'Enter a valid alphanumeric registration number (min 4 chars).';
+  } else {
+    const duplicate = existingVehicles.find(
+      (v) =>
+        v.id !== input.currentVehicleId &&
+        getVehicleOwningCompany(v).toLowerCase() === ownerLower &&
+        normalizeRegistrationNumber(v.registration_number) === normalizedPlate
+    );
+    if (duplicate) {
+      errors.registration_number = `Registration number "${rawPlate}" already exists for ${input.company || duplicate.company}.`;
+    }
+  }
+
+  const resolvedModel = resolveVehicleModelFromCatalog(
+    modelCatalog,
+    input.vehicle_model_id,
+    input.machine_model
+  );
+
+  if (input.mode === 'create' || input.mode === 'import') {
+    if (!input.machine_model?.trim() && !input.vehicle_model_id) {
+      errors.machine_model = 'Please select a Machine Model from Vehicle Model Master.';
+    } else if (resolvedModel && !resolvedModel.isActive) {
+      errors.machine_model = `Model "${formatModelCatalogLabel(resolvedModel)}" is inactive and cannot be used for new registrations.`;
+    } else if (input.mode === 'import' && input.vehicle_model_id && !resolvedModel) {
+      errors.machine_model = `Unknown Machine Model ID "${input.vehicle_model_id}".`;
+    }
+  } else if (!input.machine_model?.trim() && !resolvedModel) {
+    errors.machine_model = 'Machine Model is required.';
+  }
+
+  const chassis = (input.chassis_number || input.vin || '').trim().toUpperCase();
+  if (input.mode !== 'import' && !chassis) {
+    errors.chassis_number = 'Chassis number is required.';
+  } else if (chassis && chassis.length < 6) {
+    errors.chassis_number = 'Chassis number must be at least 6 characters.';
+  }
+
+  if (input.status && !VALID_OPERATIONAL_STATUSES.has(input.status)) {
+    errors.status = `Invalid operational status "${input.status}".`;
+  }
+
+  if (input.insurance_from && input.insurance_to && input.insurance_to < input.insurance_from) {
+    errors.insurance_to = 'Insurance To date must be on or after Insurance From date.';
+  }
+  if (input.warranty_from && input.warranty_to && input.warranty_to < input.warranty_from) {
+    errors.warranty_to = 'Warranty To date must be on or after Warranty From date.';
+  }
+  if (
+    input.extended_warranty_from &&
+    input.extended_warranty_to &&
+    input.extended_warranty_to < input.extended_warranty_from
+  ) {
+    errors.extended_warranty_to =
+      'Extended Warranty To date must be on or after Extended Warranty From date.';
+  }
+
+  return {
+    valid: Object.keys(errors).length === 0,
+    errors,
+    normalizedPlate,
+    resolvedModel
+  };
 }
 
 export const DEMO_LOOKUPS = {

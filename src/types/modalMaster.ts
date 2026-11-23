@@ -24,6 +24,82 @@ export type SimLifecycleStatus =
   | 'Inactive'
   | 'Retired';
 
+export type EffectiveDeviceStatus =
+  | 'Inventory'
+  | 'Active'
+  | 'In Maintenance'
+  | 'Decommissioned';
+
+export const DEVICE_EFFECTIVE_STATUS_OPTIONS: EffectiveDeviceStatus[] = [
+  'Inventory',
+  'Active',
+  'In Maintenance',
+  'Decommissioned'
+];
+
+export type DeviceMappingFilterStatus =
+  | 'Active Mapping'
+  | 'Scheduled'
+  | 'Unmapped'
+  | 'Historical/Ended';
+
+export const DEVICE_MAPPING_FILTER_STATUS_OPTIONS: DeviceMappingFilterStatus[] = [
+  'Active Mapping',
+  'Scheduled',
+  'Unmapped',
+  'Historical/Ended'
+];
+
+export type EffectiveSensorStatus = EffectiveDeviceStatus;
+
+export const SENSOR_EFFECTIVE_STATUS_OPTIONS: EffectiveSensorStatus[] = [
+  'Inventory',
+  'Active',
+  'In Maintenance',
+  'Decommissioned'
+];
+
+export type SensorMappingFilterStatus = DeviceMappingFilterStatus;
+
+export const SENSOR_MAPPING_FILTER_STATUS_OPTIONS: SensorMappingFilterStatus[] = [
+  'Active Mapping',
+  'Scheduled',
+  'Unmapped',
+  'Historical/Ended'
+];
+
+export type EffectiveSimInventoryStatus = 'Inventory' | 'Active' | 'Suspended' | 'Retired';
+
+export const SIM_EFFECTIVE_STATUS_OPTIONS: EffectiveSimInventoryStatus[] = [
+  'Inventory',
+  'Active',
+  'Suspended',
+  'Retired'
+];
+
+export type SimMappingAssignmentStatus =
+  | 'Active Mapping'
+  | 'Scheduled'
+  | 'Unassigned'
+  | 'Historical/Ended'
+  | 'Conflict / Needs Attention';
+
+export const SIM_MAPPING_ASSIGNMENT_STATUS_OPTIONS: SimMappingAssignmentStatus[] = [
+  'Active Mapping',
+  'Scheduled',
+  'Unassigned',
+  'Historical/Ended',
+  'Conflict / Needs Attention'
+];
+
+export interface HardwareAuditEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  action: string;
+  summary: string;
+}
+
 export interface DeviceRecord {
   id: string;
   deviceId: string;
@@ -44,6 +120,12 @@ export interface DeviceRecord {
   company: string;
   inventoryLocation: string;
   hardwareLifecycle: HardwareLifecycleStatus;
+  statusOverride?: 'In Maintenance' | 'Decommissioned' | null;
+  legacyStatusMetadata?: {
+    originalHardwareLifecycle?: string;
+    pendingHardwareReview?: boolean;
+    migratedAt?: string;
+  };
   registeredAt: string;
   updatedAt: string;
   channelCount: number;
@@ -71,6 +153,13 @@ export interface SensorRecord {
   company: string;
   inventoryLocation: string;
   hardwareLifecycle: HardwareLifecycleStatus;
+  statusOverride?: 'In Maintenance' | 'Decommissioned' | null;
+  legacyStatusMetadata?: {
+    originalHardwareLifecycle?: string;
+    pendingHardwareReview?: boolean;
+    migratedAt?: string;
+  };
+  auditHistory?: HardwareAuditEntry[];
   registeredAt: string;
   updatedAt: string;
   notes: string;
@@ -99,6 +188,8 @@ export interface SimRecord {
   category?: string;
   modelTypeId?: string;
   identifierType?: string;
+  serviceMode?: string;
+  auditHistory?: HardwareAuditEntry[];
 }
 
 export type HardwareCategory = 'Device' | 'Sensor' | 'SIM';
@@ -683,8 +774,7 @@ export const DEVICE_COLUMNS: ModalColumnDef[] = [
   { key: 'channelCount', label: 'Channels', minWidth: '95px' },
   { key: 'serial', label: 'Serial number', minWidth: '150px' },
   { key: 'imei', label: 'IMEI', minWidth: '160px' },
-  { key: 'inventoryLocation', label: 'Inventory location', minWidth: '155px' },
-  { key: 'hardwareLifecycle', label: 'Inventory status', minWidth: '140px' },
+  { key: 'hardwareLifecycle', label: 'Device status', minWidth: '140px' },
   { key: 'registeredAt', label: 'Registered', minWidth: '120px' },
   { key: 'updatedAt', label: 'Updated', minWidth: '120px' }
 ];
@@ -701,8 +791,7 @@ export const SENSOR_COLUMNS: ModalColumnDef[] = [
   { key: 'measurementCapability', label: 'Measurement capability', minWidth: '165px' },
   { key: 'measurementUnit', label: 'Measurement unit', minWidth: '135px' },
   { key: 'measurementRange', label: 'Measurement range', minWidth: '145px' },
-  { key: 'inventoryLocation', label: 'Inventory location', minWidth: '155px' },
-  { key: 'hardwareLifecycle', label: 'Inventory status', minWidth: '140px' },
+  { key: 'hardwareLifecycle', label: 'Sensor status', minWidth: '140px' },
   { key: 'registeredAt', label: 'Registered', minWidth: '120px' },
   { key: 'updatedAt', label: 'Updated', minWidth: '120px' }
 ];
@@ -717,10 +806,7 @@ export const SIM_COLUMNS: ModalColumnDef[] = [
   { key: 'formFactor', label: 'Form factor', minWidth: '135px' },
   { key: 'network', label: 'Network', minWidth: '115px' },
   { key: 'msisdn', label: 'Mobile number', minWidth: '145px' },
-  { key: 'location', label: 'Inventory location', minWidth: '155px' },
-  { key: 'status', label: 'Inventory status', minWidth: '140px' },
-  { key: 'assigned', label: 'Assigned to', minWidth: '175px' },
-  { key: 'connection', label: 'Assigned connection', minWidth: '150px' },
+  { key: 'status', label: 'SIM status', minWidth: '140px' },
   { key: 'activationDate', label: 'Activation date', minWidth: '130px' },
   { key: 'renewalDate', label: 'Renewal / expiry date', minWidth: '155px' }
 ];
@@ -1231,10 +1317,34 @@ export function computeHardwareBindingStatus(
   return { status: 'Active' };
 }
 
+export interface ResourceAllocationEvaluationContext {
+  connections?: ConnectionRecord[];
+  store?: Pick<
+    ModalMasterStore,
+    'connections' | 'hardwareBindings' | 'devices' | 'sensors' | 'sims'
+  >;
+}
+
+export function getNextHardwareBindingId(
+  existing: HardwareBinding[],
+  offset = 0
+): string {
+  let maxNum = 3012;
+  for (const b of existing) {
+    const m = /^BND-(\d+)$/.exec(b.id || '');
+    if (m) {
+      const n = Number(m[1]);
+      if (!Number.isNaN(n) && n > maxNum) maxNum = n;
+    }
+  }
+  return `BND-${maxNum + 1 + offset}`;
+}
+
 export function computeResourceAllocationStatus(
   alloc: ResourceAllocation,
   allAllocations: ResourceAllocation[],
-  nowMs: number = Date.now()
+  nowMs: number = Date.now(),
+  context?: ResourceAllocationEvaluationContext
 ): { status: ResourceAllocationStatus; reason?: string } {
   if (alloc.endedAt) return { status: 'Ended' };
   const startMs = Date.parse(alloc.effectiveStartAt);
@@ -1247,29 +1357,1535 @@ export function computeResourceAllocationStatus(
     return { status: 'Ended' };
   }
 
-  // Check duplicate overlapping active allocation for same resource on same connection
-  const duplicateOverlap = allAllocations.find(
-    (other) =>
-      other.id !== alloc.id &&
-      !other.endedAt &&
-      other.connectionId === alloc.connectionId &&
-      other.resourceId === alloc.resourceId &&
-      other.resourceType === alloc.resourceType &&
-      dateTimeIntervalsOverlap(
-        alloc.effectiveStartAt,
-        alloc.effectiveEndAt,
-        other.effectiveStartAt,
-        other.endedAt || other.effectiveEndAt
-      )
-  );
+  const connections = context?.connections || context?.store?.connections || [];
+  const parentConn =
+    connections.length > 0
+      ? connections.find((c) => c.id === alloc.connectionId || c.connectionId === alloc.connectionId)
+      : undefined;
+
+  if (parentConn?.status === 'Inactive') {
+    return { status: 'Ended', reason: 'Parent connection is Inactive.' };
+  }
+
+  // Scoped hardware validation against parent connection membership & live physical overrides
+  if (alloc.hardwareId) {
+    if (
+      parentConn &&
+      !parentConn.memberIds?.includes(alloc.hardwareId) &&
+      !parentConn.members?.some((m) => m.hardwareId === alloc.hardwareId)
+    ) {
+      return {
+        status: 'Conflict',
+        reason: `Hardware ${alloc.hardwareId} is not a member of ${parentConn.id}.`
+      };
+    }
+
+    const st = context?.store;
+    if (st) {
+      const dev = st.devices?.find((d) => d.id === alloc.hardwareId);
+      if (dev) {
+        if (dev.statusOverride === 'Decommissioned' || (dev.statusOverride === undefined && dev.hardwareLifecycle === 'Decommissioned')) {
+          return { status: 'Conflict', reason: `Device ${dev.deviceId} is Decommissioned.` };
+        }
+        if (dev.statusOverride === 'In Maintenance') {
+          return { status: 'Conflict', reason: `Device ${dev.deviceId} is In Maintenance.` };
+        }
+      }
+      const sen = st.sensors?.find((s) => s.id === alloc.hardwareId);
+      if (sen) {
+        if (sen.statusOverride === 'Decommissioned' || (sen.statusOverride === undefined && sen.hardwareLifecycle === 'Decommissioned')) {
+          return { status: 'Conflict', reason: `Sensor ${sen.deviceId} is Decommissioned.` };
+        }
+        if (sen.statusOverride === 'In Maintenance') {
+          return { status: 'Conflict', reason: `Sensor ${sen.deviceId} is In Maintenance.` };
+        }
+      }
+      const sim = st.sims?.find((s) => s.id === alloc.hardwareId);
+      if (sim && (sim.status === 'Retired' || sim.status === 'Suspended' || sim.status === 'Inactive')) {
+        return { status: 'Conflict', reason: `SIM ${sim.iccid} carrier status is ${sim.status}.` };
+      }
+    }
+  }
+
+  // Check duplicate overlapping active allocation for same canonical resource on same connection & conflicting hardware scope
+  const normIdf = (alloc.resourceIdentifier || '').trim().toLowerCase();
+  const normComp = (alloc.companyName || '').trim().toLowerCase();
+  const allocScope = alloc.hardwareId || 'ALL';
+
+  const duplicateOverlap = allAllocations.find((other) => {
+    if (other.id === alloc.id || other.endedAt) return false;
+    if (other.connectionId !== alloc.connectionId || other.resourceType !== alloc.resourceType) {
+      return false;
+    }
+    const sameResource =
+      other.resourceId === alloc.resourceId ||
+      (normIdf.length > 0 &&
+        (other.companyName || '').trim().toLowerCase() === normComp &&
+        (other.resourceIdentifier || '').trim().toLowerCase() === normIdf);
+    if (!sameResource) return false;
+
+    const otherScope = other.hardwareId || 'ALL';
+    const scopeOverlaps =
+      allocScope === 'ALL' || otherScope === 'ALL' || allocScope === otherScope;
+    if (!scopeOverlaps) return false;
+
+    return dateTimeIntervalsOverlap(
+      alloc.effectiveStartAt,
+      alloc.effectiveEndAt,
+      other.effectiveStartAt,
+      other.endedAt || other.effectiveEndAt
+    );
+  });
+
   if (duplicateOverlap) {
     return { status: 'Conflict', reason: `Overlaps with ${duplicateOverlap.id}.` };
+  }
+
+  if (parentConn?.status === 'Draft') {
+    return { status: 'Scheduled', reason: 'Parent connection is in Draft.' };
   }
 
   if (!Number.isNaN(startMs) && startMs > nowMs) {
     return { status: 'Scheduled' };
   }
   return { status: 'Active' };
+}
+
+export function computeEffectiveConnectionStatus(
+  conn: ConnectionRecord,
+  store: Partial<
+    Pick<
+      ModalMasterStore,
+      'connections' | 'hardwareBindings' | 'resourceAllocations' | 'devices' | 'sensors' | 'sims'
+    >
+  >,
+  nowMs: number = Date.now()
+): { status: ConnectionLifecycleStatus; reason?: string } {
+  // 1. Explicit Draft or Inactive always stays Draft or Inactive
+  if (conn.status === 'Draft') {
+    return { status: 'Draft' };
+  }
+  if (conn.status === 'Inactive') {
+    return { status: 'Inactive' };
+  }
+
+  const allBindings = store.hardwareBindings || [];
+  const allAllocations = store.resourceAllocations || [];
+  const devices = store.devices || [];
+  const sensors = store.sensors || [];
+  const sims = store.sims || [];
+  const connections = store.connections || [conn];
+
+  const connBindings = allBindings.filter((b) => b.connectionId === conn.id);
+  const connAllocs = allAllocations.filter((a) => a.connectionId === conn.id);
+  const members = conn.members || [];
+
+  // 2. Check live physical hardware overrides for currently referenced active/scheduled hardware
+  const openBindings = connBindings.filter(
+    (b) => !b.endedAt && b.statusOverride !== 'Canceled'
+  );
+  const openAllocs = connAllocs.filter((a) => !a.endedAt);
+
+  const referencedHwIds = new Set<string>();
+  openBindings.forEach((b) => {
+    referencedHwIds.add(b.fromHardwareId);
+    referencedHwIds.add(b.toHardwareId);
+  });
+  openAllocs.forEach((a) => {
+    if (a.hardwareId) referencedHwIds.add(a.hardwareId);
+  });
+  if (referencedHwIds.size === 0 && (openAllocs.length > 0 || conn.status === 'Needs Attention')) {
+    members.forEach((m) => referencedHwIds.add(m.hardwareId));
+  }
+
+  for (const hwId of referencedHwIds) {
+    const dev = devices.find((d) => d.id === hwId);
+    if (dev) {
+      if (
+        dev.statusOverride === 'Decommissioned' ||
+        (dev.statusOverride === undefined && dev.hardwareLifecycle === 'Decommissioned')
+      ) {
+        return {
+          status: 'Needs Attention',
+          reason: `Device ${dev.deviceId} is Decommissioned.`
+        };
+      }
+      if (dev.statusOverride === 'In Maintenance') {
+        return {
+          status: 'Needs Attention',
+          reason: `Device ${dev.deviceId} is In Maintenance.`
+        };
+      }
+      continue;
+    }
+
+    const sen = sensors.find((s) => s.id === hwId);
+    if (sen) {
+      if (
+        sen.statusOverride === 'Decommissioned' ||
+        (sen.statusOverride === undefined && sen.hardwareLifecycle === 'Decommissioned')
+      ) {
+        return {
+          status: 'Needs Attention',
+          reason: `Sensor ${sen.deviceId} is Decommissioned.`
+        };
+      }
+      if (sen.statusOverride === 'In Maintenance') {
+        return {
+          status: 'Needs Attention',
+          reason: `Sensor ${sen.deviceId} is In Maintenance.`
+        };
+      }
+      continue;
+    }
+
+    const sim = sims.find((s) => s.id === hwId);
+    if (sim && (sim.status === 'Retired' || sim.status === 'Suspended')) {
+      return {
+        status: 'Needs Attention',
+        reason: `SIM ${sim.iccid} has carrier status ${sim.status}.`
+      };
+    }
+  }
+
+  // 3. Evaluate pairwise hardware bindings and resource allocations
+  let hasActiveLink = false;
+  let hasScheduledLink = false;
+  let conflictReason: string | undefined;
+
+  for (const b of connBindings) {
+    const bRes = computeHardwareBindingStatus(b, allBindings, members, nowMs);
+    if (bRes.status === 'Conflict') {
+      conflictReason = conflictReason || bRes.reason || `Binding ${b.id} has a conflict.`;
+    } else if (bRes.status === 'Active') {
+      hasActiveLink = true;
+    } else if (bRes.status === 'Scheduled') {
+      hasScheduledLink = true;
+    }
+  }
+
+  const allocCtx: ResourceAllocationEvaluationContext = {
+    connections,
+    store:
+      devices.length > 0 || sensors.length > 0 || sims.length > 0
+        ? {
+            connections,
+            hardwareBindings: allBindings,
+            devices,
+            sensors,
+            sims
+          }
+        : undefined
+  };
+
+  for (const a of connAllocs) {
+    const aRes = computeResourceAllocationStatus(a, allAllocations, nowMs, allocCtx);
+    if (aRes.status === 'Conflict') {
+      conflictReason = conflictReason || aRes.reason || `Allocation ${a.id} has a conflict.`;
+    } else if (aRes.status === 'Active') {
+      hasActiveLink = true;
+    } else if (aRes.status === 'Scheduled') {
+      hasScheduledLink = true;
+    }
+  }
+
+  if (conflictReason) {
+    return { status: 'Needs Attention', reason: conflictReason };
+  }
+
+  if (conn.status === 'Needs Attention') {
+    return {
+      status: 'Needs Attention',
+      reason: conn.verification || 'Mapping flagged for attention.'
+    };
+  }
+
+  if (hasActiveLink) {
+    return { status: 'Active' };
+  }
+
+  if (hasScheduledLink) {
+    return { status: 'Scheduled' };
+  }
+
+  // If connection had bindings or allocations and all of them have now ended/canceled, it is no longer effectively Active
+  if (connBindings.length > 0 || connAllocs.length > 0) {
+    return {
+      status: 'Inactive',
+      reason: 'All associated bindings and resource allocations have ended.'
+    };
+  }
+
+  // Bare membership row without any binding or resource allocation cannot activate inventory
+  return {
+    status: conn.status === 'Scheduled' ? 'Scheduled' : 'Draft',
+    reason: 'No effective hardware bindings or resource allocations configured.'
+  };
+}
+
+export interface DeviceMappingReferenceSummary {
+  allConnections: ConnectionRecord[];
+  allBindings: HardwareBinding[];
+  allAllocations: ResourceAllocation[];
+  activeOrScheduledConnections: ConnectionRecord[];
+  hasAnyReference: boolean;
+  hasActiveOrScheduledReference: boolean;
+}
+
+export function getDeviceMappingReferences(
+  deviceId: string,
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>,
+  nowMs: number = Date.now()
+): DeviceMappingReferenceSummary {
+  const connections = store.connections || [];
+  const bindings = store.hardwareBindings || [];
+  const allocations = store.resourceAllocations || [];
+
+  const directConnIds = new Set<string>();
+  const allConnections: ConnectionRecord[] = [];
+  connections.forEach((c) => {
+    const isDirect =
+      c.memberIds?.includes(deviceId) ||
+      c.members?.some((m) => m.hardwareId === deviceId) ||
+      c.hardwareId === deviceId ||
+      c.parentId === deviceId;
+    if (isDirect) {
+      directConnIds.add(c.id);
+      allConnections.push(c);
+    }
+  });
+
+  const allBindings = bindings.filter(
+    (b) => b.fromHardwareId === deviceId || b.toHardwareId === deviceId
+  );
+  allBindings.forEach((b) => {
+    if (!directConnIds.has(b.connectionId)) {
+      const conn = connections.find((c) => c.id === b.connectionId);
+      if (conn) {
+        directConnIds.add(conn.id);
+        allConnections.push(conn);
+      }
+    }
+  });
+
+  const allAllocations = allocations.filter(
+    (a) => a.hardwareId === deviceId || (a.hardwareId == null && directConnIds.has(a.connectionId))
+  );
+  allAllocations.forEach((a) => {
+    if (!directConnIds.has(a.connectionId)) {
+      const conn = connections.find((c) => c.id === a.connectionId);
+      if (conn) {
+        directConnIds.add(conn.id);
+        allConnections.push(conn);
+      }
+    }
+  });
+
+  const activeOrScheduledConnections = allConnections.filter((c) => {
+    const effConnStatus = computeEffectiveConnectionStatus(c, store, nowMs).status;
+    if (
+      effConnStatus !== 'Active' &&
+      effConnStatus !== 'Scheduled' &&
+      effConnStatus !== 'Needs Attention'
+    ) {
+      return false;
+    }
+    const connBindings = allBindings.filter((b) => b.connectionId === c.id);
+    const hasActiveOrSchedBinding = connBindings.some((b) => {
+      const st = computeHardwareBindingStatus(b, bindings, c.members || [], nowMs).status;
+      return st === 'Active' || st === 'Scheduled' || st === 'Conflict';
+    });
+    if (hasActiveOrSchedBinding) return true;
+
+    const connAllocs = allAllocations.filter((a) => a.connectionId === c.id);
+    const hasActiveOrSchedAlloc = connAllocs.some((a) => {
+      const st = computeResourceAllocationStatus(a, allocations, nowMs, {
+        connections,
+        store: store as any
+      }).status;
+      return st === 'Active' || st === 'Scheduled' || st === 'Conflict';
+    });
+    return hasActiveOrSchedAlloc;
+  });
+
+  return {
+    allConnections,
+    allBindings,
+    allAllocations,
+    activeOrScheduledConnections,
+    hasAnyReference:
+      allConnections.length > 0 || allBindings.length > 0 || allAllocations.length > 0,
+    hasActiveOrScheduledReference: activeOrScheduledConnections.length > 0
+  };
+}
+
+export function deriveDeviceStatus(
+  device: DeviceRecord,
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>,
+  nowMs: number = Date.now()
+): EffectiveDeviceStatus {
+  // 1. Explicit administrative overrides (Decommissioned > In Maintenance)
+  if (device.statusOverride === 'Decommissioned') return 'Decommissioned';
+  if (device.statusOverride === undefined && device.hardwareLifecycle === 'Decommissioned') {
+    return 'Decommissioned';
+  }
+
+  if (device.statusOverride === 'In Maintenance') return 'In Maintenance';
+  if (
+    device.statusOverride === undefined &&
+    (device.hardwareLifecycle === 'In Maintenance' || device.hardwareLifecycle === 'Suspended')
+  ) {
+    return 'In Maintenance';
+  }
+
+  // 2. Mapping-derived Active check: Effective Active connection + currently effective Active binding or allocation
+  const connections = store.connections || [];
+  const bindings = store.hardwareBindings || [];
+  const allocations = store.resourceAllocations || [];
+
+  for (const conn of connections) {
+    if (conn.status === 'Draft' || conn.status === 'Inactive') continue;
+    const isMember =
+      conn.memberIds?.includes(device.id) ||
+      conn.members?.some((m) => m.hardwareId === device.id) ||
+      conn.hardwareId === device.id ||
+      conn.parentId === device.id;
+    if (!isMember) continue;
+
+    const effConnStatus = computeEffectiveConnectionStatus(conn, store, nowMs).status;
+    if (effConnStatus !== 'Active') continue;
+
+    const connDeviceBindings = bindings.filter(
+      (b) =>
+        b.connectionId === conn.id &&
+        (b.fromHardwareId === device.id || b.toHardwareId === device.id)
+    );
+    const hasEffectiveBinding = connDeviceBindings.some(
+      (b) => computeHardwareBindingStatus(b, bindings, conn.members || [], nowMs).status === 'Active'
+    );
+    if (hasEffectiveBinding) return 'Active';
+
+    const hasEffectiveAllocation = allocations.some((a) => {
+      if (a.connectionId !== conn.id) return false;
+      if (a.hardwareId === device.id) {
+        return (
+          computeResourceAllocationStatus(a, allocations, nowMs, {
+            connections,
+            store: store as any
+          }).status === 'Active'
+        );
+      }
+      if (a.hardwareId == null && connDeviceBindings.length === 0) {
+        return (
+          computeResourceAllocationStatus(a, allocations, nowMs, {
+            connections,
+            store: store as any
+          }).status === 'Active'
+        );
+      }
+      return false;
+    });
+    if (hasEffectiveAllocation) return 'Active';
+  }
+
+  return 'Inventory';
+}
+
+export function deriveDeviceMappingFilterStatus(
+  deviceId: string,
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>,
+  nowMs: number = Date.now()
+): DeviceMappingFilterStatus {
+  const connections = store.connections || [];
+  const bindings = store.hardwareBindings || [];
+  const allocations = store.resourceAllocations || [];
+
+  let hasActive = false;
+  let hasScheduled = false;
+
+  for (const conn of connections) {
+    if (conn.status === 'Draft' || conn.status === 'Inactive') continue;
+    const isMember =
+      conn.memberIds?.includes(deviceId) ||
+      conn.members?.some((m) => m.hardwareId === deviceId) ||
+      conn.hardwareId === deviceId ||
+      conn.parentId === deviceId;
+    if (!isMember) continue;
+
+    const effConnStatus = computeEffectiveConnectionStatus(conn, store, nowMs).status;
+    const connDeviceBindings = bindings.filter(
+      (b) =>
+        b.connectionId === conn.id &&
+        (b.fromHardwareId === deviceId || b.toHardwareId === deviceId)
+    );
+
+    if (effConnStatus === 'Active') {
+      const hasEffectiveBinding = connDeviceBindings.some(
+        (b) => computeHardwareBindingStatus(b, bindings, conn.members || [], nowMs).status === 'Active'
+      );
+      const hasEffectiveAllocation = allocations.some((a) => {
+        if (a.connectionId !== conn.id) return false;
+        if (a.hardwareId === deviceId) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Active'
+          );
+        }
+        if (a.hardwareId == null && connDeviceBindings.length === 0) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Active'
+          );
+        }
+        return false;
+      });
+      if (hasEffectiveBinding || hasEffectiveAllocation) {
+        hasActive = true;
+        break;
+      }
+    }
+
+    if (effConnStatus === 'Active' || effConnStatus === 'Scheduled') {
+      const hasScheduledBinding = connDeviceBindings.some(
+        (b) =>
+          computeHardwareBindingStatus(b, bindings, conn.members || [], nowMs).status === 'Scheduled'
+      );
+      const hasScheduledAllocation = allocations.some((a) => {
+        if (a.connectionId !== conn.id) return false;
+        if (a.hardwareId === deviceId) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Scheduled'
+          );
+        }
+        if (a.hardwareId == null && connDeviceBindings.length === 0) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Scheduled'
+          );
+        }
+        return false;
+      });
+      if (hasScheduledBinding || hasScheduledAllocation) {
+        hasScheduled = true;
+      }
+    }
+  }
+
+  if (hasActive) return 'Active Mapping';
+  if (hasScheduled) return 'Scheduled';
+
+  const refs = getDeviceMappingReferences(deviceId, store, nowMs);
+  if (refs.hasAnyReference) return 'Historical/Ended';
+
+  return 'Unmapped';
+}
+
+function migrateDeviceRecords(
+  devices: DeviceRecord[],
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>
+): DeviceRecord[] {
+  return devices.map((d) => {
+    const rawLifecycle = d.hardwareLifecycle;
+    const hasMeta = Boolean(d.legacyStatusMetadata);
+
+    let nextOverride = d.statusOverride;
+    if (nextOverride === undefined) {
+      if (rawLifecycle === 'Decommissioned') nextOverride = 'Decommissioned';
+      else if (rawLifecycle === 'In Maintenance' || rawLifecycle === 'Suspended') {
+        nextOverride = 'In Maintenance';
+      } else {
+        nextOverride = null;
+      }
+    }
+
+    const legacyStatusMetadata = hasMeta
+      ? d.legacyStatusMetadata
+      : {
+          originalHardwareLifecycle: rawLifecycle,
+          ...(rawLifecycle === 'Pending Hardware Review' ? { pendingHardwareReview: true } : {}),
+          migratedAt: '2026-11-22'
+        };
+
+    const candidate: DeviceRecord = {
+      ...d,
+      statusOverride: nextOverride,
+      legacyStatusMetadata
+    };
+    const effectiveStatus = deriveDeviceStatus(candidate, store);
+
+    return {
+      ...candidate,
+      hardwareLifecycle: effectiveStatus
+    };
+  });
+}
+
+export function getSensorMappingReferences(
+  sensorId: string,
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>,
+  nowMs: number = Date.now()
+): DeviceMappingReferenceSummary {
+  return getDeviceMappingReferences(sensorId, store, nowMs);
+}
+
+export type VehicleMappingState =
+  | 'Active Mapping'
+  | 'Scheduled'
+  | 'Historical/Ended'
+  | 'Unmapped';
+
+export interface VehicleMappingReferenceSummary {
+  allAllocations: ResourceAllocation[];
+  activeAllocations: ResourceAllocation[];
+  scheduledAllocations: ResourceAllocation[];
+  endedAllocations: ResourceAllocation[];
+  allRelationships: ResourceRelationship[];
+  activeRelationships: ResourceRelationship[];
+  scheduledRelationships: ResourceRelationship[];
+  endedRelationships: ResourceRelationship[];
+  activeOrScheduledConnectionIds: string[];
+  mappingState: VehicleMappingState;
+  hasAnyReference: boolean;
+  hasActiveOrScheduledReference: boolean;
+}
+
+export function getVehicleMappingReferences(
+  vehicle: { id: string; registration_number?: string; company?: string; client?: string },
+  store: Pick<ModalMasterStore, 'connections' | 'resourceAllocations' | 'resourceRelationships'> &
+    Partial<Pick<ModalMasterStore, 'hardwareBindings' | 'devices' | 'sensors' | 'sims'>>,
+  allVehicleIds?: Set<string>,
+  nowMs: number = Date.now()
+): VehicleMappingReferenceSummary {
+  const allocations = store.resourceAllocations || [];
+  const relationships = store.resourceRelationships || [];
+  const connections = store.connections || [];
+  const connById = new Map<string, ConnectionRecord>();
+  connections.forEach((c) => {
+    connById.set(c.id, c);
+    if (c.connectionId) connById.set(c.connectionId, c);
+  });
+
+  const vehPlate = (vehicle.registration_number || '').trim().toUpperCase();
+  const vehCompany = (vehicle.company || vehicle.client || '').trim().toLowerCase();
+
+  const matchesVehicleResource = (
+    resType: ResourceType,
+    resId: string,
+    resIdentifier?: string,
+    resCompanyName?: string
+  ): boolean => {
+    if (resType !== 'Vehicle') return false;
+    if (resId === vehicle.id) return true;
+    // Legacy seed alias reconciliation: e.g., seed RCA 'veh-mundra-1192' matching 'veh-mundra-01' same company + plate
+    if (
+      vehPlate &&
+      vehCompany &&
+      (!allVehicleIds || !allVehicleIds.has(resId)) &&
+      (resCompanyName || '').trim().toLowerCase() === vehCompany &&
+      (resIdentifier || '').trim().toUpperCase() === vehPlate
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const allAllocations = allocations.filter((a) =>
+    matchesVehicleResource(a.resourceType, a.resourceId, a.resourceIdentifier, a.companyName)
+  );
+
+  const activeAllocations: ResourceAllocation[] = [];
+  const scheduledAllocations: ResourceAllocation[] = [];
+  const endedAllocations: ResourceAllocation[] = [];
+
+  allAllocations.forEach((a) => {
+    const conn = connById.get(a.connectionId);
+    const effConnStatus = conn ? computeEffectiveConnectionStatus(conn, store, nowMs).status : undefined;
+    const computed = computeResourceAllocationStatus(a, allocations, nowMs, {
+      connections,
+      store: store as any
+    }).status;
+    if (computed === 'Ended' || conn?.status === 'Inactive' || effConnStatus === 'Inactive') {
+      endedAllocations.push(a);
+    } else if (
+      computed === 'Scheduled' ||
+      conn?.status === 'Draft' ||
+      effConnStatus === 'Scheduled' ||
+      effConnStatus === 'Draft'
+    ) {
+      scheduledAllocations.push(a);
+    } else if (computed === 'Active' || computed === 'Conflict') {
+      activeAllocations.push(a);
+    } else {
+      endedAllocations.push(a);
+    }
+  });
+
+  const allRelationships = relationships.filter(
+    (r) =>
+      matchesVehicleResource(
+        r.sourceResourceType,
+        r.sourceResourceId,
+        r.sourceResourceIdentifier,
+        r.companyName
+      ) ||
+      matchesVehicleResource(
+        r.targetResourceType,
+        r.targetResourceId,
+        r.targetResourceIdentifier,
+        r.companyName
+      )
+  );
+
+  const activeRelationships: ResourceRelationship[] = [];
+  const scheduledRelationships: ResourceRelationship[] = [];
+  const endedRelationships: ResourceRelationship[] = [];
+
+  allRelationships.forEach((r) => {
+    const computed = computeResourceRelationshipStatus(r, relationships, nowMs).status;
+    if (computed === 'Ended') {
+      endedRelationships.push(r);
+    } else if (computed === 'Scheduled') {
+      scheduledRelationships.push(r);
+    } else {
+      activeRelationships.push(r);
+    }
+  });
+
+  const activeOrScheduledConnectionIds = Array.from(
+    new Set(
+      [...activeAllocations, ...scheduledAllocations]
+        .map((a) => a.connectionId)
+        .filter(Boolean)
+    )
+  );
+
+  let mappingState: VehicleMappingState = 'Unmapped';
+  if (activeAllocations.length > 0) {
+    mappingState = 'Active Mapping';
+  } else if (scheduledAllocations.length > 0) {
+    mappingState = 'Scheduled';
+  } else if (allAllocations.length > 0) {
+    mappingState = 'Historical/Ended';
+  }
+
+  return {
+    allAllocations,
+    activeAllocations,
+    scheduledAllocations,
+    endedAllocations,
+    allRelationships,
+    activeRelationships,
+    scheduledRelationships,
+    endedRelationships,
+    activeOrScheduledConnectionIds,
+    mappingState,
+    hasAnyReference: allAllocations.length > 0 || allRelationships.length > 0,
+    hasActiveOrScheduledReference:
+      activeAllocations.length > 0 ||
+      scheduledAllocations.length > 0 ||
+      activeRelationships.length > 0 ||
+      scheduledRelationships.length > 0
+  };
+}
+
+export type DriverMappingBadge = 'Mapped' | 'Unmapped' | 'Expired';
+
+export interface DriverMappingReferenceSummary {
+  allAllocations: ResourceAllocation[];
+  activeAllocations: ResourceAllocation[];
+  scheduledAllocations: ResourceAllocation[];
+  endedAllocations: ResourceAllocation[];
+  allRelationships: ResourceRelationship[];
+  activeRelationships: ResourceRelationship[];
+  scheduledRelationships: ResourceRelationship[];
+  endedRelationships: ResourceRelationship[];
+  activeConnectionIds: string[];
+  activeOrScheduledConnectionIds: string[];
+  activeVehicleRegs: string[];
+  allReferencedVehicleRegs: string[];
+  mapping: DriverMappingBadge;
+  hasAnyReference: boolean;
+  hasActiveOrScheduledReference: boolean;
+}
+
+const LEGACY_DRIVER_SEED_ALIAS: Record<string, string> = {
+  'drv-1': 'drv-001',
+  'drv-2': 'drv-002'
+};
+
+function normalizeDriverPhoneTail10(raw?: string): string {
+  const digits = (raw || '').replace(/\D/g, '');
+  if (digits.length < 10) return '';
+  return digits.slice(-10);
+}
+
+export function getDriverMappingReferences(
+  driver: { id: string; phone?: string; company?: string },
+  store: Pick<ModalMasterStore, 'connections' | 'resourceAllocations' | 'resourceRelationships'> &
+    Partial<Pick<ModalMasterStore, 'hardwareBindings' | 'devices' | 'sensors' | 'sims'>>,
+  allDriverIds?: Set<string>,
+  nowMs: number = Date.now()
+): DriverMappingReferenceSummary {
+  const allocations = store.resourceAllocations || [];
+  const relationships = store.resourceRelationships || [];
+  const connections = store.connections || [];
+
+  const connById = new Map<string, ConnectionRecord>();
+  connections.forEach((c) => {
+    connById.set(c.id, c);
+    if (c.connectionId) connById.set(c.connectionId, c);
+  });
+
+  const drvPhone10 = normalizeDriverPhoneTail10(driver.phone);
+  const drvCompany = (driver.company || '').trim().toLowerCase();
+
+  const matchesDriverResource = (
+    resType: ResourceType,
+    resId: string,
+    resIdentifier?: string,
+    resCompanyName?: string
+  ): boolean => {
+    if (resType !== 'Driver') return false;
+    if (resId === driver.id) return true;
+    const mappedLegacyId = LEGACY_DRIVER_SEED_ALIAS[resId];
+    if (mappedLegacyId && mappedLegacyId === driver.id) return true;
+    // Match by same-company 10-digit mobile ONLY when resId isn't a synthetic drv-seed row or another known driver ID
+    if (
+      drvPhone10 &&
+      drvCompany &&
+      !resId.startsWith('drv-seed-') &&
+      (!allDriverIds || !allDriverIds.has(resId)) &&
+      (resCompanyName || '').trim().toLowerCase() === drvCompany &&
+      normalizeDriverPhoneTail10(resIdentifier) === drvPhone10
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const allAllocations = allocations.filter((a) =>
+    matchesDriverResource(a.resourceType, a.resourceId, a.resourceIdentifier, a.companyName)
+  );
+
+  const activeAllocations: ResourceAllocation[] = [];
+  const scheduledAllocations: ResourceAllocation[] = [];
+  const endedAllocations: ResourceAllocation[] = [];
+
+  allAllocations.forEach((a) => {
+    const conn = connById.get(a.connectionId);
+    const effConnStatus = conn ? computeEffectiveConnectionStatus(conn, store, nowMs).status : undefined;
+    const computed = computeResourceAllocationStatus(a, allocations, nowMs, {
+      connections,
+      store: store as any
+    }).status;
+    if (computed === 'Ended' || conn?.status === 'Inactive' || effConnStatus === 'Inactive') {
+      endedAllocations.push(a);
+    } else if (
+      computed === 'Scheduled' ||
+      conn?.status === 'Draft' ||
+      effConnStatus === 'Scheduled' ||
+      effConnStatus === 'Draft'
+    ) {
+      scheduledAllocations.push(a);
+    } else if (computed === 'Active' || computed === 'Conflict') {
+      activeAllocations.push(a);
+    } else {
+      endedAllocations.push(a);
+    }
+  });
+
+  const allRelationships = relationships.filter(
+    (r) =>
+      matchesDriverResource(
+        r.sourceResourceType,
+        r.sourceResourceId,
+        r.sourceResourceIdentifier,
+        r.companyName
+      ) ||
+      matchesDriverResource(
+        r.targetResourceType,
+        r.targetResourceId,
+        r.targetResourceIdentifier,
+        r.companyName
+      )
+  );
+
+  const activeRelationships: ResourceRelationship[] = [];
+  const scheduledRelationships: ResourceRelationship[] = [];
+  const endedRelationships: ResourceRelationship[] = [];
+
+  allRelationships.forEach((r) => {
+    const computed = computeResourceRelationshipStatus(r, relationships, nowMs).status;
+    if (computed === 'Ended') {
+      endedRelationships.push(r);
+    } else if (computed === 'Scheduled') {
+      scheduledRelationships.push(r);
+    } else {
+      activeRelationships.push(r);
+    }
+  });
+
+  const activeRegSet = new Set<string>();
+  const allRegSet = new Set<string>();
+
+  const collectVehicleRegsForAllocation = (alloc: ResourceAllocation, isActive: boolean) => {
+    if (!alloc.connectionId) return;
+    allocations.forEach((candidate) => {
+      if (candidate.resourceType !== 'Vehicle' || candidate.connectionId !== alloc.connectionId) return;
+      const plate = (candidate.resourceIdentifier || '').trim().toUpperCase();
+      if (!plate) return;
+      const candStatus = computeResourceAllocationStatus(candidate, allocations, nowMs, {
+        connections,
+        store: store as any
+      }).status;
+      if (isActive && (candStatus === 'Active' || candStatus === 'Conflict')) {
+        activeRegSet.add(plate);
+      }
+      allRegSet.add(plate);
+    });
+  };
+
+  activeAllocations.forEach((a) => collectVehicleRegsForAllocation(a, true));
+  scheduledAllocations.forEach((a) => collectVehicleRegsForAllocation(a, false));
+  endedAllocations.forEach((a) => collectVehicleRegsForAllocation(a, false));
+
+  const collectVehicleRegsForRel = (rel: ResourceRelationship, isActive: boolean) => {
+    if (rel.sourceResourceType === 'Vehicle' && rel.sourceResourceIdentifier) {
+      const plate = rel.sourceResourceIdentifier.trim().toUpperCase();
+      if (isActive) activeRegSet.add(plate);
+      allRegSet.add(plate);
+    }
+    if (rel.targetResourceType === 'Vehicle' && rel.targetResourceIdentifier) {
+      const plate = rel.targetResourceIdentifier.trim().toUpperCase();
+      if (isActive) activeRegSet.add(plate);
+      allRegSet.add(plate);
+    }
+  };
+
+  activeRelationships.forEach((r) => collectVehicleRegsForRel(r, true));
+  scheduledRelationships.forEach((r) => collectVehicleRegsForRel(r, false));
+  endedRelationships.forEach((r) => collectVehicleRegsForRel(r, false));
+
+  const activeConnectionIds = Array.from(
+    new Set(activeAllocations.map((a) => a.connectionId).filter(Boolean))
+  );
+  const activeOrScheduledConnectionIds = Array.from(
+    new Set([...activeAllocations, ...scheduledAllocations].map((a) => a.connectionId).filter(Boolean))
+  );
+
+  let mapping: DriverMappingBadge = 'Unmapped';
+  if (activeAllocations.length > 0 || activeRelationships.length > 0) {
+    mapping = 'Mapped';
+  } else if (scheduledAllocations.length > 0 || scheduledRelationships.length > 0) {
+    mapping = 'Unmapped';
+  } else if (endedAllocations.length > 0 || endedRelationships.length > 0) {
+    mapping = 'Expired';
+  }
+
+  return {
+    allAllocations,
+    activeAllocations,
+    scheduledAllocations,
+    endedAllocations,
+    allRelationships,
+    activeRelationships,
+    scheduledRelationships,
+    endedRelationships,
+    activeConnectionIds,
+    activeOrScheduledConnectionIds,
+    activeVehicleRegs: Array.from(activeRegSet),
+    allReferencedVehicleRegs: Array.from(allRegSet),
+    mapping,
+    hasAnyReference: allAllocations.length > 0 || allRelationships.length > 0,
+    hasActiveOrScheduledReference:
+      activeAllocations.length > 0 ||
+      scheduledAllocations.length > 0 ||
+      activeRelationships.length > 0 ||
+      scheduledRelationships.length > 0
+  };
+}
+
+
+export function deriveSensorStatus(
+  sensor: SensorRecord,
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>,
+  nowMs: number = Date.now()
+): EffectiveSensorStatus {
+  // 1. Explicit administrative overrides (Decommissioned > In Maintenance)
+  if (sensor.statusOverride === 'Decommissioned') return 'Decommissioned';
+  if (sensor.statusOverride === undefined && sensor.hardwareLifecycle === 'Decommissioned') {
+    return 'Decommissioned';
+  }
+
+  if (sensor.statusOverride === 'In Maintenance') return 'In Maintenance';
+  if (
+    sensor.statusOverride === undefined &&
+    (sensor.hardwareLifecycle === 'In Maintenance' || sensor.hardwareLifecycle === 'Suspended')
+  ) {
+    return 'In Maintenance';
+  }
+
+  // 2. Mapping-derived Active check: Effective Active connection + currently effective binding or standalone allocation (SIM not required)
+  const connections = store.connections || [];
+  const bindings = store.hardwareBindings || [];
+  const allocations = store.resourceAllocations || [];
+
+  for (const conn of connections) {
+    if (conn.status === 'Draft' || conn.status === 'Inactive') continue;
+    const isMember =
+      conn.memberIds?.includes(sensor.id) ||
+      conn.members?.some((m) => m.hardwareId === sensor.id) ||
+      conn.hardwareId === sensor.id ||
+      conn.parentId === sensor.id;
+    if (!isMember) continue;
+
+    const effConnStatus = computeEffectiveConnectionStatus(conn, store, nowMs).status;
+    if (effConnStatus !== 'Active') continue;
+
+    const connSensorBindings = bindings.filter(
+      (b) =>
+        b.connectionId === conn.id &&
+        (b.fromHardwareId === sensor.id || b.toHardwareId === sensor.id)
+    );
+    const hasEffectiveBinding = connSensorBindings.some(
+      (b) => computeHardwareBindingStatus(b, bindings, conn.members || [], nowMs).status === 'Active'
+    );
+    if (hasEffectiveBinding) return 'Active';
+
+    const hasEffectiveAllocation = allocations.some((a) => {
+      if (a.connectionId !== conn.id) return false;
+      if (a.hardwareId === sensor.id) {
+        return (
+          computeResourceAllocationStatus(a, allocations, nowMs, {
+            connections,
+            store: store as any
+          }).status === 'Active'
+        );
+      }
+      // Standalone/direct-reporting sensor covered by whole-connection allocation when not governed by an ended/scheduled parent binding
+      if (a.hardwareId == null && connSensorBindings.length === 0) {
+        return (
+          computeResourceAllocationStatus(a, allocations, nowMs, {
+            connections,
+            store: store as any
+          }).status === 'Active'
+        );
+      }
+      return false;
+    });
+    if (hasEffectiveAllocation) return 'Active';
+  }
+
+  return 'Inventory';
+}
+
+export function deriveSensorMappingFilterStatus(
+  sensorId: string,
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>,
+  nowMs: number = Date.now()
+): SensorMappingFilterStatus {
+  const connections = store.connections || [];
+  const bindings = store.hardwareBindings || [];
+  const allocations = store.resourceAllocations || [];
+
+  let hasActive = false;
+  let hasScheduled = false;
+
+  for (const conn of connections) {
+    if (conn.status === 'Draft' || conn.status === 'Inactive') continue;
+    const isMember =
+      conn.memberIds?.includes(sensorId) ||
+      conn.members?.some((m) => m.hardwareId === sensorId) ||
+      conn.hardwareId === sensorId ||
+      conn.parentId === sensorId;
+    if (!isMember) continue;
+
+    const effConnStatus = computeEffectiveConnectionStatus(conn, store, nowMs).status;
+    const connSensorBindings = bindings.filter(
+      (b) =>
+        b.connectionId === conn.id &&
+        (b.fromHardwareId === sensorId || b.toHardwareId === sensorId)
+    );
+
+    if (effConnStatus === 'Active') {
+      const hasEffectiveBinding = connSensorBindings.some(
+        (b) => computeHardwareBindingStatus(b, bindings, conn.members || [], nowMs).status === 'Active'
+      );
+      const hasEffectiveAllocation = allocations.some((a) => {
+        if (a.connectionId !== conn.id) return false;
+        if (a.hardwareId === sensorId) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Active'
+          );
+        }
+        if (a.hardwareId == null && connSensorBindings.length === 0) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Active'
+          );
+        }
+        return false;
+      });
+      if (hasEffectiveBinding || hasEffectiveAllocation) {
+        hasActive = true;
+        break;
+      }
+    }
+
+    if (effConnStatus === 'Active' || effConnStatus === 'Scheduled') {
+      const hasScheduledBinding = connSensorBindings.some(
+        (b) =>
+          computeHardwareBindingStatus(b, bindings, conn.members || [], nowMs).status === 'Scheduled'
+      );
+      const hasScheduledAllocation = allocations.some((a) => {
+        if (a.connectionId !== conn.id) return false;
+        if (a.hardwareId === sensorId) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Scheduled'
+          );
+        }
+        if (a.hardwareId == null && connSensorBindings.length === 0) {
+          return (
+            computeResourceAllocationStatus(a, allocations, nowMs, {
+              connections,
+              store: store as any
+            }).status === 'Scheduled'
+          );
+        }
+        return false;
+      });
+      if (hasScheduledBinding || hasScheduledAllocation) {
+        hasScheduled = true;
+      }
+    }
+  }
+
+  if (hasActive) return 'Active Mapping';
+  if (hasScheduled) return 'Scheduled';
+
+  const refs = getSensorMappingReferences(sensorId, store, nowMs);
+  if (refs.hasAnyReference) return 'Historical/Ended';
+
+  return 'Unmapped';
+}
+
+function migrateSensorRecords(
+  sensors: SensorRecord[],
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'resourceAllocations'> &
+    Partial<Pick<ModalMasterStore, 'devices' | 'sensors' | 'sims'>>
+): SensorRecord[] {
+  return sensors.map((s) => {
+    const rawLifecycle = s.hardwareLifecycle;
+    const hasMeta = Boolean(s.legacyStatusMetadata);
+
+    let nextOverride = s.statusOverride;
+    if (nextOverride === undefined) {
+      if (rawLifecycle === 'Decommissioned') nextOverride = 'Decommissioned';
+      else if (rawLifecycle === 'In Maintenance' || rawLifecycle === 'Suspended') {
+        nextOverride = 'In Maintenance';
+      } else {
+        nextOverride = null;
+      }
+    }
+
+    const legacyStatusMetadata = hasMeta
+      ? s.legacyStatusMetadata
+      : {
+          originalHardwareLifecycle: rawLifecycle,
+          ...(rawLifecycle === 'Pending Hardware Review' ? { pendingHardwareReview: true } : {}),
+          migratedAt: '2026-11-22'
+        };
+
+    const candidate: SensorRecord = {
+      ...s,
+      statusOverride: nextOverride,
+      legacyStatusMetadata
+    };
+    const effectiveStatus = deriveSensorStatus(candidate, store);
+
+    return {
+      ...candidate,
+      hardwareLifecycle: effectiveStatus
+    };
+  });
+}
+
+export interface SimMappingReferenceSummary {
+  allConnections: ConnectionRecord[];
+  allBindings: HardwareBinding[];
+  allSimAssignments: SimAssignmentEvent[];
+  activeOrScheduledConnections: ConnectionRecord[];
+  hasAnyReference: boolean;
+  hasActiveOrScheduledReference: boolean;
+}
+
+export interface SimComputedAssignment {
+  assignmentStatus: SimMappingAssignmentStatus;
+  assignedHardwareId: string;
+  assignedHardwareName: string;
+  assignedConnectionId: string;
+  linkedHardwareNames: string[];
+  linkedConnectionIds: string[];
+}
+
+export function getSimMappingReferences(
+  simId: string,
+  store: Pick<ModalMasterStore, 'connections' | 'hardwareBindings' | 'simAssignments'> &
+    Partial<Pick<ModalMasterStore, 'resourceAllocations' | 'devices' | 'sensors' | 'sims'>>,
+  nowMs: number = Date.now()
+): SimMappingReferenceSummary {
+  const connections = store.connections || [];
+  const bindings = store.hardwareBindings || [];
+  const simAssignments = store.simAssignments || [];
+
+  const seenConnIds = new Set<string>();
+  const allConnections: ConnectionRecord[] = [];
+  connections.forEach((c) => {
+    const isDirect =
+      c.memberIds?.includes(simId) ||
+      c.members?.some((m) => m.hardwareId === simId) ||
+      c.simId === simId;
+    if (isDirect) {
+      seenConnIds.add(c.id);
+      allConnections.push(c);
+    }
+  });
+
+  const allBindings = bindings.filter(
+    (b) => b.toHardwareId === simId || b.fromHardwareId === simId
+  );
+  allBindings.forEach((b) => {
+    if (!seenConnIds.has(b.connectionId)) {
+      const conn = connections.find((c) => c.id === b.connectionId);
+      if (conn) {
+        seenConnIds.add(conn.id);
+        allConnections.push(conn);
+      }
+    }
+  });
+
+  const allSimAssignments = simAssignments.filter((sa) => sa.simId === simId);
+  allSimAssignments.forEach((sa) => {
+    if (!seenConnIds.has(sa.connectionId)) {
+      const conn = connections.find(
+        (c) => c.id === sa.connectionId || c.connectionId === sa.connectionId
+      );
+      if (conn) {
+        seenConnIds.add(conn.id);
+        allConnections.push(conn);
+      }
+    }
+  });
+
+  const activeOrScheduledConnections = allConnections.filter((c) => {
+    const effStatus = computeEffectiveConnectionStatus(c, store, nowMs).status;
+    if (effStatus !== 'Active' && effStatus !== 'Scheduled' && effStatus !== 'Needs Attention') {
+      return false;
+    }
+    const connBindings = allBindings.filter((b) => b.connectionId === c.id);
+    if (connBindings.length > 0) {
+      return connBindings.some((b) => {
+        const st = computeHardwareBindingStatus(b, bindings, c.members || [], nowMs).status;
+        return st === 'Active' || st === 'Scheduled' || st === 'Conflict';
+      });
+    }
+    return false;
+  });
+
+  return {
+    allConnections,
+    allBindings,
+    allSimAssignments,
+    activeOrScheduledConnections,
+    hasAnyReference:
+      allConnections.length > 0 ||
+      allBindings.length > 0 ||
+      allSimAssignments.length > 0,
+    hasActiveOrScheduledReference: activeOrScheduledConnections.length > 0
+  };
+}
+
+export function resolveSimComputedAssignment(
+  simId: string,
+  store: Pick<
+    ModalMasterStore,
+    'connections' | 'hardwareBindings' | 'devices' | 'sensors' | 'simAssignments'
+  > &
+    Partial<Pick<ModalMasterStore, 'resourceAllocations' | 'sims'>>,
+  nowMs: number = Date.now()
+): SimComputedAssignment {
+  const connections = store.connections || [];
+  const bindings = store.hardwareBindings || [];
+  const devices = store.devices || [];
+  const sensors = store.sensors || [];
+  const simAssignments = store.simAssignments || [];
+
+  const refs = getSimMappingReferences(simId, store, nowMs);
+
+  const resolvePeerLabel = (peerId: string, conn?: ConnectionRecord): string => {
+    const dev = devices.find((d) => d.id === peerId);
+    if (dev) return `${dev.deviceId} · ${dev.name}`;
+    const sen = sensors.find((s) => s.id === peerId);
+    if (sen) return `${sen.deviceId} · ${sen.name}`;
+    const mem = conn?.members?.find((m) => m.hardwareId === peerId);
+    if (mem) return `${mem.identifierValue} · ${mem.modelLabel}`;
+    return peerId;
+  };
+
+  const linkedHardwareSet = new Set<string>();
+  const linkedConnSet = new Set<string>();
+  refs.allConnections.forEach((c) => {
+    if (c.connectionId || c.id) linkedConnSet.add(c.connectionId || c.id);
+  });
+  refs.allSimAssignments.forEach((sa) => {
+    if (sa.connectionId) linkedConnSet.add(sa.connectionId);
+    if (sa.hardwareName) linkedHardwareSet.add(sa.hardwareName);
+  });
+
+  const activeEntries: { hardwareId: string; hardwareName: string; connectionId: string }[] = [];
+  const scheduledEntries: { hardwareId: string; hardwareName: string; connectionId: string }[] = [];
+  const conflictEntries: { hardwareId: string; hardwareName: string; connectionId: string }[] = [];
+
+  refs.allBindings.forEach((b) => {
+    const conn = connections.find((c) => c.id === b.connectionId);
+    if (conn?.status === 'Draft' || conn?.status === 'Inactive') return;
+    const effConnStatus = conn
+      ? computeEffectiveConnectionStatus(conn, store, nowMs).status
+      : undefined;
+    if (effConnStatus === 'Draft' || effConnStatus === 'Inactive') return;
+
+    const peerId = b.fromHardwareId === simId ? b.toHardwareId : b.fromHardwareId;
+    const peerLabel = resolvePeerLabel(peerId, conn);
+    linkedHardwareSet.add(peerLabel);
+    const connLabel = conn?.connectionId || conn?.id || b.connectionId;
+    if (connLabel) linkedConnSet.add(connLabel);
+
+    const bindingStatus = computeHardwareBindingStatus(
+      b,
+      bindings,
+      conn?.members || [],
+      nowMs
+    ).status;
+
+    if (bindingStatus === 'Conflict') {
+      conflictEntries.push({
+        hardwareId: peerId,
+        hardwareName: peerLabel,
+        connectionId: connLabel
+      });
+      return;
+    }
+
+    if (effConnStatus === 'Needs Attention' && !b.endedAt && b.statusOverride !== 'Canceled') {
+      conflictEntries.push({
+        hardwareId: peerId,
+        hardwareName: peerLabel,
+        connectionId: connLabel
+      });
+      return;
+    }
+
+    if (effConnStatus === 'Active' && bindingStatus === 'Active') {
+      activeEntries.push({
+        hardwareId: peerId,
+        hardwareName: peerLabel,
+        connectionId: connLabel
+      });
+      return;
+    }
+
+    if ((effConnStatus === 'Active' || effConnStatus === 'Scheduled') && bindingStatus === 'Scheduled') {
+      scheduledEntries.push({
+        hardwareId: peerId,
+        hardwareName: peerLabel,
+        connectionId: connLabel
+      });
+    }
+  });
+
+  // Reconcile connections mentioning this SIM without explicit HardwareBinding rows
+  const todayStr = new Date(nowMs).toISOString().slice(0, 10);
+  refs.allConnections.forEach((conn) => {
+    const hasConnBindings = refs.allBindings.some((b) => b.connectionId === conn.id);
+    if (hasConnBindings) return;
+    if (conn.status === 'Draft' || conn.status === 'Inactive') return;
+    if (conn.status === 'Needs Attention') {
+      conflictEntries.push({
+        hardwareId: conn.hardwareId || '',
+        hardwareName: conn.hardwareId ? resolvePeerLabel(conn.hardwareId, conn) : conn.name,
+        connectionId: conn.connectionId || conn.id
+      });
+    } else if (conn.status === 'Scheduled') {
+      scheduledEntries.push({
+        hardwareId: conn.hardwareId || '',
+        hardwareName: conn.hardwareId ? resolvePeerLabel(conn.hardwareId, conn) : conn.name,
+        connectionId: conn.connectionId || conn.id
+      });
+    }
+  });
+
+  // Reconcile legacy simAssignments ONLY if no authoritative connection binding covers that connection
+  refs.allSimAssignments.forEach((sa) => {
+    const matchingConn = connections.find(
+      (c) => c.id === sa.connectionId || c.connectionId === sa.connectionId
+    );
+    if (matchingConn) {
+      const hasAuthBindings = refs.allBindings.some((b) => b.connectionId === matchingConn.id);
+      if (hasAuthBindings) return;
+      const effStatus = computeEffectiveConnectionStatus(matchingConn, store, nowMs).status;
+      if (effStatus !== 'Active' && effStatus !== 'Scheduled') return;
+      const startOk = !sa.start || sa.start <= todayStr;
+      const endOk = !sa.end || sa.end >= todayStr;
+      if (effStatus === 'Active' && startOk && endOk) {
+        if (!activeEntries.some((a) => a.connectionId === (matchingConn.connectionId || matchingConn.id))) {
+          activeEntries.push({
+            hardwareId: sa.hardwareId,
+            hardwareName: sa.hardwareName || resolvePeerLabel(sa.hardwareId, matchingConn),
+            connectionId: matchingConn.connectionId || matchingConn.id
+          });
+        }
+      } else if (sa.start && sa.start > todayStr) {
+        scheduledEntries.push({
+          hardwareId: sa.hardwareId,
+          hardwareName: sa.hardwareName || resolvePeerLabel(sa.hardwareId, matchingConn),
+          connectionId: matchingConn.connectionId || matchingConn.id
+        });
+      }
+      return;
+    }
+
+    // Pure legacy orphan event without connection record
+    const startOk = !sa.start || sa.start <= todayStr;
+    const endOk = !sa.end || sa.end >= todayStr;
+    if (startOk && endOk) {
+      activeEntries.push({
+        hardwareId: sa.hardwareId,
+        hardwareName: sa.hardwareName || sa.hardwareId,
+        connectionId: sa.connectionId
+      });
+    } else if (sa.start && sa.start > todayStr && (!sa.end || sa.end >= sa.start)) {
+      scheduledEntries.push({
+        hardwareId: sa.hardwareId,
+        hardwareName: sa.hardwareName || sa.hardwareId,
+        connectionId: sa.connectionId
+      });
+    }
+  });
+
+  if (conflictEntries.length > 0 || activeEntries.length > 1) {
+    const allConflicted = [...conflictEntries, ...activeEntries];
+    const uniqueConns = Array.from(new Set(allConflicted.map((e) => e.connectionId).filter(Boolean)));
+    const firstHw = allConflicted[0]?.hardwareName || 'Conflict';
+    return {
+      assignmentStatus: 'Conflict / Needs Attention',
+      assignedHardwareId: allConflicted[0]?.hardwareId || '',
+      assignedHardwareName:
+        activeEntries.length > 1 ? `Conflict (${activeEntries.length} bindings) · ${firstHw}` : firstHw,
+      assignedConnectionId: uniqueConns.join(', ') || '—',
+      linkedHardwareNames: Array.from(linkedHardwareSet),
+      linkedConnectionIds: Array.from(linkedConnSet)
+    };
+  }
+
+  if (activeEntries.length === 1) {
+    return {
+      assignmentStatus: 'Active Mapping',
+      assignedHardwareId: activeEntries[0].hardwareId,
+      assignedHardwareName: activeEntries[0].hardwareName,
+      assignedConnectionId: activeEntries[0].connectionId,
+      linkedHardwareNames: Array.from(linkedHardwareSet),
+      linkedConnectionIds: Array.from(linkedConnSet)
+    };
+  }
+
+  if (scheduledEntries.length > 0) {
+    return {
+      assignmentStatus: 'Scheduled',
+      assignedHardwareId: '',
+      assignedHardwareName: 'Unassigned',
+      assignedConnectionId: '—',
+      linkedHardwareNames: Array.from(linkedHardwareSet),
+      linkedConnectionIds: Array.from(linkedConnSet)
+    };
+  }
+
+  if (refs.hasAnyReference) {
+    return {
+      assignmentStatus: 'Historical/Ended',
+      assignedHardwareId: '',
+      assignedHardwareName: 'Unassigned',
+      assignedConnectionId: '—',
+      linkedHardwareNames: Array.from(linkedHardwareSet),
+      linkedConnectionIds: Array.from(linkedConnSet)
+    };
+  }
+
+  return {
+    assignmentStatus: 'Unassigned',
+    assignedHardwareId: '',
+    assignedHardwareName: 'Unassigned',
+    assignedConnectionId: '—',
+    linkedHardwareNames: Array.from(linkedHardwareSet),
+    linkedConnectionIds: Array.from(linkedConnSet)
+  };
+}
+
+export function deriveSimEffectiveInventoryStatus(
+  sim: SimRecord,
+  store: Pick<
+    ModalMasterStore,
+    'connections' | 'hardwareBindings' | 'devices' | 'sensors' | 'simAssignments'
+  >,
+  nowMs: number = Date.now(),
+  precomputedAssignment?: SimComputedAssignment
+): EffectiveSimInventoryStatus {
+  if (sim.status === 'Retired') return 'Retired';
+  if (sim.status === 'Suspended' || sim.status === 'Inactive') return 'Suspended';
+
+  if (sim.status === 'Active') {
+    const assignment =
+      precomputedAssignment || resolveSimComputedAssignment(sim.id, store, nowMs);
+    if (assignment.assignmentStatus === 'Active Mapping') {
+      return 'Active';
+    }
+  }
+
+  return 'Inventory';
+}
+
+export function deriveSimMappingStatus(
+  simId: string,
+  store: Pick<
+    ModalMasterStore,
+    'connections' | 'hardwareBindings' | 'devices' | 'sensors' | 'simAssignments'
+  >,
+  nowMs: number = Date.now()
+): SimMappingAssignmentStatus {
+  return resolveSimComputedAssignment(simId, store, nowMs).assignmentStatus;
 }
 
 export function computeBindingStatus(
@@ -3913,8 +5529,12 @@ const SAVED_VIEWS_KEY = 'fleetrobo_modal_saved_views_v5';
 
 export type ModalMasterStore = ReturnType<typeof generateModalMasterSeedData>;
 
-function ensureUniqueEntityIds<T extends { id: string }>(items: T[], prefix: string): T[] {
+function ensureUniqueEntityIdsWithMap<T extends { id: string }>(
+  items: T[],
+  prefix: string
+): { items: T[]; remappedIds: Map<string, string> } {
   const seen = new Set<string>();
+  const remappedIds = new Map<string, string>();
   let maxNum = 3000;
   for (const item of items) {
     const m = /^([A-Z]+)-(\d+)$/.exec(item.id || '');
@@ -3923,7 +5543,7 @@ function ensureUniqueEntityIds<T extends { id: string }>(items: T[], prefix: str
       if (!Number.isNaN(n) && n > maxNum) maxNum = n;
     }
   }
-  return items.map((item) => {
+  const normalized = items.map((item) => {
     const rawId = item.id || `${prefix}-${++maxNum}`;
     if (!seen.has(rawId)) {
       seen.add(rawId);
@@ -3934,8 +5554,12 @@ function ensureUniqueEntityIds<T extends { id: string }>(items: T[], prefix: str
       candidate = `${prefix}-${++maxNum}`;
     }
     seen.add(candidate);
+    if (item.id && !remappedIds.has(item.id)) {
+      remappedIds.set(item.id, candidate);
+    }
     return { ...item, id: candidate };
   });
+  return { items: normalized, remappedIds };
 }
 
 export function getNextResourceAllocationId(
@@ -3953,6 +5577,21 @@ export function getNextResourceAllocationId(
   return `RCA-${maxNum + 1 + offset}`;
 }
 
+export function getNextResourceRelationshipId(
+  existing: ResourceRelationship[],
+  offset = 0
+): string {
+  let maxNum = 4004;
+  for (const rel of existing) {
+    const m = /^REL-(\d+)$/.exec(rel.id || '');
+    if (m) {
+      const n = Number(m[1]);
+      if (!Number.isNaN(n) && n > maxNum) maxNum = n;
+    }
+  }
+  return `REL-${maxNum + 1 + offset}`;
+}
+
 export function loadModalMasterStore(): ModalMasterStore {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -3967,30 +5606,100 @@ export function loadModalMasterStore(): ModalMasterStore {
         Array.isArray(parsed.hardwareBindings) &&
         Array.isArray(parsed.resourceAllocations)
       ) {
-        return {
+        const devNorm = ensureUniqueEntityIdsWithMap<DeviceRecord>(parsed.devices, 'DEV');
+        const senNorm = ensureUniqueEntityIdsWithMap<SensorRecord>(parsed.sensors, 'SEN');
+        const simNorm = ensureUniqueEntityIdsWithMap<SimRecord>(parsed.sims, 'SIM');
+        const conNorm = ensureUniqueEntityIdsWithMap<ConnectionRecord>(parsed.connections, 'CON');
+        const bndNorm = ensureUniqueEntityIdsWithMap<HardwareBinding>(parsed.hardwareBindings, 'BND');
+        const rcaNorm = ensureUniqueEntityIdsWithMap<ResourceAllocation>(parsed.resourceAllocations, 'RCA');
+        const relNorm = Array.isArray(parsed.resourceRelationships)
+          ? ensureUniqueEntityIdsWithMap<ResourceRelationship>(parsed.resourceRelationships, 'REL')
+          : { items: generateDefaultResourceRelationships(), remappedIds: new Map<string, string>() };
+
+        const remapHwId = (id?: string | null): string => {
+          if (!id) return '';
+          return (
+            devNorm.remappedIds.get(id) ||
+            senNorm.remappedIds.get(id) ||
+            simNorm.remappedIds.get(id) ||
+            id
+          );
+        };
+        const remapConnId = (id?: string): string => {
+          if (!id) return '';
+          return conNorm.remappedIds.get(id) || id;
+        };
+
+        const hasFkRemaps =
+          devNorm.remappedIds.size > 0 ||
+          senNorm.remappedIds.size > 0 ||
+          simNorm.remappedIds.size > 0 ||
+          conNorm.remappedIds.size > 0;
+
+        const reconciledConnections = hasFkRemaps
+          ? conNorm.items.map((c) => ({
+              ...c,
+              connectionId: c.connectionId === c.id ? c.id : remapConnId(c.connectionId) || c.id,
+              memberIds: (c.memberIds || []).map((mid) => remapHwId(mid)),
+              members: (c.members || []).map((m) => ({
+                ...m,
+                hardwareId: remapHwId(m.hardwareId)
+              })),
+              hardwareId: c.hardwareId ? remapHwId(c.hardwareId) : c.hardwareId,
+              parentId: c.parentId ? remapHwId(c.parentId) : c.parentId,
+              simId: c.simId ? remapHwId(c.simId) : c.simId
+            }))
+          : conNorm.items;
+
+        const reconciledBindings = hasFkRemaps
+          ? bndNorm.items.map((b) => ({
+              ...b,
+              connectionId: remapConnId(b.connectionId),
+              fromHardwareId: remapHwId(b.fromHardwareId),
+              toHardwareId: remapHwId(b.toHardwareId)
+            }))
+          : bndNorm.items;
+
+        const reconciledAllocations = hasFkRemaps
+          ? rcaNorm.items.map((a) => ({
+              ...a,
+              connectionId: remapConnId(a.connectionId),
+              hardwareId: a.hardwareId ? remapHwId(a.hardwareId) : a.hardwareId
+            }))
+          : rcaNorm.items;
+
+        const normalizedStore: ModalMasterStore = {
           ...parsed,
-          devices: ensureUniqueEntityIds(parsed.devices, 'DEV'),
-          sensors: ensureUniqueEntityIds(parsed.sensors, 'SEN'),
-          sims: ensureUniqueEntityIds(parsed.sims, 'SIM'),
-          connections: ensureUniqueEntityIds(parsed.connections, 'CON'),
-          hardwareBindings: ensureUniqueEntityIds(parsed.hardwareBindings, 'BND'),
-          resourceAllocations: ensureUniqueEntityIds(parsed.resourceAllocations, 'RCA'),
-          resourceRelationships: Array.isArray(parsed.resourceRelationships)
-            ? ensureUniqueEntityIds(parsed.resourceRelationships, 'REL')
-            : generateDefaultResourceRelationships()
-        } as ModalMasterStore;
+          devices: devNorm.items,
+          sensors: senNorm.items,
+          sims: simNorm.items,
+          connections: reconciledConnections,
+          hardwareBindings: reconciledBindings,
+          resourceAllocations: reconciledAllocations,
+          resourceRelationships: relNorm.items
+        };
+        return {
+          ...normalizedStore,
+          devices: migrateDeviceRecords(normalizedStore.devices, normalizedStore),
+          sensors: migrateSensorRecords(normalizedStore.sensors, normalizedStore)
+        };
       }
     }
   } catch {
     // ignore storage errors
   }
   const initial = generateModalMasterSeedData();
+  const migratedInitial: ModalMasterStore = {
+    ...initial,
+    devices: migrateDeviceRecords(initial.devices, initial),
+    sensors: migrateSensorRecords(initial.sensors, initial)
+  };
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(initial));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(migratedInitial));
   } catch {
     // ignore
   }
-  return initial;
+  return migratedInitial;
 }
 
 export function saveModalMasterStore(data: ModalMasterStore) {

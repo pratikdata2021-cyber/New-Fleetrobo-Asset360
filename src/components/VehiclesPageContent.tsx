@@ -31,9 +31,31 @@ import {
   CheckCircle2,
   Trash2
 } from 'lucide-react';
-import { Vehicle, loadVehicleMasterStore, saveVehicleMasterStore } from '../types/vehicle';
+import {
+  Vehicle,
+  loadVehicleMasterStore,
+  saveVehicleMasterStore,
+  resetVehicleMasterStore,
+  isVehicleAuthorizedForCompany,
+  syncVehicleOperationalActiveState
+} from '../types/vehicle';
+import {
+  evaluateVehicleFilters,
+  sanitizeVehicleFilters,
+  countActiveVehicleFilters,
+  getFilterDefinition,
+  formatVehicleFilterChip
+} from '../types/filters';
+import {
+  loadModalMasterStore,
+  getVehicleMappingReferences
+} from '../types/modalMaster';
 import { FilterDrawer } from './FilterDrawer';
-import { BulkOperationsDrawer, BulkActionType } from './BulkOperationsDrawer';
+import {
+  BulkOperationsDrawer,
+  BulkActionType,
+  evaluateVehicleBulkEligibility
+} from './BulkOperationsDrawer';
 import { ImportDrawer } from './ImportDrawer';
 import { ExportModal } from './ExportModal';
 import { VehicleDrawer } from './VehicleDrawer';
@@ -46,59 +68,127 @@ interface VehiclesPageContentProps {
   companyContext?: string;
 }
 
-const normalizeVehicle = (v: any, contextCompany?: string): Vehicle => ({
-  ...v,
-  machine_model: v.machine_model || v.model || 'Tata Signa 5530',
-  model: v.model || v.machine_model || 'Tata Signa 5530',
-  client: v.client || v.company || contextCompany || 'Adani Logistics',
-  chassis_number: v.chassis_number || v.vin || 'MA3FJEB1S00654321',
-  vin: v.vin || v.chassis_number || 'MA3FJEB1S00654321',
-  transporter: v.transporter || 'Western Logistics',
-  year: v.year || 2023,
-  fuel_type: v.fuel_type || 'Diesel',
-  insurance_to: v.insurance_to || v.documents?.insurance?.due_date || '2027-01-15',
-  insurance_from: v.insurance_from || '2024-01-15',
-  insurance_company: v.insurance_company || 'ICICI Lombard',
-  registration_date: v.registration_date || '2023-04-15',
-  engine_number: v.engine_number || 'ENG-TT-99401',
-  machine_owner: v.machine_owner || (v.client || v.company || 'Adani Logistics Services'),
-  overspeed_limit: v.overspeed_limit ?? 60,
-  fuel_theft_limit: v.fuel_theft_limit ?? 0,
-  fuel_refill: v.fuel_refill ?? 0,
-  fuel_calibration_type: v.fuel_calibration_type || 'Linear',
-  fuel_tank_capacity: v.fuel_tank_capacity || 360,
-  zone: v.zone || 'West Zone',
-  location: v.location || v.client_location || 'Mundra Terminal',
-  active_status: v.active_status !== undefined ? v.active_status : (v.status !== 'Inactive'),
-});
+const SAVED_VIEWS_STORAGE_KEY = 'fleetrobo_vehicle_saved_views_v1';
+
+interface SavedVehicleView {
+  id: string;
+  name: string;
+  filters: Record<string, any>;
+  mode: 'basic' | 'advanced';
+  sortKey: keyof Vehicle | '';
+  sortDir: 'asc' | 'desc';
+  layout: 'table' | 'cards';
+}
+
+const DEFAULT_SAVED_VIEWS: SavedVehicleView[] = [
+  {
+    id: 'sv-1',
+    name: 'Default Active Mundra Fleet',
+    filters: { fleets: ['Mundra Fleet'] },
+    mode: 'basic',
+    sortKey: 'registration_number',
+    sortDir: 'asc',
+    layout: 'table'
+  }
+];
+
+function loadSavedVehicleViews(): SavedVehicleView[] {
+  try {
+    const raw = localStorage.getItem(SAVED_VIEWS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return DEFAULT_SAVED_VIEWS;
+}
+
+const normalizeVehicle = (v: any): Vehicle => {
+  const status = (v.status || 'Available') as Vehicle['status'];
+  const machineModel = v.machine_model || v.model || '';
+  const model = v.model || v.machine_model || '';
+  const chassis = v.chassis_number || v.vin || '';
+  const vin = v.vin || v.chassis_number || '';
+  const insuranceTo = v.insurance_to || v.documents?.insurance?.due_date;
+  const location = v.location || v.client_location;
+
+  return {
+    ...v,
+    status,
+    machine_model: machineModel,
+    model,
+    chassis_number: chassis,
+    vin,
+    company: v.company || v.client || '',
+    client: v.client || '',
+    insurance_to: insuranceTo,
+    location,
+    fleets: Array.isArray(v.fleets) ? v.fleets : [],
+    skills: Array.isArray(v.skills) ? v.skills : [],
+    active_status: syncVehicleOperationalActiveState(status, v.active_status)
+  };
+};
 
 export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ companyContext }) => {
   // Master Vehicles State
   const [vehicles, setVehicles] = useState<Vehicle[]>(() =>
-    loadVehicleMasterStore().map((item) => normalizeVehicle(item, companyContext))
+    loadVehicleMasterStore().map((item) => normalizeVehicle(item))
   );
+
+  const [modalStoreTick, setModalStoreTick] = useState(0);
 
   useEffect(() => {
     const sync = () => {
-      setVehicles(loadVehicleMasterStore().map((item) => normalizeVehicle(item, companyContext)));
+      setVehicles(loadVehicleMasterStore().map((item) => normalizeVehicle(item)));
     };
+    const syncModal = () => setModalStoreTick((t) => t + 1);
     window.addEventListener('fleetrobo:resources-updated', sync);
+    window.addEventListener('fleetrobo:modal-store-updated', syncModal);
     window.addEventListener('storage', sync);
     return () => {
       window.removeEventListener('fleetrobo:resources-updated', sync);
+      window.removeEventListener('fleetrobo:modal-store-updated', syncModal);
       window.removeEventListener('storage', sync);
     };
-  }, [companyContext]);
+  }, []);
 
   const saveVehiclesState = (next: Vehicle[]) => {
-    setVehicles(next);
-    saveVehicleMasterStore(next);
+    const normalized = next.map((item) => normalizeVehicle(item));
+    setVehicles(normalized);
+    saveVehicleMasterStore(normalized);
   };
 
+  const allVehicleIds = useMemo(() => new Set(vehicles.map((v) => v.id)), [vehicles]);
+
   const [vehicleToDelete, setVehicleToDelete] = useState<Vehicle | null>(null);
+  const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
+
+  const deleteMappingRefs = useMemo(() => {
+    void modalStoreTick;
+    if (!vehicleToDelete) return null;
+    return getVehicleMappingReferences(vehicleToDelete, loadModalMasterStore(), allVehicleIds);
+  }, [vehicleToDelete, allVehicleIds, modalStoreTick]);
 
   const handleConfirmDeleteVehicle = () => {
     if (!vehicleToDelete) return;
+    const latestRefs = getVehicleMappingReferences(
+      vehicleToDelete,
+      loadModalMasterStore(),
+      allVehicleIds
+    );
+    if (latestRefs.hasAnyReference) {
+      showToast(
+        `Cannot delete "${vehicleToDelete.registration_number}": referenced by ${latestRefs.allAllocations.length} allocation(s) and ${latestRefs.allRelationships.length} relationship(s) in Asset Mapping.`,
+        'error'
+      );
+      setVehicleToDelete(null);
+      return;
+    }
+
     const idToDelete = vehicleToDelete.id;
     const nextVehicles = vehicles.filter((v) => v.id !== idToDelete);
     saveVehiclesState(nextVehicles);
@@ -124,7 +214,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<number>(10);
 
-  // Row Selection State (persists across pages)
+  // Row Selection State (persists across pages within active company scope)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Filter Drawer State
@@ -134,17 +224,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
 
   // Saved Views State
   const [showSavedViewsPopover, setShowSavedViewsPopover] = useState<boolean>(false);
-  const [savedViews, setSavedViews] = useState<{ id: string; name: string; filters: Record<string, any>; mode: 'basic' | 'advanced'; sortKey: keyof Vehicle | ''; sortDir: 'asc' | 'desc'; layout: 'table' | 'cards' }[]>([
-    {
-      id: 'sv-1',
-      name: 'Default Active Mundra Fleet',
-      filters: { fleets: ['Mundra Fleet'] },
-      mode: 'basic',
-      sortKey: 'registration_number',
-      sortDir: 'asc',
-      layout: 'table'
-    }
-  ]);
+  const [savedViews, setSavedViews] = useState<SavedVehicleView[]>(loadSavedVehicleViews);
   const [newViewName, setNewViewName] = useState<string>('');
   const [viewNameError, setViewNameError] = useState<string>('');
 
@@ -179,17 +259,46 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
   }>({ isOpen: false, vehicle: null, targetView: 'maintenance' });
 
   // Toast Feedback State
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
+  const [toastState, setToastState] = useState<{
+    message: string;
+    tone: 'success' | 'error';
+  } | null>(null);
+  const showToast = (message: string, tone: 'success' | 'error' = 'success') => {
+    setToastState({ message, tone });
+    setTimeout(() => setToastState(null), 4000);
   };
 
   const scopedVehicles = useMemo(() => {
-    if (!companyContext || companyContext === 'Platform Admin' || companyContext === 'Binary') return vehicles;
-    const target = companyContext.trim().toLowerCase();
-    return vehicles.filter((v) => (v.client || v.company || '').trim().toLowerCase() === target);
+    return vehicles.filter((v) => isVehicleAuthorizedForCompany(v, companyContext));
   }, [vehicles, companyContext]);
+
+  // Clear selection whenever companyContext changes to prevent cross-tenant selection leaks
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setCurrentPage(1);
+  }, [companyContext]);
+
+  // Prune selected IDs to only authorized vehicles in current scope
+  useEffect(() => {
+    const allowedIds = new Set(scopedVehicles.map((v) => v.id));
+    setSelectedIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (allowedIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [scopedVehicles]);
+
+  const authorizedSelectedVehicles = useMemo(
+    () => scopedVehicles.filter((v) => selectedIds.has(v.id)),
+    [scopedVehicles, selectedIds]
+  );
 
   // Status Tab counts calculation
   const statusCounts = useMemo(() => {
@@ -209,15 +318,22 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
     return counts;
   }, [scopedVehicles]);
 
-  // Filtering Logic (Basic AND / Advanced OR)
-  const filteredVehicles = useMemo(() => {
+  const sanitizedAppliedFilters = useMemo(
+    () => sanitizeVehicleFilters(appliedFilters),
+    [appliedFilters]
+  );
+  const activeFilterCount = useMemo(
+    () => countActiveVehicleFilters(sanitizedAppliedFilters),
+    [sanitizedAppliedFilters]
+  );
+
+  // Outer-constrained vehicles (Tenant scope + Quick status tab + Global search)
+  const baseMatchedVehicles = useMemo(() => {
     return scopedVehicles.filter((veh) => {
-      // 1. Status Quick Tab
       if (activeStatusTab !== 'All vehicles' && veh.status !== activeStatusTab) {
         return false;
       }
 
-      // 2. Global Vehicle Search (Registration No., Machine Model, Chassis No., Client, etc.)
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const searchCorpus = [
@@ -253,59 +369,17 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         }
       }
 
-      // 3. Sectional Filters (Basic = AND, Advanced = OR)
-      const filterKeys = Object.keys(appliedFilters);
-      if (filterKeys.length === 0) return true;
-
-      const matchesCondition = (key: string): boolean => {
-        const target = appliedFilters[key];
-        let val: any = (veh as any)[key];
-        if ((key === 'model' || key === 'machine_model') && !val) {
-          val = veh.machine_model || veh.model;
-        }
-        if ((key === 'chassis_number' || key === 'vin') && !val) {
-          val = veh.chassis_number || veh.vin;
-        }
-        if (key === 'client' && !val) {
-          val = veh.client || veh.company;
-        }
-
-        if (target === undefined || target === '') return true;
-
-        if (typeof target === 'boolean') {
-          return Boolean(val) === target;
-        }
-
-        if (Array.isArray(target)) {
-          if (target.length === 0) return true;
-          if (Array.isArray(val)) {
-            return target.some((t) => val.includes(t));
-          }
-          return target.includes(val);
-        }
-
-        if (typeof target === 'object' && (target.from || target.to)) {
-          const numVal = Number(val);
-          if (isNaN(numVal)) return true;
-          if (target.from && numVal < Number(target.from)) return false;
-          if (target.to && numVal > Number(target.to)) return false;
-          return true;
-        }
-
-        if (typeof target === 'string') {
-          return String(val || '').toLowerCase().includes(target.toLowerCase());
-        }
-
-        return true;
-      };
-
-      if (filterMode === 'basic') {
-        return filterKeys.every((k) => matchesCondition(k));
-      } else {
-        return filterKeys.some((k) => matchesCondition(k));
-      }
+      return true;
     });
-  }, [scopedVehicles, activeStatusTab, searchQuery, appliedFilters, filterMode]);
+  }, [scopedVehicles, activeStatusTab, searchQuery]);
+
+  // Filtering Logic (Basic AND / Advanced OR intersected with baseMatchedVehicles)
+  const filteredVehicles = useMemo(() => {
+    if (activeFilterCount === 0) return baseMatchedVehicles;
+    return baseMatchedVehicles.filter((veh) =>
+      evaluateVehicleFilters(veh, sanitizedAppliedFilters, filterMode)
+    );
+  }, [baseMatchedVehicles, activeFilterCount, sanitizedAppliedFilters, filterMode]);
 
   // Sorting Logic
   const sortedVehicles = useMemo(() => {
@@ -328,6 +402,13 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
   // Pagination Slice
   const totalRecords = sortedVehicles.length;
   const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   const paginatedVehicles = useMemo(() => {
     const start = (currentPage - 1) * pageSize;
     return sortedVehicles.slice(start, start + pageSize);
@@ -378,18 +459,39 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
     }
   };
 
-  // Bulk Operations Commit
+  // Bulk Operations Commit (revalidates eligibility and syncs active_status)
   const handleCommitBulkAction = (action: BulkActionType, value: string, eligibleVehicles: Vehicle[]) => {
-    const eligibleIdSet = new Set(eligibleVehicles.map((e) => e.id));
+    const freshModalStore = loadModalMasterStore();
+    const { eligible } = evaluateVehicleBulkEligibility(
+      eligibleVehicles,
+      action,
+      value,
+      freshModalStore,
+      allVehicleIds,
+      companyContext
+    );
+
+    if (eligible.length === 0) {
+      showToast('No selected vehicles remained eligible for this bulk operation.', 'error');
+      return;
+    }
+
+    const eligibleIdSet = new Set(eligible.map((e) => e.vehicle.id));
     const nextVehicles = vehicles.map((v) => {
       if (!eligibleIdSet.has(v.id)) return v;
 
-      const updated = { ...v, updated_at: new Date().toISOString().split('T')[0] };
+      const updated: Vehicle = { ...v, updated_at: new Date().toISOString().split('T')[0] };
 
       switch (action) {
-        case 'status':
-          updated.status = value as any;
+        case 'status': {
+          const nextStatus = value as Vehicle['status'];
+          updated.status = nextStatus;
+          updated.active_status = syncVehicleOperationalActiveState(
+            nextStatus,
+            nextStatus !== 'Inactive'
+          );
           break;
+        }
         case 'fleet_add':
           updated.fleets = Array.from(new Set([...(v.fleets || []), value]));
           break;
@@ -405,21 +507,22 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
 
     saveVehiclesState(nextVehicles);
     handleClearSelection();
-    showToast(`${eligibleVehicles.length} vehicle records updated successfully!`);
+    showToast(`${eligible.length} vehicle record${eligible.length === 1 ? '' : 's'} updated successfully!`);
   };
 
   // Save Vehicle (Create or Edit)
   const handleSaveVehicle = (vehicle: Vehicle) => {
-    const exists = vehicles.some((v) => v.id === vehicle.id);
+    const normalized = normalizeVehicle(vehicle);
+    const exists = vehicles.some((v) => v.id === normalized.id);
     let next: Vehicle[];
     if (exists) {
-      next = vehicles.map((v) => (v.id === vehicle.id ? vehicle : v));
-      showToast(`Vehicle ${vehicle.registration_number} updated successfully!`);
+      next = vehicles.map((v) => (v.id === normalized.id ? normalized : v));
+      showToast(`Vehicle ${normalized.registration_number} updated successfully!`);
     } else {
-      next = [vehicle, ...vehicles];
+      next = [normalized, ...vehicles];
       setSortKey('');
       setCurrentPage(1);
-      showToast(`Vehicle ${vehicle.registration_number} created successfully!`);
+      showToast(`Vehicle ${normalized.registration_number} created successfully!`);
     }
     saveVehiclesState(next);
   };
@@ -427,16 +530,17 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
   // Import Callback
   const handleImportComplete = (createdCount: number, updatedCount: number, skippedCount: number) => {
     showToast(`Import finished: ${createdCount} created, ${updatedCount} updated · ${skippedCount} skipped`);
-    // Reload from state or storage
-    const current = localStorage.getItem('fleetrobo_vehicle_master_v3');
-    if (current) {
-      try {
-        setVehicles(JSON.parse(current));
-        setSortKey('');
-        setCurrentPage(1);
-      } catch (e) {
-        // ignore
-      }
+    setVehicles(loadVehicleMasterStore().map((item) => normalizeVehicle(item)));
+    setSortKey('');
+    setCurrentPage(1);
+  };
+
+  const persistSavedViews = (nextViews: SavedVehicleView[]) => {
+    setSavedViews(nextViews);
+    try {
+      localStorage.setItem(SAVED_VIEWS_STORAGE_KEY, JSON.stringify(nextViews));
+    } catch {
+      // ignore
     }
   };
 
@@ -451,44 +555,49 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
       return;
     }
     setViewNameError('');
-    const newView = {
+    const newView: SavedVehicleView = {
       id: `sv-${Date.now()}`,
       name: newViewName.trim(),
-      filters: { ...appliedFilters },
+      filters: { ...sanitizedAppliedFilters },
       mode: filterMode,
       sortKey,
       sortDir: sortDirection,
       layout: layoutMode
     };
-    setSavedViews([...savedViews, newView]);
+    persistSavedViews([...savedViews, newView]);
     setNewViewName('');
     setShowSavedViewsPopover(false);
     showToast(`View "${newView.name}" saved!`);
   };
 
-  const handleApplySavedView = (view: typeof savedViews[0]) => {
-    setAppliedFilters({ ...view.filters });
+  const handleApplySavedView = (view: SavedVehicleView) => {
+    setAppliedFilters(sanitizeVehicleFilters(view.filters));
     setFilterMode(view.mode);
     setSortKey(view.sortKey);
     setSortDirection(view.sortDir);
     setLayoutMode(view.layout);
+    setCurrentPage(1);
     setShowSavedViewsPopover(false);
     showToast(`Applied view: ${view.name}`);
   };
 
   const handleDeleteSavedView = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setSavedViews(savedViews.filter((v) => v.id !== id));
+    persistSavedViews(savedViews.filter((v) => v.id !== id));
   };
 
-  // Reset demo vehicles
+  // Reset demo vehicles (opens in-app confirmation modal — no window.confirm)
   const handleResetDemo = () => {
-    if (confirm('Restore demo vehicles? Any unsaved local edits will be replaced.')) {
-      localStorage.removeItem('fleetrobo_vehicle_master_v3');
-      saveVehiclesState(loadVehicleMasterStore());
-      handleClearSelection();
-      showToast('Demo vehicles restored!');
-    }
+    setShowResetConfirm(true);
+  };
+
+  const handleConfirmResetDemo = () => {
+    const restored = resetVehicleMasterStore().map((item) => normalizeVehicle(item));
+    setVehicles(restored);
+    handleClearSelection();
+    setCurrentPage(1);
+    setShowResetConfirm(false);
+    showToast('Demo vehicles restored!');
   };
 
   // Status tag helper
@@ -574,10 +683,14 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
   return (
     <div className="flex flex-col h-full w-full bg-[#F8FAFC] text-slate-800 font-sans text-xs relative">
       {/* Toast Notification Container */}
-      {toastMessage && (
-        <div className="fixed bottom-5 right-6 z-50 flex items-center gap-2.5 px-4 py-2.5 rounded-xl shadow-xl text-xs font-semibold bg-emerald-600 text-white animate-in slide-in-from-bottom-3 duration-200">
-          <CheckCircle2 size={16} />
-          <span>{toastMessage}</span>
+      {toastState && (
+        <div
+          className={`fixed bottom-5 right-6 z-50 flex items-center gap-2.5 px-4 py-2.5 rounded-xl shadow-xl text-xs font-semibold text-white animate-in slide-in-from-bottom-3 duration-200 ${
+            toastState.tone === 'error' ? 'bg-rose-600' : 'bg-emerald-600'
+          }`}
+        >
+          {toastState.tone === 'error' ? <AlertCircle size={16} /> : <CheckCircle2 size={16} />}
+          <span>{toastState.message}</span>
         </div>
       )}
 
@@ -690,7 +803,10 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
             {searchQuery && (
               <button
                 type="button"
-                onClick={() => setSearchQuery('')}
+                onClick={() => {
+                  setSearchQuery('');
+                  setCurrentPage(1);
+                }}
                 className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X size={13} />
@@ -703,24 +819,27 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
             type="button"
             onClick={() => setIsFilterOpen(true)}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
-              Object.keys(appliedFilters).length > 0
+              activeFilterCount > 0
                 ? 'bg-orange-50 border-orange-200 text-[#FA8A63]'
                 : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
             }`}
           >
             <Filter size={13} />
             <span>Filters</span>
-            {Object.keys(appliedFilters).length > 0 && (
+            {activeFilterCount > 0 && (
               <span className="w-4 h-4 rounded-full bg-[#FA8A63] text-white text-[10px] font-bold flex items-center justify-center">
-                {Object.keys(appliedFilters).length}
+                {activeFilterCount}
               </span>
             )}
           </button>
 
-          {Object.keys(appliedFilters).length > 0 && (
+          {activeFilterCount > 0 && (
             <button
               type="button"
-              onClick={() => setAppliedFilters({})}
+              onClick={() => {
+                setAppliedFilters({});
+                setCurrentPage(1);
+              }}
               className="text-[11px] text-slate-500 hover:text-red-600 font-semibold underline cursor-pointer"
             >
               Reset
@@ -861,6 +980,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
           <button
             type="button"
             onClick={() => {
+              setVehicles(loadVehicleMasterStore().map((item) => normalizeVehicle(item)));
               showToast('Directory refreshed.');
             }}
             title="Refresh vehicle records"
@@ -872,26 +992,27 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
       </div>
 
       {/* 3. Applied Filter Chips Bar */}
-      {Object.keys(appliedFilters).length > 0 && (
+      {activeFilterCount > 0 && (
         <div className="px-6 py-2 bg-orange-50/40 border-b border-orange-100 flex items-center justify-between text-xs shrink-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-slate-600 uppercase text-[10px] tracking-wider">
               Applied Filters ({filterMode === 'basic' ? 'AND' : 'OR'}):
             </span>
-            {Object.entries(appliedFilters).map(([k, val]) => (
+            {Object.entries(sanitizedAppliedFilters).map(([k, val]) => (
               <span
                 key={k}
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-orange-200 text-[#FA8A63] font-semibold text-[11px] shadow-2xs"
               >
                 <span>
-                  {k}: {typeof val === 'object' ? JSON.stringify(val) : String(val)}
+                  {getFilterDefinition(k)?.label || k}: {formatVehicleFilterChip(k, val)}
                 </span>
                 <button
                   type="button"
                   onClick={() => {
-                    const next = { ...appliedFilters };
+                    const next = { ...sanitizedAppliedFilters };
                     delete next[k];
                     setAppliedFilters(next);
+                    setCurrentPage(1);
                   }}
                   className="hover:text-red-600 cursor-pointer"
                 >
@@ -903,7 +1024,10 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
 
           <button
             type="button"
-            onClick={() => setAppliedFilters({})}
+            onClick={() => {
+              setAppliedFilters({});
+              setCurrentPage(1);
+            }}
             className="text-[11px] font-semibold text-[#FA8A63] hover:underline shrink-0 cursor-pointer"
           >
             Clear all filters
@@ -967,7 +1091,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
       {/* 5. Directory Content Area (Table or Cards) */}
       <div className={`flex-1 overflow-auto min-h-0 ${layoutMode === 'table' ? 'bg-white' : 'bg-[#F8FAFC]'}`}>
         {/* State: Empty Directory */}
-        {vehicles.length === 0 ? (
+        {scopedVehicles.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center p-8 text-center space-y-4">
             <div className="w-16 h-16 rounded-2xl bg-orange-50 text-[#FA8A63] flex items-center justify-center shadow-xs">
               <Truck size={30} />
@@ -1016,6 +1140,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                 setSearchQuery('');
                 setAppliedFilters({});
                 setActiveStatusTab('All vehicles');
+                setCurrentPage(1);
               }}
               className="px-3.5 py-1.5 bg-[#FA8A63] text-white text-xs font-semibold rounded-lg shadow-xs hover:bg-[#e77a54]"
             >
@@ -1400,7 +1525,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                       {/* 5. Transporter */}
                       {visibleColumns.includes('transporter') && (
                         <td className="px-4 py-3 text-slate-700 font-medium whitespace-nowrap">
-                          {vehicle.transporter || 'Western Logistics'}
+                          {vehicle.transporter || '—'}
                         </td>
                       )}
 
@@ -1414,14 +1539,18 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                       {/* 7. Fuel Type */}
                       {visibleColumns.includes('fuel_type') && (
                         <td className="px-4 py-3 text-slate-700 whitespace-nowrap">
-                          <span className="inline-flex items-center gap-1.5">
-                            <span className={`w-1.5 h-1.5 rounded-full ${
-                              vehicle.fuel_type === 'Electric' ? 'bg-emerald-500' :
-                              vehicle.fuel_type === 'CNG' ? 'bg-blue-500' :
-                              vehicle.fuel_type === 'Petrol' ? 'bg-orange-400' : 'bg-amber-500'
-                            }`} />
-                            <span>{vehicle.fuel_type || 'Diesel'}</span>
-                          </span>
+                          {vehicle.fuel_type ? (
+                            <span className="inline-flex items-center gap-1.5">
+                              <span className={`w-1.5 h-1.5 rounded-full ${
+                                vehicle.fuel_type === 'Electric' ? 'bg-emerald-500' :
+                                vehicle.fuel_type === 'CNG' ? 'bg-blue-500' :
+                                vehicle.fuel_type === 'Petrol' ? 'bg-orange-400' : 'bg-amber-500'
+                              }`} />
+                              <span>{vehicle.fuel_type}</span>
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
                         </td>
                       )}
 
@@ -1553,9 +1682,13 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
 
                       {visibleColumns.includes('class') && (
                         <td className="px-4 py-3 whitespace-nowrap">
-                          <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200">
-                            {vehicle.class || 'HMV'}
-                          </span>
+                          {vehicle.class ? (
+                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200">
+                              {vehicle.class}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
                         </td>
                       )}
 
@@ -1721,7 +1854,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
 
                   <div className="text-xs space-y-1 text-slate-600 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
                     <div>Chassis No.: <span className="text-slate-800 font-mono text-[11px]">{vehicle.chassis_number || vehicle.vin || '—'}</span></div>
-                    <div>Fuel Type: <span className="text-slate-800">{vehicle.fuel_type || 'Diesel'}</span></div>
+                    <div>Fuel Type: <span className="text-slate-800">{vehicle.fuel_type || '—'}</span></div>
                   </div>
 
                   <div className="pt-2 flex items-center justify-between border-t border-slate-100">
@@ -1835,21 +1968,27 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
       <FilterDrawer
         isOpen={isFilterOpen}
         onClose={() => setIsFilterOpen(false)}
-        appliedFilters={appliedFilters}
+        appliedFilters={sanitizedAppliedFilters}
         filterMode={filterMode}
         onApplyFilters={(f, m) => {
-          setAppliedFilters(f);
+          setAppliedFilters(sanitizeVehicleFilters(f));
           setFilterMode(m);
           setCurrentPage(1);
         }}
         totalMatchedCount={filteredVehicles.length}
+        scopedVehicles={scopedVehicles}
+        baseMatchedVehicles={baseMatchedVehicles}
+        companyContext={companyContext}
       />
 
-      {/* 675px Bulk Operations Drawer (All 7 operations) */}
+      {/* 675px Bulk Operations Drawer */}
       <BulkOperationsDrawer
         isOpen={isBulkOpen}
         onClose={() => setIsBulkOpen(false)}
-        selectedVehicles={vehicles.filter((v) => selectedIds.has(v.id))}
+        selectedVehicles={authorizedSelectedVehicles}
+        scopedVehicles={scopedVehicles}
+        allVehicleIds={allVehicleIds}
+        companyContext={companyContext}
         onCommitBulkAction={handleCommitBulkAction}
         onExportSelected={() => {
           setIsBulkOpen(false);
@@ -1862,6 +2001,7 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         isOpen={isImportOpen}
         onClose={() => setIsImportOpen(false)}
         existingVehicles={vehicles}
+        companyContext={companyContext}
         onImportComplete={handleImportComplete}
       />
 
@@ -1870,7 +2010,8 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         isOpen={isExportOpen}
         onClose={() => setIsExportOpen(false)}
         filteredVehicles={filteredVehicles}
-        selectedVehicles={vehicles.filter((v) => selectedIds.has(v.id))}
+        selectedVehicles={authorizedSelectedVehicles}
+        visibleColumns={visibleColumns}
       />
 
       {/* 940px Create / View / Edit Vehicle Drawer */}
@@ -1891,9 +2032,61 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         onClose={() => setContextualModalState({ isOpen: false, vehicle: null, targetView: 'maintenance' })}
         vehicle={contextualModalState.vehicle}
         targetView={contextualModalState.targetView}
+        allVehicleIds={allVehicleIds}
       />
 
-      {/* Delete Vehicle Confirmation Modal with Confirmation Chips */}
+      {/* Non-blocking Sample Vehicles Reset Confirmation Modal */}
+      {showResetConfirm && (
+        <div
+          className="fixed inset-0 z-[150] flex items-center justify-center bg-slate-900/45 backdrop-blur-xs p-4"
+          onClick={() => setShowResetConfirm(false)}
+        >
+          <div
+            className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-100 flex items-start justify-between gap-3">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-orange-50 border border-orange-200 flex items-center justify-center text-[#FA8A63] shrink-0">
+                  <RefreshCw size={18} />
+                </div>
+                <div>
+                  <h4 className="text-sm font-bold text-slate-900">Restore sample vehicles?</h4>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    This replaces your local vehicle list with the built-in FleetRobo sample vehicles. Asset Mapping records are preserved.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 cursor-pointer shrink-0"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowResetConfirm(false)}
+                className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg border border-slate-200 bg-white cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmResetDemo}
+                className="px-4 py-1.5 text-xs font-semibold text-white bg-[#FA8A63] hover:bg-[#e77a54] rounded-lg shadow-sm cursor-pointer inline-flex items-center gap-1.5"
+              >
+                <RefreshCw size={13} />
+                <span>Restore Sample Vehicles</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Vehicle Confirmation Modal with Asset Mapping Safeguard */}
       <DeleteConfirmationModal
         isOpen={Boolean(vehicleToDelete)}
         title="Delete Vehicle?"
@@ -1903,15 +2096,32 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
               Are you sure you want to delete vehicle{' '}
               <strong className="text-slate-900 font-semibold">
                 {vehicleToDelete.registration_number}
-              </strong>{' '}
-              ({vehicleToDelete.make} {vehicleToDelete.model})? Master vehicle records and
-              telemetry mappings will be unlinked.
+              </strong>
+              {vehicleToDelete.make || vehicleToDelete.machine_model || vehicleToDelete.model
+                ? ` (${[vehicleToDelete.make, vehicleToDelete.machine_model || vehicleToDelete.model].filter(Boolean).join(' · ')})`
+                : ''}
+              ? Master vehicle records will be permanently removed.
             </>
           ) : (
             ''
           )
         }
-        confirmLabel="Delete Vehicle"
+        confirmLabel={
+          deleteMappingRefs?.hasAnyReference ? 'Blocked by Asset Mapping' : 'Delete Vehicle'
+        }
+        confirmDisabled={Boolean(deleteMappingRefs?.hasAnyReference)}
+        warningNote={
+          deleteMappingRefs?.hasAnyReference ? (
+            <span>
+              <strong>Deletion blocked:</strong> This vehicle is referenced by{' '}
+              <strong>{deleteMappingRefs.allAllocations.length}</strong> Asset Mapping allocation(s) and{' '}
+              <strong>{deleteMappingRefs.allRelationships.length}</strong> resource relationship(s) (
+              <span className="font-semibold">{deleteMappingRefs.mappingState}</span>). End or remove those
+              references in Asset Mapping before deleting.
+            </span>
+          ) : undefined
+        }
+        reasonPresets={deleteMappingRefs?.hasAnyReference ? [] : undefined}
         targetChips={
           vehicleToDelete
             ? [
@@ -1920,16 +2130,25 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
                   label: vehicleToDelete.registration_number,
                   tone: 'orange',
                 },
-                {
-                  id: 'make-model',
-                  label: `${vehicleToDelete.make} · ${vehicleToDelete.machine_model || vehicleToDelete.model}`,
-                  tone: 'blue',
-                },
-                ...(vehicleToDelete.client || vehicleToDelete.company
+                ...(vehicleToDelete.machine_model || vehicleToDelete.model
+                  ? [
+                      {
+                        id: 'make-model',
+                        label: [
+                          vehicleToDelete.make,
+                          vehicleToDelete.machine_model || vehicleToDelete.model,
+                        ]
+                          .filter(Boolean)
+                          .join(' · '),
+                        tone: 'blue' as const,
+                      },
+                    ]
+                  : []),
+                ...(vehicleToDelete.company || vehicleToDelete.client
                   ? [
                       {
                         id: 'org',
-                        label: vehicleToDelete.client || vehicleToDelete.company || '',
+                        label: vehicleToDelete.company || vehicleToDelete.client || '',
                         tone: 'purple' as const,
                       },
                     ]
@@ -1948,18 +2167,31 @@ export const VehiclesPageContent: React.FC<VehiclesPageContentProps> = ({ compan
         }
         confirmationChips={
           vehicleToDelete
-            ? [
-                {
-                  id: 'telemetry',
-                  label: 'Telemetry Mappings Unlinked',
-                  tone: 'amber',
-                },
-                {
-                  id: 'scope',
-                  label: 'Permanent Master Record Delete',
-                  tone: 'rose',
-                },
-              ]
+            ? deleteMappingRefs?.hasAnyReference
+              ? [
+                  {
+                    id: 'mapping-block',
+                    label: `Asset Mapping Reference (${deleteMappingRefs.mappingState})`,
+                    tone: 'rose',
+                  },
+                  {
+                    id: 'alloc-count',
+                    label: `${deleteMappingRefs.allAllocations.length} Allocation(s) · ${deleteMappingRefs.allRelationships.length} Relationship(s)`,
+                    tone: 'amber',
+                  },
+                ]
+              : [
+                  {
+                    id: 'mapping-clear',
+                    label: 'No Active or Historical Asset Mappings',
+                    tone: 'emerald',
+                  },
+                  {
+                    id: 'scope',
+                    label: 'Permanent Master Record Delete',
+                    tone: 'rose',
+                  },
+                ]
             : []
         }
         onCancel={() => setVehicleToDelete(null)}

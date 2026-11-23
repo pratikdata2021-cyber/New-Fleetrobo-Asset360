@@ -1,55 +1,250 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  X, 
-  ArrowLeft, 
-  CheckCircle2, 
-  AlertCircle, 
-  Truck, 
-  Tag, 
-  ShieldCheck, 
-  Archive, 
-  Power, 
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  X,
+  ArrowLeft,
+  CheckCircle2,
+  AlertCircle,
+  Truck,
+  ShieldCheck,
+  Archive,
+  Power,
   PauseCircle,
-  AlertTriangle
+  AlertTriangle,
+  FileDown,
+  Info
 } from 'lucide-react';
-import { Driver, DRIVER_LOOKUPS } from '../types/driver';
+import {
+  Driver,
+  DRIVER_LOOKUPS,
+  deriveDriverBadges,
+  getDriverOwningCompany,
+  isDriverAuthorizedForCompany,
+  isGlobalDriverAdminContext
+} from '../types/driver';
 import {
   getCanonicalTransporterNames,
   getCanonicalTransporterVendors,
+  resolveTransporterVendor
 } from '../data/vendorsSeed';
+import { ModalMasterStore, loadModalMasterStore } from '../types/modalMaster';
 import { InfoTooltip } from './InfoTooltip';
 
-export type DriverBulkActionType = 
-  | 'activate' 
-  | 'deactivate' 
-  | 'suspend' 
-  | 'archive' 
-  | 'transporter' 
+export type DriverBulkActionType =
+  | 'activate'
+  | 'deactivate'
+  | 'suspend'
+  | 'archive'
+  | 'transporter'
   | 'verify';
+
+export interface DriverBulkParams {
+  transporter?: string;
+  rto?: boolean;
+  police?: boolean;
+  training?: boolean;
+}
+
+export interface DriverEligibilityReview {
+  eligible: { driver: Driver; changeNote?: string; warningNote?: string }[];
+  skipped: { driver: Driver; reason: string }[];
+}
+
+export function evaluateDriverBulkEligibility(
+  selectedDrivers: Driver[],
+  action: DriverBulkActionType,
+  params: DriverBulkParams,
+  ctx?: {
+    companyContext?: string;
+    modalStore?: Pick<ModalMasterStore, 'connections' | 'resourceAllocations' | 'resourceRelationships'>;
+    allDriverIds?: Set<string>;
+    nowMs?: number;
+  }
+): DriverEligibilityReview {
+  const eligible: { driver: Driver; changeNote?: string; warningNote?: string }[] = [];
+  const skipped: { driver: Driver; reason: string }[] = [];
+  const store = ctx?.modalStore || loadModalMasterStore();
+  const nowMs = ctx?.nowMs ?? Date.now();
+  const targetTransporter = (params.transporter || '').trim();
+
+  selectedDrivers.forEach((driver) => {
+    if (!isDriverAuthorizedForCompany(driver, ctx?.companyContext)) {
+      skipped.push({
+        driver,
+        reason: `Outside authorized tenant scope (${getDriverOwningCompany(driver) || 'Unknown'})`
+      });
+      return;
+    }
+
+    const badges = deriveDriverBadges(driver, store, nowMs, ctx?.allDriverIds);
+
+    if (action === 'activate') {
+      if (driver.status === 'Active') {
+        skipped.push({ driver, reason: 'Already active' });
+      } else if (driver.status === 'Archived') {
+        skipped.push({
+          driver,
+          reason: 'Archived record — restore individually from View/Edit profile'
+        });
+      } else {
+        const licenceWarning =
+          badges.expiry === 'Expired'
+            ? 'Licence expired (compliance review needed before dispatch)'
+            : badges.expiry === 'Missing'
+            ? 'Licence validity date missing'
+            : undefined;
+        eligible.push({
+          driver,
+          changeNote: 'Status → Active',
+          warningNote: licenceWarning
+        });
+      }
+      return;
+    }
+
+    if (action === 'deactivate') {
+      if (driver.status === 'Archived') {
+        skipped.push({ driver, reason: 'Archived record' });
+      } else if (driver.status === 'Inactive') {
+        skipped.push({ driver, reason: 'Already inactive' });
+      } else {
+        eligible.push({
+          driver,
+          changeNote: badges.hasAnyMappingReference
+            ? 'Status → Inactive (mapping history retained)'
+            : 'Status → Inactive'
+        });
+      }
+      return;
+    }
+
+    if (action === 'suspend') {
+      if (driver.status === 'Archived') {
+        skipped.push({ driver, reason: 'Archived record' });
+      } else if (driver.status === 'Suspended') {
+        skipped.push({ driver, reason: 'Already suspended' });
+      } else {
+        eligible.push({ driver, changeNote: 'Status → Suspended' });
+      }
+      return;
+    }
+
+    if (action === 'archive') {
+      if (driver.status === 'Archived') {
+        skipped.push({ driver, reason: 'Already archived' });
+      } else {
+        eligible.push({
+          driver,
+          changeNote: badges.hasAnyMappingReference
+            ? 'Status → Archived (historical mapping & profile retained)'
+            : 'Status → Archived'
+        });
+      }
+      return;
+    }
+
+    if (action === 'transporter') {
+      if (driver.status === 'Archived') {
+        skipped.push({ driver, reason: 'Archived record' });
+        return;
+      }
+      if (!targetTransporter) {
+        skipped.push({ driver, reason: 'No target transporter selected' });
+        return;
+      }
+      if ((driver.transporter || '').trim().toLowerCase() === targetTransporter.toLowerCase()) {
+        skipped.push({ driver, reason: 'Already assigned to selected transporter' });
+        return;
+      }
+      const owner = getDriverOwningCompany(driver);
+      const canonicalCompanyVendors = getCanonicalTransporterVendors(owner || undefined).filter(
+        (v) =>
+          v.is_active !== false &&
+          v.status !== 'blacklisted' &&
+          v.status !== 'terminated'
+      );
+      const canonicalNames = canonicalCompanyVendors.map((v) => v.name.trim().toLowerCase());
+      const legacyNames = (DRIVER_LOOKUPS.companyTransporterMap[owner] || []).map((t) =>
+        t.trim().toLowerCase()
+      );
+      const vendorMeta = resolveTransporterVendor(targetTransporter);
+      const targetLower = targetTransporter.toLowerCase();
+
+      const allowed =
+        canonicalNames.includes(targetLower) ||
+        legacyNames.includes(targetLower) ||
+        (!vendorMeta &&
+          legacyNames.length === 0 &&
+          DRIVER_LOOKUPS.transporters.some((t) => t.toLowerCase() === targetLower));
+
+      if (!allowed) {
+        skipped.push({
+          driver,
+          reason: `Transporter not permitted for owning company (${owner || 'Unknown'})`
+        });
+      } else {
+        eligible.push({
+          driver,
+          changeNote: `Transporter → ${targetTransporter} (${owner || 'unchanged'} kept)`
+        });
+      }
+      return;
+    }
+
+    if (action === 'verify') {
+      if (driver.status === 'Archived') {
+        skipped.push({ driver, reason: 'Archived record' });
+        return;
+      }
+      const changes: string[] = [];
+      if (typeof params.rto === 'boolean' && Boolean(driver.rto) !== params.rto) {
+        changes.push(`RTO: ${params.rto ? 'YES' : 'NO'}`);
+      }
+      if (typeof params.police === 'boolean' && Boolean(driver.police) !== params.police) {
+        changes.push(`Police: ${params.police ? 'YES' : 'NO'}`);
+      }
+      if (typeof params.training === 'boolean' && Boolean(driver.training) !== params.training) {
+        changes.push(`Training: ${params.training ? 'YES' : 'NO'}`);
+      }
+
+      if (changes.length === 0) {
+        skipped.push({ driver, reason: 'Verification flags already match requested values' });
+      } else {
+        eligible.push({ driver, changeNote: changes.join(', ') });
+      }
+    }
+  });
+
+  return { eligible, skipped };
+}
 
 interface DriverBulkDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   selectedDrivers: Driver[];
-  onCommitBulkAction: (action: DriverBulkActionType, params: any, eligibleIds: string[]) => void;
+  companyContext?: string;
+  modalStore?: Pick<ModalMasterStore, 'connections' | 'resourceAllocations' | 'resourceRelationships'>;
+  allDriverIds?: Set<string>;
+  onCommitBulkAction: (
+    action: DriverBulkActionType,
+    params: DriverBulkParams,
+    eligibleIds: string[]
+  ) => void;
   onExportSelected: () => void;
-}
-
-interface EligibilityReview {
-  eligible: { driver: Driver; changeNote?: string }[];
-  skipped: { driver: Driver; reason: string }[];
 }
 
 export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
   isOpen,
   onClose,
   selectedDrivers,
+  companyContext,
+  modalStore,
+  allDriverIds,
   onCommitBulkAction,
   onExportSelected
 }) => {
   const [selectedAction, setSelectedAction] = useState<DriverBulkActionType | null>(null);
   const [targetTransporter, setTargetTransporter] = useState<string>('');
-  
+
   // Verification flags: 'keep' | 'yes' | 'no'
   const [verifyRto, setVerifyRto] = useState<'keep' | 'yes' | 'no'>('keep');
   const [verifyPolice, setVerifyPolice] = useState<'keep' | 'yes' | 'no'>('keep');
@@ -57,25 +252,59 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
 
   const [step, setStep] = useState<'menu' | 'configure' | 'review'>('menu');
   const [configError, setConfigError] = useState<string>('');
-  const [reviewData, setReviewData] = useState<EligibilityReview | null>(null);
+  const [reviewData, setReviewData] = useState<DriverEligibilityReview | null>(null);
   const [vendorRefreshTick, setVendorRefreshTick] = useState(0);
 
   useEffect(() => {
-    const onVendorsUpdated = () => setVendorRefreshTick(t => t + 1);
+    const onVendorsUpdated = () => setVendorRefreshTick((t) => t + 1);
     window.addEventListener('fleetrobo:vendors-updated', onVendorsUpdated);
     return () => window.removeEventListener('fleetrobo:vendors-updated', onVendorsUpdated);
   }, []);
 
-  if (!isOpen) return null;
+  // Reset internal wizard state cleanly whenever drawer opens
+  useEffect(() => {
+    if (isOpen) {
+      setStep('menu');
+      setSelectedAction(null);
+      setTargetTransporter('');
+      setVerifyRto('keep');
+      setVerifyPolice('keep');
+      setVerifyTraining('keep');
+      setConfigError('');
+      setReviewData(null);
+    }
+  }, [isOpen]);
 
-  void vendorRefreshTick;
-  const allTransporterNames = getCanonicalTransporterNames(undefined, DRIVER_LOOKUPS.transporters);
+  const authorizedSelectedCount = useMemo(
+    () =>
+      selectedDrivers.filter((d) => isDriverAuthorizedForCompany(d, companyContext)).length,
+    [selectedDrivers, companyContext]
+  );
+
+  const availableTransporterNames = useMemo(() => {
+    void vendorRefreshTick;
+    const tenantScope = isGlobalDriverAdminContext(companyContext) ? undefined : companyContext;
+    const set = new Set<string>(
+      getCanonicalTransporterNames(tenantScope, DRIVER_LOOKUPS.transporters)
+    );
+    if (!tenantScope) {
+      // Include per-company legacy transporters in admin mode
+      Object.values(DRIVER_LOOKUPS.companyTransporterMap).forEach((arr) =>
+        arr.forEach((t) => set.add(t))
+      );
+    } else if (tenantScope && DRIVER_LOOKUPS.companyTransporterMap[tenantScope]) {
+      DRIVER_LOOKUPS.companyTransporterMap[tenantScope].forEach((t) => set.add(t));
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [companyContext, vendorRefreshTick]);
+
+  if (!isOpen) return null;
 
   const handleSelectAction = (act: DriverBulkActionType) => {
     setSelectedAction(act);
     setConfigError('');
     if (act === 'transporter') {
-      setTargetTransporter(allTransporterNames[0] || DRIVER_LOOKUPS.transporters[0]);
+      setTargetTransporter(availableTransporterNames[0] || '');
     }
     if (act === 'verify') {
       setVerifyRto('keep');
@@ -85,92 +314,8 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
     setStep('configure');
   };
 
-  const handleProceedToReview = () => {
-    setConfigError('');
-
-    if (selectedAction === 'transporter' && !targetTransporter) {
-      setConfigError('Choose a transporter before reviewing changes.');
-      return;
-    }
-
-    if (selectedAction === 'verify') {
-      if (verifyRto === 'keep' && verifyPolice === 'keep' && verifyTraining === 'keep') {
-        setConfigError('Choose at least one verification update (cannot keep all unchanged).');
-        return;
-      }
-    }
-
-    // Evaluate eligibility based on Section 07.3 rules
-    const eligible: { driver: Driver; changeNote?: string }[] = [];
-    const skipped: { driver: Driver; reason: string }[] = [];
-
-    selectedDrivers.forEach((driver) => {
-      if (selectedAction === 'activate') {
-        if (driver.status === 'Active') {
-          skipped.push({ driver, reason: 'Already active' });
-        } else {
-          eligible.push({ driver, changeNote: 'Driver status will change to Active' });
-        }
-      } else if (selectedAction === 'deactivate') {
-        if (driver.status === 'Archived') {
-          skipped.push({ driver, reason: 'Archived record' });
-        } else if (driver.status === 'Inactive') {
-          skipped.push({ driver, reason: 'Already inactive' });
-        } else {
-          eligible.push({ driver, changeNote: 'Driver status will change to Inactive' });
-        }
-      } else if (selectedAction === 'suspend') {
-        if (driver.status === 'Archived') {
-          skipped.push({ driver, reason: 'Archived record' });
-        } else if (driver.status === 'Suspended') {
-          skipped.push({ driver, reason: 'Already suspended' });
-        } else {
-          eligible.push({ driver, changeNote: 'Driver status will change to Suspended' });
-        }
-      } else if (selectedAction === 'archive') {
-        if (driver.status === 'Archived') {
-          skipped.push({ driver, reason: 'Already archived' });
-        } else {
-          eligible.push({ driver, changeNote: 'Record will be archived (historical data retained)' });
-        }
-      } else if (selectedAction === 'transporter') {
-        if (driver.status === 'Archived') {
-          skipped.push({ driver, reason: 'Archived record' });
-        } else {
-          const canonicalCompanyNames = getCanonicalTransporterVendors(driver.company).map(v => v.name);
-          const legacyCompanyNames = DRIVER_LOOKUPS.companyTransporterMap[driver.company] || [];
-          const allowedSet = new Set<string>([...canonicalCompanyNames, ...legacyCompanyNames]);
-          if (allowedSet.size > 0 && !allowedSet.has(targetTransporter)) {
-            skipped.push({ 
-              driver, 
-              reason: `Transporter not associated with owning company (${driver.company})` 
-            });
-          } else {
-            eligible.push({ driver, changeNote: `Transporter will change to ${targetTransporter}` });
-          }
-        }
-      } else if (selectedAction === 'verify') {
-        if (driver.status === 'Archived') {
-          skipped.push({ driver, reason: 'Archived record' });
-        } else {
-          const changes: string[] = [];
-          if (verifyRto !== 'keep') changes.push(`RTO: ${verifyRto.toUpperCase()}`);
-          if (verifyPolice !== 'keep') changes.push(`Police: ${verifyPolice.toUpperCase()}`);
-          if (verifyTraining !== 'keep') changes.push(`Training: ${verifyTraining.toUpperCase()}`);
-          eligible.push({ driver, changeNote: changes.join(', ') });
-        }
-      }
-    });
-
-    setReviewData({ eligible, skipped });
-    setStep('review');
-  };
-
-  const handleConfirmCommit = () => {
-    if (!reviewData || reviewData.eligible.length === 0 || !selectedAction) return;
-
-    const eligibleIds = reviewData.eligible.map((item) => item.driver.id);
-    const params: any = {};
+  const buildCurrentParams = (): DriverBulkParams => {
+    const params: DriverBulkParams = {};
     if (selectedAction === 'transporter') {
       params.transporter = targetTransporter;
     }
@@ -179,6 +324,43 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
       if (verifyPolice !== 'keep') params.police = verifyPolice === 'yes';
       if (verifyTraining !== 'keep') params.training = verifyTraining === 'yes';
     }
+    return params;
+  };
+
+  const handleProceedToReview = () => {
+    setConfigError('');
+    if (!selectedAction) return;
+
+    if (selectedAction === 'transporter' && !targetTransporter) {
+      setConfigError('Choose a transporter before reviewing changes.');
+      return;
+    }
+
+    if (selectedAction === 'verify') {
+      if (verifyRto === 'keep' && verifyPolice === 'keep' && verifyTraining === 'keep') {
+        setConfigError(
+          'Choose at least one verification update (cannot leave all three unchanged).'
+        );
+        return;
+      }
+    }
+
+    const params = buildCurrentParams();
+    const evaluated = evaluateDriverBulkEligibility(selectedDrivers, selectedAction, params, {
+      companyContext,
+      modalStore,
+      allDriverIds
+    });
+
+    setReviewData(evaluated);
+    setStep('review');
+  };
+
+  const handleConfirmCommit = () => {
+    if (!reviewData || reviewData.eligible.length === 0 || !selectedAction) return;
+
+    const params = buildCurrentParams();
+    const eligibleIds = reviewData.eligible.map((item) => item.driver.id);
 
     onCommitBulkAction(selectedAction, params, eligibleIds);
     onClose();
@@ -187,7 +369,10 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
   return (
     <div className="fixed inset-0 z-50 overflow-hidden flex justify-end">
       {/* Backdrop */}
-      <div onClick={onClose} className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity" />
+      <div
+        onClick={onClose}
+        className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity"
+      />
 
       {/* 640px Right Drawer */}
       <div className="relative w-[640px] max-w-full bg-white h-full shadow-2xl flex flex-col z-10 animate-in slide-in-from-right duration-200">
@@ -198,7 +383,7 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
               <button
                 type="button"
                 onClick={() => setStep(step === 'review' ? 'configure' : 'menu')}
-                className="p-1 rounded text-slate-500 hover:text-slate-800 hover:bg-slate-100 mr-1 cursor-pointer"
+                className="p-1.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 mr-0.5 cursor-pointer transition-colors"
                 title="Back"
               >
                 <ArrowLeft size={16} />
@@ -219,8 +404,8 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
                 {step === 'menu'
-                  ? 'Only explicitly selected drivers are in scope. You will review eligibility before confirming.'
-                  : `Bulk Operations · ${selectedDrivers.length} selected drivers`}
+                  ? 'Only explicitly selected authorized drivers are in scope. Eligibility is validated before commit.'
+                  : `Bulk Operations · ${authorizedSelectedCount} authorized of ${selectedDrivers.length} selected`}
               </p>
             </div>
           </div>
@@ -228,7 +413,7 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer transition-colors"
           >
             <X size={16} />
           </button>
@@ -245,35 +430,38 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                   Driver Status Operations
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <div
+                  <button
+                    type="button"
                     onClick={() => handleSelectAction('activate')}
-                    className="p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer group"
+                    className="text-left p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 font-bold text-slate-900 text-xs">
                       <Power size={15} className="text-emerald-600" />
                       <span>Activate drivers</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                      Make eligible driver records active. Reactivates inactive, suspended, or archived records.
+                      Activate eligible inactive or suspended drivers (archived records are skipped).
                     </p>
-                  </div>
+                  </button>
 
-                  <div
+                  <button
+                    type="button"
                     onClick={() => handleSelectAction('deactivate')}
-                    className="p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer group"
+                    className="text-left p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 font-bold text-slate-900 text-xs">
                       <PauseCircle size={15} className="text-slate-600" />
                       <span>Deactivate drivers</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                      Keep records and mapping history; change driver operational availability.
+                      Set availability to Inactive while preserving records and mapping history.
                     </p>
-                  </div>
+                  </button>
 
-                  <div
+                  <button
+                    type="button"
                     onClick={() => handleSelectAction('suspend')}
-                    className="p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer group"
+                    className="text-left p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 font-bold text-slate-900 text-xs">
                       <AlertTriangle size={15} className="text-amber-600" />
@@ -282,20 +470,21 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                     <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
                       Temporarily suspend selected drivers pending compliance inquiry or review.
                     </p>
-                  </div>
+                  </button>
 
-                  <div
+                  <button
+                    type="button"
                     onClick={() => handleSelectAction('archive')}
-                    className="p-3.5 bg-white border border-slate-200 hover:border-red-400 hover:bg-red-50/20 rounded-xl transition-all cursor-pointer group"
+                    className="text-left p-3.5 bg-white border border-slate-200 hover:border-red-400 hover:bg-red-50/20 rounded-xl transition-all cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 font-bold text-slate-900 text-xs">
                       <Archive size={15} className="text-red-600" />
                       <span>Archive drivers</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                      Retain full history; exclude from operational scheduling (non-destructive).
+                      Retain full history and references; exclude from operational scheduling.
                     </p>
-                  </div>
+                  </button>
                 </div>
               </div>
 
@@ -305,31 +494,33 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                   Ownership & Compliance Operations
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <div
+                  <button
+                    type="button"
                     onClick={() => handleSelectAction('transporter')}
-                    className="p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer group"
+                    className="text-left p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 font-bold text-slate-900 text-xs">
                       <Truck size={15} className="text-sky-600" />
                       <span>Change transporter</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                      Apply designated transporter to eligible selected drivers belonging to matching companies.
+                      Apply transporter to eligible drivers within their existing owning company.
                     </p>
-                  </div>
+                  </button>
 
-                  <div
+                  <button
+                    type="button"
                     onClick={() => handleSelectAction('verify')}
-                    className="p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer group"
+                    className="text-left p-3.5 bg-white border border-slate-200 hover:border-[#FA8A63] hover:bg-orange-50/20 rounded-xl transition-all cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 font-bold text-slate-900 text-xs">
                       <ShieldCheck size={15} className="text-purple-600" />
                       <span>Update verification</span>
                     </div>
                     <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                      Update RTO, Police, and Training flags simultaneously without overwriting unmodified checks.
+                      Update RTO, Police, and Training flags selectively without overwriting kept checks.
                     </p>
-                  </div>
+                  </button>
                 </div>
               </div>
 
@@ -344,9 +535,10 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                 <button
                   type="button"
                   onClick={onExportSelected}
-                  className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg shadow-2xs cursor-pointer"
                 >
-                  Export Selected
+                  <FileDown size={13} />
+                  <span>Export Selected</span>
                 </button>
               </div>
             </div>
@@ -355,22 +547,31 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
           {/* STEP 2: CONFIGURE */}
           {step === 'configure' && selectedAction && (
             <div className="space-y-5">
-              <div className="p-3.5 bg-orange-50/40 border border-orange-200 rounded-xl text-xs text-slate-700">
-                <span className="font-bold text-slate-900">Step 1 of 2 · Configure operation:</span>
-                <p className="mt-0.5 text-[11px] text-slate-600">
-                  No changes will occur until you review and confirm the eligible records on the next step.
-                </p>
+              <div className="p-3.5 bg-orange-50/50 border border-orange-200 rounded-xl text-xs text-slate-700 flex items-start gap-2.5">
+                <Info size={15} className="text-[#FA8A63] shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold text-slate-900">Step 1 of 2 · Configure operation</span>
+                  <p className="mt-0.5 text-[11px] text-slate-600">
+                    No records are modified until you review eligible vs. skipped drivers and confirm.
+                  </p>
+                </div>
               </div>
 
               {/* Status Actions Configuration */}
               {['activate', 'deactivate', 'suspend', 'archive'].includes(selectedAction) && (
                 <div className="p-4 border border-slate-200 rounded-xl bg-white space-y-2">
                   <div className="text-xs font-bold text-slate-900 capitalize">
-                    {selectedAction} {selectedDrivers.length} selected drivers
+                    {selectedAction} {selectedDrivers.length} selected{' '}
+                    {selectedDrivers.length === 1 ? 'driver' : 'drivers'}
                   </div>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    This will update the operational availability status of all eligible selected records.
-                    Records already in the target state or archived (for deactivate/suspend) will be shown as skipped in review.
+                    {selectedAction === 'activate'
+                      ? 'Eligible Inactive and Suspended drivers will be set to Active. Already Active and Archived drivers will be skipped automatically.'
+                      : selectedAction === 'deactivate'
+                      ? 'Eligible drivers will be marked Inactive while keeping existing mapping history intact. Archived or already Inactive drivers will be skipped.'
+                      : selectedAction === 'suspend'
+                      ? 'Eligible drivers will be marked Suspended. Archived or already Suspended drivers will be skipped.'
+                      : 'Eligible drivers will be Archived non-destructively (retaining historical compliance and mapping records).'}
                   </p>
                 </div>
               )}
@@ -380,16 +581,22 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                 <div className="space-y-3">
                   <label className="text-xs font-semibold text-slate-800 flex items-center">
                     Select New Transporter <span className="text-red-500 ml-0.5">*</span>
-                    <InfoTooltip content="Transporter must belong to the owning company of each selected driver. Incompatible records will be skipped." />
+                    <InfoTooltip content="Transporter must belong to the owning company of each selected driver. Owning company is never altered." />
                   </label>
                   <select
                     value={targetTransporter}
                     onChange={(e) => setTargetTransporter(e.target.value)}
                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-[#FA8A63]"
                   >
-                    {allTransporterNames.map((t) => (
-                      <option key={t} value={t}>{t}</option>
-                    ))}
+                    {availableTransporterNames.length === 0 ? (
+                      <option value="">No transporters available</option>
+                    ) : (
+                      availableTransporterNames.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))
+                    )}
                   </select>
                 </div>
               )}
@@ -398,7 +605,9 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
               {selectedAction === 'verify' && (
                 <div className="space-y-4">
                   <div className="text-xs text-slate-600">
-                    Select the verification flags to update. Unmodified checks will retain their current state.
+                    Select which verification flags to update. Flags set to{' '}
+                    <span className="font-semibold text-slate-800">Keep unchanged</span> will retain
+                    their current values per driver.
                   </div>
 
                   <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs">
@@ -406,12 +615,12 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                     <div className="flex items-center justify-between">
                       <label className="font-semibold text-slate-800 flex items-center">
                         RTO Certified
-                        <InfoTooltip content="Choose a new value or leave unchanged." />
+                        <InfoTooltip content="Choose Certified / Uncertified or leave unchanged." />
                       </label>
                       <select
                         value={verifyRto}
-                        onChange={(e) => setVerifyRto(e.target.value as any)}
-                        className="px-2.5 py-1 bg-white border border-slate-300 rounded text-xs"
+                        onChange={(e) => setVerifyRto(e.target.value as 'keep' | 'yes' | 'no')}
+                        className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs text-slate-800 focus:outline-none focus:border-[#FA8A63]"
                       >
                         <option value="keep">Keep unchanged</option>
                         <option value="yes">Yes (Certified)</option>
@@ -423,12 +632,12 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                     <div className="flex items-center justify-between">
                       <label className="font-semibold text-slate-800 flex items-center">
                         Police Verified
-                        <InfoTooltip content="Choose a new value or leave unchanged." />
+                        <InfoTooltip content="Choose Verified / Pending or leave unchanged." />
                       </label>
                       <select
                         value={verifyPolice}
-                        onChange={(e) => setVerifyPolice(e.target.value as any)}
-                        className="px-2.5 py-1 bg-white border border-slate-300 rounded text-xs"
+                        onChange={(e) => setVerifyPolice(e.target.value as 'keep' | 'yes' | 'no')}
+                        className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs text-slate-800 focus:outline-none focus:border-[#FA8A63]"
                       >
                         <option value="keep">Keep unchanged</option>
                         <option value="yes">Yes (Verified)</option>
@@ -440,12 +649,12 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                     <div className="flex items-center justify-between">
                       <label className="font-semibold text-slate-800 flex items-center">
                         Training Completed
-                        <InfoTooltip content="Choose a new value or leave unchanged." />
+                        <InfoTooltip content="Choose Completed / Incomplete or leave unchanged." />
                       </label>
                       <select
                         value={verifyTraining}
-                        onChange={(e) => setVerifyTraining(e.target.value as any)}
-                        className="px-2.5 py-1 bg-white border border-slate-300 rounded text-xs"
+                        onChange={(e) => setVerifyTraining(e.target.value as 'keep' | 'yes' | 'no')}
+                        className="px-2.5 py-1.5 bg-white border border-slate-300 rounded-md text-xs text-slate-800 focus:outline-none focus:border-[#FA8A63]"
                       >
                         <option value="keep">Keep unchanged</option>
                         <option value="yes">Yes (Completed)</option>
@@ -471,23 +680,28 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
               <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
                 <span className="font-bold text-slate-900">Step 2 of 2 · Eligibility Review</span>
                 <p className="text-[11px] text-slate-500">
-                  Only the eligible records will change. Existing identity, licence and document attachments are retained.
+                  Only eligible records within your authorized scope will update. Identity,
+                  licence, mapping, and documents remain intact.
                 </p>
               </div>
 
               {/* Stats Bar */}
               <div className="grid grid-cols-3 gap-3 text-center">
                 <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <div className="text-[11px] text-slate-500">Selected</div>
+                  <div className="text-[11px] text-slate-500 font-medium">Selected</div>
                   <div className="text-xl font-bold text-slate-900">{selectedDrivers.length}</div>
                 </div>
                 <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200">
-                  <div className="text-[11px] text-emerald-700">Will Update</div>
-                  <div className="text-xl font-bold text-emerald-700">{reviewData.eligible.length}</div>
+                  <div className="text-[11px] text-emerald-700 font-medium">Will Update</div>
+                  <div className="text-xl font-bold text-emerald-700">
+                    {reviewData.eligible.length}
+                  </div>
                 </div>
                 <div className="p-3 bg-amber-50 rounded-xl border border-amber-200">
-                  <div className="text-[11px] text-amber-700">Skipped</div>
-                  <div className="text-xl font-bold text-amber-700">{reviewData.skipped.length}</div>
+                  <div className="text-[11px] text-amber-700 font-medium">Skipped</div>
+                  <div className="text-xl font-bold text-amber-700">
+                    {reviewData.skipped.length}
+                  </div>
                 </div>
               </div>
 
@@ -498,14 +712,28 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                     <CheckCircle2 size={14} className="text-emerald-600" />
                     <span>Eligible Drivers ({reviewData.eligible.length})</span>
                   </div>
-                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-48 overflow-y-auto text-xs">
-                    {reviewData.eligible.map(({ driver, changeNote }) => (
-                      <div key={driver.id} className="p-2.5 flex items-center justify-between">
-                        <div>
-                          <div className="font-semibold text-slate-900">{driver.name}</div>
-                          <div className="text-[11px] text-slate-500">DL: {driver.licence} · {driver.company}</div>
+                  <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-48 overflow-y-auto text-xs bg-white">
+                    {reviewData.eligible.map(({ driver, changeNote, warningNote }) => (
+                      <div key={driver.id} className="p-2.5 space-y-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-900 truncate">
+                              {driver.name}
+                            </div>
+                            <div className="text-[11px] text-slate-500 truncate">
+                              DL: {driver.licence || '—'} · {driver.company || 'No company'}
+                            </div>
+                          </div>
+                          <span className="text-[11px] text-emerald-700 font-semibold shrink-0">
+                            {changeNote}
+                          </span>
                         </div>
-                        <span className="text-[11px] text-emerald-700 font-medium">{changeNote}</span>
+                        {warningNote && (
+                          <div className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-0.5 inline-flex items-center gap-1">
+                            <AlertTriangle size={11} />
+                            <span>{warningNote}</span>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -519,14 +747,16 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                     <AlertCircle size={14} className="text-amber-600" />
                     <span>Skipped Drivers ({reviewData.skipped.length})</span>
                   </div>
-                  <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-40 overflow-y-auto text-xs bg-slate-50/50">
+                  <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-40 overflow-y-auto text-xs bg-slate-50/50">
                     {reviewData.skipped.map(({ driver, reason }) => (
-                      <div key={driver.id} className="p-2.5 flex items-center justify-between">
-                        <div>
-                          <div className="font-semibold text-slate-800">{driver.name}</div>
-                          <div className="text-[11px] text-slate-500">DL: {driver.licence} · {driver.company}</div>
+                      <div key={driver.id} className="p-2.5 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-800 truncate">{driver.name}</div>
+                          <div className="text-[11px] text-slate-500 truncate">
+                            DL: {driver.licence || '—'} · {driver.company || 'No company'}
+                          </div>
                         </div>
-                        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-semibold">
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-semibold text-right shrink-0 max-w-[55%]">
                           {reason}
                         </span>
                       </div>
@@ -540,7 +770,8 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                   <AlertCircle size={22} className="mx-auto mb-1 text-amber-500" />
                   <div className="font-bold">No eligible drivers found</div>
                   <p className="mt-0.5 text-[11px] text-amber-800">
-                    All selected drivers are already in the target state or incompatible with this operation.
+                    All selected drivers are already in the target state or ineligible for this
+                    operation.
                   </p>
                 </div>
               )}
@@ -574,10 +805,10 @@ export const DriverBulkDrawer: React.FC<DriverBulkDrawerProps> = ({
                 type="button"
                 disabled={!reviewData || reviewData.eligible.length === 0}
                 onClick={handleConfirmCommit}
-                className={`px-4 py-1.5 text-xs font-bold rounded-lg shadow-xs transition-colors cursor-pointer ${
+                className={`px-4 py-1.5 text-xs font-bold rounded-lg shadow-xs transition-colors cursor-pointer disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed ${
                   selectedAction === 'archive'
                     ? 'bg-red-600 hover:bg-red-700 text-white'
-                    : 'bg-[#FA8A63] hover:bg-[#e77a54] text-white disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed'
+                    : 'bg-[#FA8A63] hover:bg-[#e77a54] text-white'
                 }`}
               >
                 Confirm {reviewData?.eligible.length || 0} updates

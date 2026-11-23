@@ -28,6 +28,8 @@ export const ModalMappingContent: React.FC<ModalMappingContentProps> = ({
   const [savedViews, setSavedViewsState] = useState<SavedModalView[]>(() => loadSavedModalViews());
   const [storageWarning, setStorageWarning] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  const [clockTick, setClockTick] = useState(0);
   const selfWriteRef = React.useRef(false);
 
   // Platform Admin views All Clients scope; Organization Admin & Customer are scoped to currentCompany
@@ -51,13 +53,37 @@ export const ModalMappingContent: React.FC<ModalMappingContentProps> = ({
         setStoreState(loadModalMasterStore());
       }
     };
+    const onExternalUpdate = () => {
+      setClockTick((t) => t + 1);
+      syncStore();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        setClockTick((t) => t + 1);
+      }
+    };
+    const timer = window.setInterval(() => {
+      setClockTick((t) => t + 1);
+    }, 60000);
+
     window.addEventListener('fleetrobo:modal-store-updated', syncStore);
+    window.addEventListener('fleetrobo:resources-updated', onExternalUpdate);
+    window.addEventListener('fleetrobo:model-access-updated', onExternalUpdate);
+    window.addEventListener('fleetrobo:vendors-updated', onExternalUpdate);
     window.addEventListener('storage', syncStore);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      window.clearInterval(timer);
       window.removeEventListener('fleetrobo:modal-store-updated', syncStore);
+      window.removeEventListener('fleetrobo:resources-updated', onExternalUpdate);
+      window.removeEventListener('fleetrobo:model-access-updated', onExternalUpdate);
+      window.removeEventListener('fleetrobo:vendors-updated', onExternalUpdate);
       window.removeEventListener('storage', syncStore);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, []);
+
+  void clockTick;
 
   const setStore: React.Dispatch<React.SetStateAction<ModalMasterStore>> = (valueOrUpdater) => {
     setStoreState((prev) => {
@@ -92,9 +118,10 @@ export const ModalMappingContent: React.FC<ModalMappingContentProps> = ({
     }, 4500);
   };
 
-  const handleResetSeed = () => {
+  const handleConfirmResetSeed = () => {
     const fresh = generateModalMasterSeedData();
     setStore(fresh);
+    setConfirmResetOpen(false);
     showToast('Prototype demo dataset restored.', 'success');
   };
 
@@ -187,7 +214,7 @@ export const ModalMappingContent: React.FC<ModalMappingContentProps> = ({
             {canEdit && (
               <button
                 type="button"
-                onClick={handleResetSeed}
+                onClick={() => setConfirmResetOpen(true)}
                 title="Restore deterministic prototype seed dataset"
                 className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-slate-200 bg-white text-[11px] font-medium text-slate-600 hover:bg-slate-50 cursor-pointer"
               >
@@ -276,6 +303,51 @@ export const ModalMappingContent: React.FC<ModalMappingContentProps> = ({
           />
         )}
       </div>
+
+      {/* Reset Demo Data Confirmation Modal (MAP-P0-12) */}
+      {confirmResetOpen && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-[440px] bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                <h3 className="text-[14px] font-bold text-slate-900">Reset Demo Data?</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConfirmResetOpen(false)}
+                className="p-1 rounded hover:bg-slate-100 text-slate-500 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-2.5 text-[12px] text-slate-600 leading-relaxed">
+              <p>
+                This will replace your current local connections, hardware bindings, resource allocations, and relationship edits with the default prototype dataset.
+              </p>
+              <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5 font-medium">
+                Saved Views are preserved. Only confirm if you intentionally want to restore the baseline demo records.
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmResetOpen(false)}
+                className="h-8 px-3 rounded-lg border border-slate-200 bg-white text-[12px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmResetSeed}
+                className="h-8 px-4 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[12px] font-semibold cursor-pointer"
+              >
+                Confirm Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

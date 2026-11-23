@@ -26,7 +26,14 @@ import {
   FileCheck,
   ChevronRight
 } from 'lucide-react';
-import { Driver, UserAccount, DRIVER_LOOKUPS, deriveDriverBadges } from '../types/driver';
+import {
+  Driver,
+  UserAccount,
+  DRIVER_LOOKUPS,
+  deriveDriverBadges,
+  isGlobalDriverAdminContext,
+  normalizeLicenceNumber
+} from '../types/driver';
 import {
   getCanonicalTransporterVendors,
   resolveTransporterVendor,
@@ -86,11 +93,15 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
   // Active section tab: default to 'all' for continuous long form (matching Vehicles experience), or individual section tabs
   const [activeTab, setActiveTab] = useState<DriverSectionTab>('all');
 
+  const safeDefaultCompany =
+    companyContext && !isGlobalDriverAdminContext(companyContext)
+      ? companyContext
+      : DRIVER_LOOKUPS.companies[0];
+
   // Form State
   const [formData, setFormData] = useState<Partial<Driver>>({
     status: 'Active',
-    company: companyContext || 'Adani Port',
-    blood: 'B+',
+    company: safeDefaultCompany,
     rfid: false,
     vendor: false,
     rto: false,
@@ -120,8 +131,9 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
   const [saarthiLoading, setSaarthiLoading] = useState(false);
   const [saarthiFeedback, setSaarthiFeedback] = useState<{ type: 'success' | 'error' | 'hint'; message: string } | null>(null);
 
-  // Validation Errors
+  // Validation Errors & File Upload Notice
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
 
@@ -132,9 +144,19 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
     return () => window.removeEventListener('fleetrobo:vendors-updated', onVendorsUpdated);
   }, []);
 
+  const effectiveOwnerCompany =
+    mode !== 'create'
+      ? initialDriver?.company || formData.company || ''
+      : !isGlobalDriverAdminContext(companyContext)
+      ? companyContext || ''
+      : '';
+
   const transporterOptions = React.useMemo(() => {
     void vendorRefreshTick;
-    const canonicalVendors = getCanonicalTransporterVendors(companyContext);
+    const ownerScope = effectiveOwnerCompany || undefined;
+    const canonicalVendors = getCanonicalTransporterVendors(ownerScope).filter(
+      (v) => v.is_active !== false && v.status !== 'blacklisted' && v.status !== 'terminated'
+    );
     const seen = new Set<string>();
     const list: Array<{ name: string; publicId?: string; id?: string }> = [];
     canonicalVendors.forEach(v => {
@@ -143,7 +165,10 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
         list.push({ name: v.name, publicId: v.public_id, id: v.id });
       }
     });
-    DRIVER_LOOKUPS.transporters.forEach(t => {
+    const fallbackTransporters = ownerScope
+      ? DRIVER_LOOKUPS.companyTransporterMap[ownerScope] || []
+      : DRIVER_LOOKUPS.transporters;
+    fallbackTransporters.forEach(t => {
       if (!seen.has(t)) {
         seen.add(t);
         list.push({ name: t });
@@ -153,14 +178,19 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
       list.push({ name: formData.transporter });
     }
     return list;
-  }, [companyContext, formData.transporter, vendorRefreshTick]);
+  }, [effectiveOwnerCompany, formData.transporter, vendorRefreshTick]);
 
   // Initialize or populate form
   useEffect(() => {
+    const fallbackComp =
+      companyContext && !isGlobalDriverAdminContext(companyContext)
+        ? companyContext
+        : DRIVER_LOOKUPS.companies[0];
+
     if (initialDriver && mode !== 'create') {
-      setFormData({ 
+      setFormData({
         ...initialDriver,
-        company: initialDriver.company || companyContext || 'Adani Port',
+        company: initialDriver.company || fallbackComp,
         first: initialDriver.first || initialDriver.firstName || initialDriver.name?.split(' ')[0] || '',
         middle: initialDriver.middle || initialDriver.middleName || '',
         last: initialDriver.last || initialDriver.lastName || initialDriver.name?.split(' ').slice(1).join(' ') || '',
@@ -178,9 +208,11 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
       const prefillName = initialDriver?.name || '';
       setFormData({
         status: 'Active',
-        company: companyContext || 'Adani Port',
-        transporter: 'Western Logistics',
-        blood: 'B+',
+        company: fallbackComp,
+        transporter: '',
+        blood: undefined,
+        qualification: '',
+        joining: '',
         rfid: false,
         vendor: false,
         rto: false,
@@ -196,14 +228,15 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
         phone: prefillPhone,
         accountPhone: prefillPhone,
         accountName: prefillName,
-        dob: '1990-01-01',
-        licenceFrom: '2016-01-01',
-        licenceTo: '2030-01-01'
+        dob: '',
+        licenceFrom: '',
+        licenceTo: ''
       });
       setAccountMode('new');
     }
     setActiveTab('all');
     setErrors({});
+    setUploadError(null);
     setIsDirty(false);
     setSaarthiFeedback(null);
   }, [initialDriver, isOpen, mode, companyContext]);
@@ -424,7 +457,7 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
       newErrors.licence = 'License No. must be at least 6 alphanumeric characters.';
     } else {
       const licenceDup = existingDrivers.find(
-        (d) => d.id !== formData.id && d.licence.toUpperCase() === formData.licence?.toUpperCase().trim()
+        (d) => d.id !== formData.id && normalizeLicenceNumber(d.licence) === normalizeLicenceNumber(formData.licence)
       );
       if (licenceDup) {
         newErrors.licence = 'License No. is already registered for another driver in the system.';
@@ -502,76 +535,100 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
   const handleSave = () => {
     if (!validateForm()) return;
 
-    const firstName = formData.first?.trim() || formData.firstName?.trim() || formData.name?.split(' ')[0] || 'Driver';
+    const firstName = formData.first?.trim() || formData.firstName?.trim() || formData.name?.split(' ')[0] || '';
     const middleName = formData.middle?.trim() || formData.middleName?.trim() || '';
     const lastName = formData.last?.trim() || formData.lastName?.trim() || '';
-    const fullName = [firstName, middleName, lastName].filter(Boolean).join(' ') || formData.accountName || 'Driver';
+    const fullName = [firstName, middleName, lastName].filter(Boolean).join(' ') || formData.accountName?.trim() || '';
+
+    const normalizedPhone = (formData.phone || formData.accountPhone || '').replace(/\D/g, '');
+    const normalizedAccountPhone = (formData.accountPhone || formData.phone || '').replace(/\D/g, '');
+
+    const safeCompany =
+      mode !== 'create' && initialDriver?.company
+        ? initialDriver.company
+        : companyContext && !isGlobalDriverAdminContext(companyContext)
+        ? companyContext
+        : formData.company && !isGlobalDriverAdminContext(formData.company)
+        ? formData.company
+        : DRIVER_LOOKUPS.companies[0];
+
+    const selectedTransporter = formData.transporter?.trim() || undefined;
+    const rawExperience =
+      formData.experience !== undefined && String(formData.experience).trim() !== ''
+        ? Number(formData.experience)
+        : undefined;
 
     const payload: Driver = {
       id: formData.id || `drv-${Date.now()}`,
       name: fullName,
       first: firstName,
       firstName: firstName,
-      middle: middleName,
-      middleName: middleName,
-      last: lastName,
-      lastName: lastName,
-      phone: (formData.phone || formData.accountPhone || '9800000000').replace(/\D/g, ''),
+      middle: middleName || undefined,
+      middleName: middleName || undefined,
+      last: lastName || undefined,
+      lastName: lastName || undefined,
+      phone: normalizedPhone,
       dob: formData.dob!,
-      status: formData.status as any || 'Active',
-      company: companyContext || formData.company || 'Adani Port', // Automatically derived; hidden from form
-      transporter: formData.transporter || transporterOptions[0]?.name || 'Western Logistics',
-      transporterVendorId:
-        formData.transporterVendorId ||
-        resolveTransporterVendor(formData.transporter || transporterOptions[0]?.name)?.id,
+      status: (formData.status as Driver['status']) || 'Active',
+      company: safeCompany,
+      transporter: selectedTransporter,
+      transporterVendorId: selectedTransporter
+        ? formData.transporterVendorId || resolveTransporterVendor(selectedTransporter)?.id
+        : undefined,
       vendor: Boolean(formData.vendor),
-      licence: formData.licence!.toUpperCase().trim(),
+      licence: normalizeLicenceNumber(formData.licence),
       licenceFrom: formData.licenceFrom!,
       licenceTo: formData.licenceTo!,
       licenceType: formData.licenceType || 'HMV',
-      blood: formData.blood || 'B+',
-      experience: Number(formData.experience) || 0,
-      father: formData.father || '',
-      qualification: formData.qualification || 'Secondary (10th)',
+      blood: formData.blood || undefined,
+      experience: rawExperience !== undefined && Number.isFinite(rawExperience) ? rawExperience : undefined,
+      father: formData.father?.trim() || undefined,
+      qualification: formData.qualification?.trim() || undefined,
       rfid: Boolean(formData.rfid),
-      joining: formData.joining || '2023-01-01',
-      alternate: formData.alternate || '',
-      emergency: formData.emergency || '',
-      local: formData.local || '',
-      localPin: formData.localPin || '',
-      permanent: formData.permanent || '',
-      permanentPin: formData.permanentPin || '',
-      authority: formData.authority || '',
+      joining: formData.joining || undefined,
+      alternate: formData.alternate?.trim() || undefined,
+      emergency: formData.emergency?.trim() || undefined,
+      local: formData.local?.trim() || undefined,
+      localPin: formData.localPin?.trim() || undefined,
+      permanent: formData.permanent?.trim() || undefined,
+      permanentPin: formData.permanentPin?.trim() || undefined,
+      authority: formData.authority?.trim() || undefined,
       rto: Boolean(formData.rto),
       police: Boolean(formData.police),
       training: Boolean(formData.training),
-      remarks: formData.remarks || '',
-      aadhaar: formData.aadhaar || '',
+      remarks: formData.remarks?.trim() || undefined,
+      aadhaar: formData.aadhaar?.trim() || undefined,
       aadhaarDoc: formData.aadhaarDoc,
       licenceDoc: formData.licenceDoc,
       imageDoc: formData.imageDoc || formData.accountAvatar,
       profileDoc: formData.profileDoc || formData.accountAvatar,
       userAccountId: formData.userAccountId || (accountMode === 'new' ? `usr-${Date.now()}` : undefined),
-      accountName: fullName,
-      accountEmail: formData.accountEmail,
-      accountPhone: formData.phone || formData.accountPhone,
+      accountName: (formData.accountName || fullName).trim() || undefined,
+      accountEmail: formData.accountEmail?.trim() || undefined,
+      accountPhone: normalizedAccountPhone || undefined,
       accountCountry: formData.accountCountry || 'India',
       accountRole: formData.accountRole || 'Driver',
-      reg: formData.reg || 'GJ12BW4501',
-      mappingActive: formData.mappingActive !== undefined ? formData.mappingActive : true,
-      nextRest: formData.nextRest || '2026-11-20'
+      // Preserve legitimate historical legacy fields on edit; never fabricate them on create
+      ...(initialDriver?.reg ? { reg: initialDriver.reg } : {}),
+      ...(initialDriver?.mappingActive !== undefined ? { mappingActive: initialDriver.mappingActive } : {}),
+      ...(initialDriver?.nextRest ? { nextRest: initialDriver.nextRest } : {}),
+      ...(initialDriver?.faceType ? { faceType: initialDriver.faceType } : {}),
+      ...(initialDriver?.faceImagesCount !== undefined ? { faceImagesCount: initialDriver.faceImagesCount } : {})
     };
 
     onSaveDriver(payload);
     onClose();
   };
 
-  // File Upload Helper with <= 3MB size check
+  // File Upload Helper with <= 3MB size check (non-blocking inline feedback)
   const handleFileUpload = (field: 'aadhaarDoc' | 'licenceDoc' | 'imageDoc' | 'accountAvatar', file: File) => {
     if (file.size > 3 * 1024 * 1024) {
-      alert(`File size exceeds 3MB limit (${(file.size / (1024 * 1024)).toFixed(1)}MB). Please choose a smaller file.`);
+      setUploadError(
+        `File "${file.name}" exceeds the 3 MB limit (${(file.size / (1024 * 1024)).toFixed(1)} MB). Please choose a smaller file.`
+      );
       return;
     }
+    setUploadError(null);
     updateField(field as any, file.name);
   };
 
@@ -610,8 +667,8 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
               {mode === 'create'
-                ? `Organization: ${companyContext || formData.company || 'Adani Port'} · 9 structured sections matching FleetRobo 2.0 standards`
-                : `${formData.name || 'Driver'} · DL: ${formData.licence || '—'} · Organization: ${companyContext || formData.company || 'Adani Port'}`}
+                ? `Organization: ${formData.company || safeDefaultCompany} · 9 structured sections matching FleetRobo 2.0 standards`
+                : `${formData.name || 'Driver'} · DL: ${formData.licence || '—'} · Organization: ${formData.company || safeDefaultCompany}`}
             </p>
           </div>
 
@@ -650,6 +707,22 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
                 ))}
               </ul>
             </div>
+          </div>
+        )}
+
+        {uploadError && (
+          <div className="mx-6 mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-center justify-between gap-2.5 text-xs text-amber-800 shrink-0">
+            <div className="flex items-center gap-2">
+              <AlertCircle size={15} className="text-amber-600 shrink-0" />
+              <span>{uploadError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setUploadError(null)}
+              className="text-amber-700 hover:text-amber-900 font-semibold cursor-pointer"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 
@@ -1144,19 +1217,20 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
                   </label>
                   <select
                     disabled={isReadOnly}
-                    value={formData.transporter || transporterOptions[0]?.name || 'Western Logistics'}
+                    value={formData.transporter || ''}
                     onChange={(e) => {
                       const selectedName = e.target.value;
-                      const matched = resolveTransporterVendor(selectedName);
+                      const matched = selectedName ? resolveTransporterVendor(selectedName) : undefined;
                       setFormData(prev => ({
                         ...prev,
-                        transporter: selectedName,
+                        transporter: selectedName || undefined,
                         transporterVendorId: matched?.id,
                       }));
                       setIsDirty(true);
                     }}
                     className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-[#FA8A63]"
                   >
+                    <option value="">Select transporter</option>
                     {transporterOptions.map((t) => (
                       <option key={t.name} value={t.name}>
                         {t.publicId ? `${t.name} (${t.publicId})` : t.name}
@@ -1294,10 +1368,11 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
                   </label>
                   <select
                     disabled={isReadOnly}
-                    value={formData.blood || 'B+'}
-                    onChange={(e) => updateField('blood', e.target.value)}
+                    value={formData.blood || ''}
+                    onChange={(e) => updateField('blood', e.target.value || undefined)}
                     className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-[#FA8A63]"
                   >
+                    <option value="">Select blood group</option>
                     {DRIVER_LOOKUPS.bloodGroups.map((bg) => (
                       <option key={bg} value={bg}>{bg}</option>
                     ))}
@@ -1312,10 +1387,11 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
                   </label>
                   <select
                     disabled={isReadOnly}
-                    value={formData.qualification || 'Secondary (10th)'}
-                    onChange={(e) => updateField('qualification', e.target.value)}
+                    value={formData.qualification || ''}
+                    onChange={(e) => updateField('qualification', e.target.value || undefined)}
                     className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-[#FA8A63]"
                   >
+                    <option value="">Select qualification</option>
                     <option value="Primary (5th)">Primary (5th)</option>
                     <option value="Middle School (8th)">Middle School (8th)</option>
                     <option value="Secondary (10th)">Secondary (10th)</option>

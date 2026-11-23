@@ -1,6 +1,17 @@
 import React from 'react';
 import { X } from 'lucide-react';
-import { Vehicle } from '../types/vehicle';
+import {
+  Vehicle,
+  DEMO_LOOKUPS,
+  formatModelCatalogLabel,
+  getVehicleOwningCompany,
+  normalizeRegistrationNumber,
+  saveVehicleMasterStore,
+  syncVehicleOperationalActiveState,
+  validateVehicleCandidate
+} from '../types/vehicle';
+import { loadVehicleModelStore } from '../types/vehicleModelMaster';
+import { parseCsvLine } from '../types/modalMaster';
 import {
   DirectBulkUploadView,
   formatUploadFileSize,
@@ -12,12 +23,13 @@ interface ImportDrawerProps {
   onClose: () => void;
   onImportComplete: (createdCount: number, updatedCount: number, skippedCount: number) => void;
   existingVehicles: Vehicle[];
+  companyContext?: string;
 }
 
 const SAMPLE_VEHICLES_CSV = `Company,Registration Number,Vehicle Name,Make,Model,Year,Status,TransPorter,Internal ID,VIN
 Adani Port,MH14XY9900,Tata Signa 5530,Tata Motors,Signa 5530,2023,Available,Western Logistics,TRK-9900,TATA9900XYZ123
 Adani Port,GJ01AB1122,Ashok Leyland 2820,Ashok Leyland,2820,2022,Available,TMS Transporter,TRK-1122,ASHOK1122ABC999
-Adani Port,MH12AB1234,Tata Signa 5530 (Updated),Tata Motors,Signa 5530,2024,In Use,Western Logistics,TRK-0019,MA3FJEB1S00654321`;
+Adani Port,MH12AB1234,Tata Signa 5530 (Duplicate),Tata Motors,Signa 5530,2024,In Use,Western Logistics,TRK-0019,MA3FJEB1S00654321`;
 
 const CANONICAL_KEYS = [
   'company',
@@ -25,8 +37,11 @@ const CANONICAL_KEYS = [
   'name',
   'internal_id',
   'vin',
+  'chassis_number',
   'make',
   'model',
+  'machine_model',
+  'vehicle_model_id',
   'year',
   'type',
   'status',
@@ -43,11 +58,18 @@ export const ImportDrawer: React.FC<ImportDrawerProps> = ({
   isOpen,
   onClose,
   onImportComplete,
-  existingVehicles
+  existingVehicles,
+  companyContext
 }) => {
   const upload = useDirectUploadState(isOpen);
 
   if (!isOpen) return null;
+
+  const isTenantScoped =
+    Boolean(companyContext) &&
+    companyContext !== 'All Clients' &&
+    companyContext !== 'Platform Admin' &&
+    companyContext !== 'Binary';
 
   const processCsvUpload = (text: string, fileName: string, fileSize?: number) => {
     const lines = text.split(/\r\n|\n/).filter((l) => l.trim().length > 0);
@@ -60,7 +82,7 @@ export const ImportDrawer: React.FC<ImportDrawerProps> = ({
       return;
     }
 
-    const headers = lines[0].split(',').map((h) => h.trim().replace(/^"|"$/g, ''));
+    const headers = parseCsvLine(lines[0]).map((h) => h.trim().replace(/^"|"$/g, ''));
     const columnMap: Record<string, string> = {};
     CANONICAL_KEYS.forEach((key) => {
       const matched = headers.find((h) => {
@@ -72,7 +94,8 @@ export const ImportDrawer: React.FC<ImportDrawerProps> = ({
           normH === normKey ||
           (key === 'registration_number' &&
             (lower.includes('plate') || lower.includes('registration'))) ||
-          (key === 'name' && (lower === 'vehicle name' || lower === 'vehicle'))
+          (key === 'name' && (lower === 'vehicle name' || lower === 'vehicle')) ||
+          (key === 'vin' && lower.includes('chassis'))
         );
       });
       if (matched) columnMap[key] = matched;
@@ -81,62 +104,146 @@ export const ImportDrawer: React.FC<ImportDrawerProps> = ({
     const regCol = columnMap['registration_number'] || headers[1] || headers[0];
     const compCol = columnMap['company'] || headers[0];
 
-    const seenPlates = new Set<string>();
+    const modelCatalog = loadVehicleModelStore();
+    const seenKeys = new Set<string>();
     const newVehicles: Vehicle[] = [];
-    let skipped = 0;
+    const skipReasons: string[] = [];
     const today = new Date().toISOString().split('T')[0];
 
     for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split(',').map((v) => v.trim().replace(/^"|"$/g, ''));
+      const values = parseCsvLine(lines[i]).map((v) => v.trim().replace(/^"|"$/g, ''));
       const row: Record<string, string> = {};
       headers.forEach((h, idx) => {
         row[h] = values[idx] || '';
       });
 
-      const comp = (row[compCol] || 'Adani Port').trim();
+      const rawComp = (row[compCol] || '').trim();
+      const comp = rawComp || (isTenantScoped ? companyContext! : 'Adani Port');
+
+      if (isTenantScoped && comp.toLowerCase() !== companyContext!.trim().toLowerCase()) {
+        skipReasons.push(`Row ${i}: Company "${comp}" outside current tenant "${companyContext}"`);
+        continue;
+      }
+
       const rawReg = (row[regCol] || '').trim().toUpperCase();
-      const cleanReg = rawReg.replace(/[^A-Z0-9]/g, '');
+      const cleanReg = normalizeRegistrationNumber(rawReg);
+      const dedupeKey = `${comp.toLowerCase()}::${cleanReg}`;
 
-      if (!cleanReg || cleanReg.length < 5 || seenPlates.has(cleanReg)) {
-        skipped++;
+      if (cleanReg && seenKeys.has(dedupeKey)) {
+        skipReasons.push(`Row ${i} (${rawReg}): Duplicate registration number within CSV`);
         continue;
       }
-      seenPlates.add(cleanReg);
 
-      const exists = existingVehicles.some(
-        (v) =>
-          v.company.toLowerCase() === comp.toLowerCase() &&
-          v.registration_number.replace(/[^A-Z0-9]/g, '') === cleanReg
+      const rawModel = (
+        row[columnMap['machine_model']] ||
+        row[columnMap['model']] ||
+        ''
+      ).trim();
+      const rawModelId = (row[columnMap['vehicle_model_id']] || '').trim();
+      const rawMake = (row[columnMap['make']] || '').trim();
+      const combinedModelHint =
+        rawMake && rawModel && !rawModel.toLowerCase().includes(rawMake.toLowerCase())
+          ? `${rawMake} ${rawModel}`
+          : rawModel;
+
+      const rawStatus = (row[columnMap['status']] || 'Available').trim();
+      const rawChassis = (
+        row[columnMap['chassis_number']] ||
+        row[columnMap['vin']] ||
+        ''
+      ).trim().toUpperCase();
+
+      const validation = validateVehicleCandidate(
+        {
+          mode: 'import',
+          company: comp,
+          registration_number: rawReg,
+          vehicle_model_id: rawModelId || undefined,
+          machine_model: combinedModelHint || rawModel,
+          chassis_number: rawChassis,
+          vin: rawChassis,
+          status: rawStatus
+        },
+        [...existingVehicles, ...newVehicles],
+        modelCatalog
       );
-      if (exists) {
-        skipped++;
+
+      if (!validation.valid) {
+        const firstErr = Object.values(validation.errors)[0] || 'Invalid row data';
+        skipReasons.push(`Row ${i}${rawReg ? ` (${rawReg})` : ''}: ${firstErr}`);
         continue;
       }
+
+      const yearRaw = (row[columnMap['year']] || '').trim();
+      const parsedYear = yearRaw ? Number(yearRaw) : undefined;
+      if (
+        yearRaw &&
+        (parsedYear === undefined ||
+          Number.isNaN(parsedYear) ||
+          !Number.isInteger(parsedYear) ||
+          parsedYear < 1900 ||
+          parsedYear > 2100)
+      ) {
+        skipReasons.push(`Row ${i} (${rawReg}): Year must be an integer between 1900 and 2100`);
+        continue;
+      }
+
+      seenKeys.add(dedupeKey);
+
+      const resolvedModel = validation.resolvedModel;
+      const machineModelDisplay = resolvedModel
+        ? formatModelCatalogLabel(resolvedModel)
+        : combinedModelHint || rawModel;
+      const modelNameDisplay = resolvedModel?.modelName || rawModel || machineModelDisplay;
+      const makeDisplay = resolvedModel?.manufacturer || rawMake;
+      const operationalStatus = rawStatus as Vehicle['status'];
+      const syncedActive = syncVehicleOperationalActiveState(operationalStatus);
 
       const vName =
-        row[columnMap['name']] ||
-        [row[columnMap['make']], row[columnMap['model']]].filter(Boolean).join(' ') ||
+        (row[columnMap['name']] || '').trim() ||
+        [makeDisplay, modelNameDisplay].filter(Boolean).join(' ') ||
         rawReg;
+
+      const existingMatch = existingVehicles.find(
+        (v) =>
+          getVehicleOwningCompany(v).toLowerCase() === comp.toLowerCase() &&
+          normalizeRegistrationNumber(v.registration_number) === cleanReg
+      );
+      if (existingMatch) {
+        skipReasons.push(`Row ${i} (${rawReg}): Duplicate already exists in ${comp}`);
+        continue;
+      }
 
       newVehicles.push({
         id: `veh-imp-${Date.now()}-${i}`,
-        public_id: `VEH-${Math.floor(2000 + Math.random() * 8000)}`,
+        public_id: `VH-${Math.floor(200000 + Math.random() * 800000)}`,
         company: comp,
+        client: comp,
         registration_number: rawReg,
         name: vName,
-        internal_id: row[columnMap['internal_id']] || `TRK-${cleanReg.slice(-4)}`,
-        vin: row[columnMap['vin']] || '',
-        make: row[columnMap['make']] || 'Tata Motors',
-        model: row[columnMap['model']] || 'Signa 5530',
-        year: Number(row[columnMap['year']]) || 2024,
-        type: (row[columnMap['type']] as Vehicle['type']) || 'Truck',
-        status: (row[columnMap['status']] as Vehicle['status']) || 'Available',
-        transporter: row[columnMap['transporter']] || 'Western Logistics',
-        vendor: row[columnMap['vendor']] || undefined,
-        driver: row[columnMap['driver']] || undefined,
-        fleets: row[columnMap['fleet']] ? [row[columnMap['fleet']]] : [],
-        odometer: Number(row[columnMap['odometer']]) || 0,
-        odometer_unit: (row[columnMap['odometer_unit']] as 'km' | 'mi') || 'km',
+        internal_id: (row[columnMap['internal_id']] || '').trim() || undefined,
+        vin: rawChassis || undefined,
+        chassis_number: rawChassis || undefined,
+        make: makeDisplay || undefined,
+        model: modelNameDisplay,
+        machine_model: machineModelDisplay,
+        vehicle_model_id: resolvedModel?.id,
+        vehicle_segment: resolvedModel?.vehicleSegment,
+        year: parsedYear,
+        type:
+          (row[columnMap['type']] as Vehicle['type']) ||
+          resolvedModel?.vehicleType ||
+          'Truck',
+        status: operationalStatus,
+        active_status: syncedActive,
+        transporter: (row[columnMap['transporter']] || '').trim() || undefined,
+        vendor: (row[columnMap['vendor']] || '').trim() || undefined,
+        driver: (row[columnMap['driver']] || '').trim() || undefined,
+        fleets: row[columnMap['fleet']] ? [row[columnMap['fleet']].trim()] : [],
+        odometer: row[columnMap['odometer']] ? Number(row[columnMap['odometer']]) || 0 : undefined,
+        odometer_unit:
+          (row[columnMap['odometer_unit']] as 'km' | 'mi') ||
+          (row[columnMap['odometer']] ? 'km' : undefined),
         fuel_type: (row[columnMap['fuel_type']] as Vehicle['fuel_type']) || 'Diesel',
         created_at: today,
         updated_at: today
@@ -144,26 +251,38 @@ export const ImportDrawer: React.FC<ImportDrawerProps> = ({
     }
 
     if (newVehicles.length === 0) {
-      upload.fail('No new valid vehicle rows found (all rows were invalid or duplicates).');
+      const reasonPreview =
+        skipReasons.length > 0
+          ? ` Reasons: ${skipReasons.slice(0, 3).join('; ')}${
+              skipReasons.length > 3 ? ` (+${skipReasons.length - 3} more)` : ''
+            }`
+          : '';
+      upload.fail(`No new valid vehicle rows found.${reasonPreview}`);
       return;
     }
 
     upload.startUploading(fileName, formatUploadFileSize(fileSize), () => {
-      try {
-        const merged = [...newVehicles, ...existingVehicles];
-        localStorage.setItem('fleetrobo_vehicle_master_v3', JSON.stringify(merged));
-      } catch {
-        // ignore storage quota errors
-      }
-      onImportComplete(newVehicles.length, 0, skipped);
+      const merged = [...newVehicles, ...existingVehicles];
+      saveVehicleMasterStore(merged);
+      onImportComplete(newVehicles.length, 0, skipReasons.length);
+      const skipNote =
+        skipReasons.length > 0
+          ? ` ${skipReasons.length} row${skipReasons.length === 1 ? '' : 's'} skipped (${skipReasons
+              .slice(0, 2)
+              .join('; ')}${skipReasons.length > 2 ? '…' : ''}).`
+          : '';
       return {
         headline: 'Vehicles uploaded successfully',
-        description: `${newVehicles.length} vehicle record${newVehicles.length === 1 ? '' : 's'} imported from ${fileName}.${
-          skipped > 0 ? ` ${skipped} duplicate or invalid row${skipped === 1 ? '' : 's'} skipped.` : ''
-        }`,
+        description: `${newVehicles.length} vehicle record${
+          newVehicles.length === 1 ? '' : 's'
+        } imported from ${fileName}.${skipNote}`,
         stats: [
           { label: 'Uploaded', value: newVehicles.length, tone: 'emerald' },
-          { label: 'Skipped', value: skipped, tone: skipped > 0 ? 'amber' : 'slate' }
+          {
+            label: 'Skipped',
+            value: skipReasons.length,
+            tone: skipReasons.length > 0 ? 'amber' : 'slate'
+          }
         ]
       };
     });
@@ -184,8 +303,8 @@ export const ImportDrawer: React.FC<ImportDrawerProps> = ({
   };
 
   const handleDownloadTemplate = () => {
-    const csvContent =
-      'Company,Registration Number,Vehicle Name,Make,Model,Year,Status,TransPorter,Internal ID,VIN\nAdani Port,MH12AA0001,Tata Signa 5530,Tata Motors,Signa 5530,2023,Available,Western Logistics,TRK-001,MA3FJEB1S00000001';
+    const sampleCompany = isTenantScoped ? companyContext : 'Adani Port';
+    const csvContent = `Company,Registration Number,Vehicle Name,Make,Model,Year,Status,TransPorter,Internal ID,VIN\n${sampleCompany},MH12AA0001,Tata Signa 5530,Tata Motors,Signa 5530,2023,Available,${DEMO_LOOKUPS.transporters[0]},TRK-001,MA3FJEB1S00000001`;
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -198,12 +317,18 @@ export const ImportDrawer: React.FC<ImportDrawerProps> = ({
   };
 
   const handleUseSample = () => {
-    processCsvUpload(SAMPLE_VEHICLES_CSV, 'sample_vehicles.csv', SAMPLE_VEHICLES_CSV.length);
+    const sampleCsv = isTenantScoped
+      ? SAMPLE_VEHICLES_CSV.replace(/^Adani Port,/gm, `${companyContext},`)
+      : SAMPLE_VEHICLES_CSV;
+    processCsvUpload(sampleCsv, 'sample_vehicles.csv', sampleCsv.length);
   };
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden flex justify-end">
-      <div onClick={onClose} className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity" />
+      <div
+        onClick={onClose}
+        className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity"
+      />
 
       <div className="relative w-[640px] max-w-full bg-white h-full shadow-2xl flex flex-col z-10 animate-in slide-in-from-right duration-200">
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between shrink-0 bg-white">

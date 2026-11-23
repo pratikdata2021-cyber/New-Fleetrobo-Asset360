@@ -1,6 +1,12 @@
 import React from 'react';
 import { X } from 'lucide-react';
-import { Driver } from '../types/driver';
+import {
+  Driver,
+  DRIVER_LOOKUPS,
+  isGlobalDriverAdminContext,
+  normalizeLicenceNumber
+} from '../types/driver';
+import { parseCsvLine } from '../types/modalMaster';
 import {
   DirectBulkUploadView,
   formatUploadFileSize,
@@ -11,28 +17,83 @@ interface DriverImportDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   existingDrivers: Driver[];
+  companyContext?: string;
   onImportComplete: (createdDrivers: Driver[], skippedCount: number) => void;
 }
 
-const SAMPLE_CSV_CONTENT = `Driver Name,Mobile Number,Date of Birth,Licence Number,Licence Valid From,Licence Valid To,Company,Transporter,Blood Group,Experience
-Devendra Sharma,9876501234,1989-05-15,DL0420160012345,2016-01-10,2030-01-09,Adani Pvt Ltd,Western Logistics,B+,9
-Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,Adani Pvt Ltd,TMS Transporter,O+,12
-Mohan Lal Verma,9765401234,1993-02-28,RJ1420170054321,2017-08-15,2027-08-14,Binary Semantics Ltd,Binary Logistics,A+,7
-Kalyan Rao,9845101234,1984-09-10,KA0120080033445,2008-03-20,2028-03-19,Adani Pvt Ltd,Western Logistics,AB+,16
-Ajay Kumar,9934501234,1995-12-05,UP3220190077889,2019-10-01,2029-09-30,Adani Pvt Ltd,Western Logistics,B+,5`;
+const SAMPLE_CSV_CONTENT = `Driver Name,Mobile Number,Date of Birth,Licence Number,Licence Valid From,Licence Valid To,Company,Transporter,Blood Group,Experience,RTO Certified,Police Verified,Training Completed,RFID Enabled
+Devendra Sharma,9876501234,1989-05-15,DL0420160012345,2016-01-10,2030-01-09,Adani Port,Western Logistics,B+,9,Yes,Yes,Yes,Yes
+Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,Adani Mundra,TMS Transporter,O+,12,Yes,No,Yes,No
+Mohan Lal Verma,9765401234,1993-02-28,RJ1420170054321,2017-08-15,2027-08-14,Binary Semantics Ltd,Binary Logistics,A+,7,Yes,Yes,No,No
+Kalyan Rao,9845101234,1984-09-10,KA0120080033445,2008-03-20,2028-03-19,Adani Port,Western Logistics,AB+,16,No,No,No,Yes
+Ajay Kumar,9934501234,1995-12-05,UP3220190077889,2019-10-01,2029-09-30,Adani Mundra,Western Logistics,B+,5,Yes,Yes,Yes,No`;
+
+function parseStrictIsoOrSlashDate(raw?: string): string | null {
+  const s = (raw || '').trim();
+  if (!s) return null;
+
+  // YYYY-MM-DD
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (ymd) {
+    const y = Number(ymd[1]);
+    const m = Number(ymd[2]);
+    const d = Number(ymd[3]);
+    const dt = new Date(y, m - 1, d);
+    if (dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d) {
+      return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+    }
+    return null;
+  }
+
+  // DD/MM/YYYY
+  const dmy = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(s);
+  if (dmy) {
+    const d = Number(dmy[1]);
+    const m = Number(dmy[2]);
+    const y = Number(dmy[3]);
+    const dt = new Date(y, m - 1, d);
+    if (dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d) {
+      return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+    }
+    return null;
+  }
+
+  return null;
+}
+
+function parseExplicitBooleanFlag(raw?: string): boolean {
+  const val = (raw || '').trim().toLowerCase();
+  return ['yes', 'true', '1', 'y', 'verified', 'certified', 'completed'].includes(val);
+}
 
 export const DriverImportDrawer: React.FC<DriverImportDrawerProps> = ({
   isOpen,
   onClose,
   existingDrivers,
+  companyContext,
   onImportComplete
 }) => {
   const upload = useDirectUploadState(isOpen);
 
   if (!isOpen) return null;
 
+  const isGlobalAdmin = isGlobalDriverAdminContext(companyContext);
+
+  const buildTemplateCsv = () => {
+    if (!isGlobalAdmin && companyContext) {
+      const targetComp = companyContext.trim();
+      const defaultTransporter =
+        DRIVER_LOOKUPS.companyTransporterMap[targetComp]?.[0] || '';
+      return `Driver Name,Mobile Number,Date of Birth,Licence Number,Licence Valid From,Licence Valid To,Company,Transporter,Blood Group,Experience,RTO Certified,Police Verified,Training Completed,RFID Enabled
+Devendra Sharma,9876501234,1989-05-15,DL0420160012345,2016-01-10,2030-01-09,${targetComp},${defaultTransporter},B+,9,Yes,Yes,Yes,Yes
+Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,${targetComp},${defaultTransporter},O+,12,Yes,No,Yes,No`;
+    }
+    return SAMPLE_CSV_CONTENT;
+  };
+
   const handleDownloadTemplate = () => {
-    const blob = new Blob([SAMPLE_CSV_CONTENT], { type: 'text/csv;charset=utf-8;' });
+    const content = buildTemplateCsv();
+    const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -50,63 +111,136 @@ export const DriverImportDrawer: React.FC<DriverImportDrawerProps> = ({
       return;
     }
 
-    const headers = lines[0].split(',').map((h) => h.trim().replace(/^["']|["']$/g, ''));
+    const headers = parseCsvLine(lines[0]).map((h) => h.trim());
     const created: Driver[] = [];
     const seenDlInFile = new Set<string>();
+    const existingDls = new Set(existingDrivers.map((d) => normalizeLicenceNumber(d.licence)));
     let skipped = 0;
+
+    const todayLocal = new Date();
+    const todayMidnight = new Date(
+      todayLocal.getFullYear(),
+      todayLocal.getMonth(),
+      todayLocal.getDate()
+    ).getTime();
 
     for (let i = 1; i < lines.length; i++) {
       if (i > 1000) break;
-      const values = lines[i].split(',').map((v) => v.trim().replace(/^["']|["']$/g, ''));
+      const values = parseCsvLine(lines[i]);
       const raw: Record<string, string> = {};
       headers.forEach((h, idx) => {
-        raw[h] = values[idx] || '';
+        raw[h] = (values[idx] || '').trim();
       });
 
-      const driverName = raw['Driver Name'] || raw['Name'] || raw['First Name'] || '';
+      const driverName = (raw['Driver Name'] || raw['Name'] || raw['First Name'] || '').trim();
       const phone = (raw['Mobile Number'] || raw['Mobile No.'] || raw['Phone'] || '').replace(/\D/g, '');
-      const dob = raw['Date of Birth'] || raw['Date of Birth (dd/mm/yyyy)'] || raw['DOB'] || '';
-      const licence = (raw['Licence Number'] || raw['License No.'] || raw['Licence'] || '').toUpperCase();
-      const licenceFrom = raw['Licence Valid From'] || raw['Licence Valid From (dd/mm/yyyy)'] || '2020-01-01';
-      const licenceTo = raw['Licence Valid To'] || raw['License Valid To (dd/mm/yyyy)'] || '2030-01-01';
-      const company = raw['Company'] || 'Adani Pvt Ltd';
-      const transporter = raw['Transporter'] || 'Western Logistics';
-      const blood = (raw['Blood Group'] || 'B+') as Driver['blood'];
-      const experience = Number(raw['Experience'] || raw['Driving Experience']) || 5;
+      const dob = parseStrictIsoOrSlashDate(
+        raw['Date of Birth'] || raw['Date of Birth (dd/mm/yyyy)'] || raw['DOB']
+      );
+      const licence = normalizeLicenceNumber(
+        raw['Licence Number'] || raw['License No.'] || raw['Licence']
+      );
+      const licenceFrom = parseStrictIsoOrSlashDate(
+        raw['Licence Valid From'] || raw['Licence Valid From (dd/mm/yyyy)']
+      );
+      const licenceTo = parseStrictIsoOrSlashDate(
+        raw['Licence Valid To'] || raw['License Valid To (dd/mm/yyyy)']
+      );
 
-      const isDuplicate =
-        !licence ||
-        seenDlInFile.has(licence) ||
-        existingDrivers.some((d) => d.licence.toLowerCase() === licence.toLowerCase());
-
-      if (!driverName || driverName.length < 2 || phone.length !== 10 || !dob || isDuplicate) {
+      // Require real mandatory identity and licence dates without fabricating defaults
+      if (!driverName || driverName.length < 2 || phone.length !== 10 || !dob) {
         skipped++;
         continue;
       }
+      const dobMs = new Date(`${dob}T00:00:00`).getTime();
+      if (Number.isNaN(dobMs) || dobMs > todayMidnight) {
+        skipped++;
+        continue;
+      }
+
+      if (!licence || licence.length < 6 || !licenceFrom || !licenceTo) {
+        skipped++;
+        continue;
+      }
+      if (new Date(`${licenceTo}T00:00:00`).getTime() < new Date(`${licenceFrom}T00:00:00`).getTime()) {
+        skipped++;
+        continue;
+      }
+
+      if (seenDlInFile.has(licence) || existingDls.has(licence)) {
+        skipped++;
+        continue;
+      }
+
+      // Enforce strict tenant isolation without fabricating 'Adani Pvt Ltd'
+      const rawCompany = (raw['Company'] || '').trim();
+      let resolvedCompany = '';
+      if (!isGlobalAdmin && companyContext) {
+        if (rawCompany && rawCompany.toLowerCase() !== companyContext.trim().toLowerCase()) {
+          skipped++;
+          continue;
+        }
+        resolvedCompany = companyContext.trim();
+      } else {
+        if (!rawCompany || isGlobalDriverAdminContext(rawCompany)) {
+          skipped++;
+          continue;
+        }
+        resolvedCompany = rawCompany;
+      }
+
+      const rawTransporter = (raw['Transporter'] || '').trim();
+      const rawBlood = (raw['Blood Group'] || '').trim();
+      const resolvedBlood = DRIVER_LOOKUPS.bloodGroups.includes(rawBlood as any)
+        ? (rawBlood as Driver['blood'])
+        : undefined;
+
+      const expRaw = raw['Experience'] ?? raw['Driving Experience'];
+      const parsedExp =
+        expRaw !== undefined && expRaw !== '' && Number.isFinite(Number(expRaw)) && Number(expRaw) >= 0
+          ? Number(expRaw)
+          : undefined;
+
+      const rawStatus = (raw['Driver Status'] || raw['Status'] || '').trim();
+      const status: Driver['status'] = DRIVER_LOOKUPS.driverStatuses.includes(rawStatus as any)
+        ? (rawStatus as Driver['status'])
+        : 'Active';
+
+      const parts = driverName.split(/\s+/);
+      const first = parts[0] || driverName;
+      const last = parts.length > 1 ? parts.slice(1).join(' ') : undefined;
 
       seenDlInFile.add(licence);
       created.push({
         id: `drv-imp-${Date.now()}-${i}`,
         name: driverName,
+        first,
+        firstName: first,
+        last,
+        lastName: last,
         phone,
         dob,
         licence,
+        licenceType: raw['Licence Type'] || 'HMV',
         licenceFrom,
         licenceTo,
-        company,
-        transporter,
-        blood,
-        experience,
-        status: 'Active',
-        rto: true,
-        police: true,
-        training: true,
-        rfid: true
+        company: resolvedCompany,
+        ...(rawTransporter ? { transporter: rawTransporter } : {}),
+        ...(resolvedBlood ? { blood: resolvedBlood } : {}),
+        ...(parsedExp !== undefined ? { experience: parsedExp } : {}),
+        status,
+        rto: parseExplicitBooleanFlag(raw['RTO Certified'] || raw['RTO']),
+        police: parseExplicitBooleanFlag(raw['Police Verified'] || raw['Police']),
+        training: parseExplicitBooleanFlag(raw['Training Completed'] || raw['Training']),
+        rfid: parseExplicitBooleanFlag(raw['RFID Enabled'] || raw['RFID']),
+        vendor: parseExplicitBooleanFlag(raw['Vendor Linked'] || raw['Vendor'])
       });
     }
 
     if (created.length === 0) {
-      upload.fail('No new valid driver rows found (missing required fields or duplicate licences).');
+      upload.fail(
+        'No valid driver rows found (check missing/invalid dates, duplicate licences, or unauthorized company rows).'
+      );
       return;
     }
 
@@ -115,7 +249,9 @@ export const DriverImportDrawer: React.FC<DriverImportDrawerProps> = ({
       return {
         headline: 'Drivers uploaded successfully',
         description: `${created.length} driver record${created.length === 1 ? '' : 's'} added from ${name}.${
-          skipped > 0 ? ` ${skipped} duplicate or invalid row${skipped === 1 ? '' : 's'} skipped.` : ''
+          skipped > 0
+            ? ` ${skipped} duplicate, cross-tenant, or invalid row${skipped === 1 ? '' : 's'} skipped.`
+            : ''
         }`,
         stats: [
           { label: 'Uploaded', value: created.length, tone: 'emerald' },
@@ -143,7 +279,8 @@ export const DriverImportDrawer: React.FC<DriverImportDrawerProps> = ({
   };
 
   const handleUseSample = () => {
-    processCsvText(SAMPLE_CSV_CONTENT, 'Demo_FleetRobo_Drivers.csv', SAMPLE_CSV_CONTENT.length);
+    const csv = buildTemplateCsv();
+    processCsvText(csv, 'Demo_FleetRobo_Drivers.csv', csv.length);
   };
 
   return (

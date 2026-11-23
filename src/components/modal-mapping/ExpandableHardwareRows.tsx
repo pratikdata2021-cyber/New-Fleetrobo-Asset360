@@ -19,12 +19,14 @@ import {
   StopCircle
 } from 'lucide-react';
 import {
+  ModalMasterStore,
   ConnectionRecord,
   HardwareBinding,
   HardwareBindingMode,
   HardwareMembership,
   SUPPORTED_TIMEZONES,
   ExpandableBindingDisplayStatus,
+  loadModalMasterStore,
   buildExpandableBindingRows,
   formatDateTimeWithTz,
   formatLocalInputParts,
@@ -173,6 +175,7 @@ interface ExpandableHardwareRowsProps {
   connectionBindings: HardwareBinding[];
   allGlobalBindings: HardwareBinding[];
   scopeHardwareId?: string | null;
+  store?: ModalMasterStore;
   canEdit: boolean;
   onOpenDetails: (conn: ConnectionRecord, tab: DetailsDrawerTab) => void;
   onSaveBinding: (updated: HardwareBinding) => void;
@@ -185,6 +188,7 @@ export const ExpandableHardwareRows: React.FC<ExpandableHardwareRowsProps> = ({
   connectionBindings,
   allGlobalBindings,
   scopeHardwareId = null,
+  store,
   canEdit,
   onOpenDetails,
   onSaveBinding,
@@ -192,6 +196,38 @@ export const ExpandableHardwareRows: React.FC<ExpandableHardwareRowsProps> = ({
 }) => {
   const [hoveredParentId, setHoveredParentId] = useState<string | null>(null);
   const [editingBinding, setEditingBinding] = useState<HardwareBinding | null>(null);
+  const resolvedStore = useMemo(() => store || loadModalMasterStore(), [store]);
+
+  const liveMembers = useMemo(() => {
+    return (connection.members || []).map((m) => {
+      if (m.category === 'Device') {
+        const dev = resolvedStore.devices.find((d) => d.id === m.hardwareId);
+        if (dev) {
+          const st = dev.statusOverride || dev.hardwareLifecycle;
+          if (st === 'Decommissioned' || st === 'In Maintenance') {
+            return { ...m, registrationStatus: st };
+          }
+        }
+      } else if (m.category === 'Sensor') {
+        const sen = resolvedStore.sensors.find((s) => s.id === m.hardwareId);
+        if (sen) {
+          const st = sen.statusOverride || sen.hardwareLifecycle;
+          if (st === 'Decommissioned' || st === 'In Maintenance') {
+            return { ...m, registrationStatus: st };
+          }
+        }
+      } else if (m.category === 'SIM') {
+        const sim = resolvedStore.sims.find((s) => s.id === m.hardwareId);
+        if (sim) {
+          const st = sim.status;
+          if (st === 'Retired' || st === 'Suspended' || st === 'Inactive') {
+            return { ...m, registrationStatus: st };
+          }
+        }
+      }
+      return m;
+    });
+  }, [connection.members, resolvedStore]);
 
   // Edit binding modal form state
   const [editFromId, setEditFromId] = useState('');
@@ -208,12 +244,12 @@ export const ExpandableHardwareRows: React.FC<ExpandableHardwareRowsProps> = ({
   const rows = useMemo(
     () =>
       buildExpandableBindingRows(
-        connection.members || [],
+        liveMembers,
         connectionBindings,
         allGlobalBindings,
         scopeHardwareId
       ),
-    [connection.members, connectionBindings, allGlobalBindings, scopeHardwareId]
+    [liveMembers, connectionBindings, allGlobalBindings, scopeHardwareId]
   );
 
   const openEditBindingModal = (b: HardwareBinding) => {
@@ -253,7 +289,7 @@ export const ExpandableHardwareRows: React.FC<ExpandableHardwareRowsProps> = ({
         timezone: editTz,
         portOrSlot: editPort.trim() || null
       },
-      connection.members || [],
+      liveMembers,
       connectionBindings,
       allGlobalBindings
     );

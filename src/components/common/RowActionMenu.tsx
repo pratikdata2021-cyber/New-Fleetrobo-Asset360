@@ -7,8 +7,10 @@ export interface RowActionItem {
   label: string;
   icon?: React.ReactNode;
   onClick: () => void;
-  tone?: 'default' | 'accent' | 'warning' | 'danger';
+  tone?: 'default' | 'accent' | 'warning' | 'danger' | 'muted';
   badge?: string | number;
+  sublabel?: string;
+  title?: string;
   dividerBefore?: boolean;
   disabled?: boolean;
   hidden?: boolean;
@@ -152,6 +154,8 @@ export const RowActionMenu: React.FC<RowActionMenuProps> = ({
                   ? 'text-amber-700 hover:bg-amber-50 font-medium'
                   : item.tone === 'accent'
                   ? 'text-[#E56B38] hover:bg-orange-50 font-semibold'
+                  : item.tone === 'muted'
+                  ? 'text-slate-400 hover:bg-slate-50 font-medium'
                   : 'text-slate-700 hover:bg-slate-50';
 
               return (
@@ -161,6 +165,7 @@ export const RowActionMenu: React.FC<RowActionMenuProps> = ({
                     type="button"
                     role="menuitem"
                     disabled={item.disabled}
+                    title={item.title}
                     onClick={(e) => {
                       e.stopPropagation();
                       if (item.disabled) return;
@@ -173,9 +178,16 @@ export const RowActionMenu: React.FC<RowActionMenuProps> = ({
                         : `${toneClasses} cursor-pointer`
                     }`}
                   >
-                    <span className="flex items-center gap-2 min-w-0">
-                      {item.icon && <span className="shrink-0 flex items-center">{item.icon}</span>}
-                      <span className="truncate">{item.label}</span>
+                    <span className="flex items-start gap-2 min-w-0">
+                      {item.icon && <span className="shrink-0 flex items-center mt-0.5">{item.icon}</span>}
+                      <span className="min-w-0 flex flex-col">
+                        <span className="truncate">{item.label}</span>
+                        {item.sublabel && (
+                          <span className="text-[10px] text-slate-400 font-normal leading-tight truncate">
+                            {item.sublabel}
+                          </span>
+                        )}
+                      </span>
                     </span>
                     {item.badge !== undefined && (
                       <span className="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-bold shrink-0">

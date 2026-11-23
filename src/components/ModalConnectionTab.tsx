@@ -39,15 +39,17 @@ import {
   ModalMasterStore,
   ConnectionRecord,
   ConnectionLifecycleStatus,
+  HardwareMembership,
   HardwareBinding,
   HardwareBindingStatus,
+  ResourceRelationship,
   SavedModalView,
   ALL_MODAL_CONNECTION_COLUMNS,
   MODAL_CONNECTION_DEFAULT_COLUMNS,
   MODAL_CONNECTION_SELECT_TOOLTIP,
   MODAL_CONNECTION_ACTIONS_TOOLTIP,
   COMPANY_NAME_TO_ID,
-  MODAL_OWNERS,
+  computeEffectiveConnectionStatus,
   computeHardwareBindingStatus,
   computeResourceAllocationStatus,
   formatDateTimeWithTz,
@@ -56,7 +58,12 @@ import {
   parseCsvLine,
   resolveHardwareIdentifierValue
 } from '../types/modalMaster';
-import { getEnabledModelsForCompanyName } from '../types/companyModelEnablement';
+import { loadModelCategoryStore } from '../types/modelCategoryMaster';
+import {
+  getEnabledModelsForCompanyName,
+  resolveClientCompanyByNameOrId,
+  doesItemBelongToCompany
+} from '../types/companyModelEnablement';
 import {
   ConnectionDetailsDrawer,
   DetailsDrawerTab
@@ -103,11 +110,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
 }) => {
   // Independent Tab 1 state
   const [searchQuery, setSearchQuery] = useState('');
+  const [filterOrganization, setFilterOrganization] = useState('All');
   const [filterStatus, setFilterStatus] = useState('All');
+  const [filterSite, setFilterSite] = useState('All');
   const [filterCategory, setFilterCategory] = useState('All');
   const [filterDeviceModelId, setFilterDeviceModelId] = useState('All');
   const [filterBindingMode, setFilterBindingMode] = useState('All');
   const [filterBindingState, setFilterBindingState] = useState('All');
+  const [filterBindingHealth, setFilterBindingHealth] = useState('All');
   const [filterResourceAllocated, setFilterResourceAllocated] = useState('All');
   const [filterUpdatedFrom, setFilterUpdatedFrom] = useState('');
   const [filterUpdatedTo, setFilterUpdatedTo] = useState('');
@@ -143,6 +153,16 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   const handleConfirmDeleteConnection = () => {
     if (!connectionToDelete) return;
     const idToDelete = connectionToDelete.id;
+    const hasAnyBindings = store.hardwareBindings.some((b) => b.connectionId === idToDelete);
+    const hasAnyAllocs = store.resourceAllocations.some((a) => a.connectionId === idToDelete);
+    const hasAnyMembers = (connectionToDelete.members?.length || 0) > 0;
+    if (hasAnyBindings || hasAnyAllocs || hasAnyMembers || connectionToDelete.status !== 'Draft') {
+      showToast(
+        `Cannot hard-delete ${idToDelete} because it contains hardware, bindings, or allocation history. Deactivate it instead.`,
+        'error'
+      );
+      return;
+    }
     setStore((prev) => ({
       ...prev,
       connections: prev.connections.filter((c) => c.id !== idToDelete),
@@ -157,21 +177,28 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   };
 
   // Import / Export state
-  const [importFormat, setImportFormat] = useState<'csv' | 'json'>('csv');
-  const [importText, setImportText] = useState('');
   const [exportScope, setExportScope] = useState<'filtered' | 'selected'>('filtered');
   const [exportFormat, setExportFormat] = useState<'visible-csv' | 'relational-bundle'>('visible-csv');
+
+  // Clear selection when company scope changes so out-of-scope records are never bulk-modified
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setFilterOrganization('All');
+  }, [activeCompanyScope]);
 
   // Reset page on filter changes
   useEffect(() => {
     setCurrentPage(1);
   }, [
     searchQuery,
+    filterOrganization,
     filterStatus,
+    filterSite,
     filterCategory,
     filterDeviceModelId,
     filterBindingMode,
     filterBindingState,
+    filterBindingHealth,
     filterResourceAllocated,
     filterUpdatedFrom,
     filterUpdatedTo,
@@ -179,9 +206,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   ]);
 
   const enabledDeviceModels = useMemo(() => {
-    const scopeName = activeCompanyScope === 'All Clients' ? 'Platform Admin' : activeCompanyScope;
+    const scopeName =
+      activeCompanyScope === 'All Clients'
+        ? filterOrganization !== 'All'
+          ? filterOrganization
+          : 'Platform Admin'
+        : activeCompanyScope;
     return getEnabledModelsForCompanyName(scopeName).filter((m) => m.category === 'Device');
-  }, [activeCompanyScope]);
+  }, [activeCompanyScope, filterOrganization]);
 
   // Index bindings & allocations by connectionId
   const bindingsByConn = useMemo(() => {
@@ -207,29 +239,57 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   // Enrich each parent Connection record (strictly 1 row per Connection!)
   const enrichedConnections = useMemo(() => {
     const nowMs = Date.now();
-    const targetClient =
-      activeCompanyScope && activeCompanyScope !== 'All Clients'
-        ? activeCompanyScope.trim().toLowerCase()
-        : null;
+    const hasScopedCompany = Boolean(activeCompanyScope && activeCompanyScope !== 'All Clients');
 
     return store.connections
-      .filter((c) => !targetClient || (c.companyName || '').trim().toLowerCase() === targetClient)
+      .filter((c) => !hasScopedCompany || doesItemBelongToCompany(c.companyName, activeCompanyScope))
       .map((conn) => {
         const members = conn.members || [];
+        const liveMembers = members.map((m) => {
+          if (m.category === 'Device') {
+            const dev = store.devices.find((d) => d.id === m.hardwareId);
+            if (dev) {
+              const st = dev.statusOverride || dev.hardwareLifecycle;
+              if (st === 'Decommissioned' || st === 'In Maintenance') {
+                return { ...m, registrationStatus: st };
+              }
+            }
+          } else if (m.category === 'Sensor') {
+            const sen = store.sensors.find((s) => s.id === m.hardwareId);
+            if (sen) {
+              const st = sen.statusOverride || sen.hardwareLifecycle;
+              if (st === 'Decommissioned' || st === 'In Maintenance') {
+                return { ...m, registrationStatus: st };
+              }
+            }
+          } else if (m.category === 'SIM') {
+            const sim = store.sims.find((s) => s.id === m.hardwareId);
+            if (sim) {
+              const st = sim.status;
+              if (st === 'Retired' || st === 'Suspended' || st === 'Inactive') {
+                return { ...m, registrationStatus: st };
+              }
+            }
+          }
+          return m;
+        });
+
         const deviceCount = members.filter((m) => m.category === 'Device').length;
         const sensorCount = members.filter((m) => m.category === 'Sensor').length;
         const simCount = members.filter((m) => m.category === 'SIM').length;
         const cBindings = bindingsByConn.get(conn.id) || [];
         const cAllocs = allocationsByConn.get(conn.id) || [];
 
+        const effectiveStatusInfo = computeEffectiveConnectionStatus(conn, store, nowMs);
         const primaryUnit = members.find((m) => m.isPrimary) || members[0] || null;
         const bindingStatuses = cBindings.map((b) =>
-          computeHardwareBindingStatus(b, store.hardwareBindings, members, nowMs)
+          computeHardwareBindingStatus(b, store.hardwareBindings, liveMembers, nowMs)
         );
         const activeBindCount = bindingStatuses.filter((s) => s.status === 'Active').length;
         const schedBindCount = bindingStatuses.filter((s) => s.status === 'Scheduled').length;
         const endedBindCount = bindingStatuses.filter((s) => s.status === 'Ended' || s.status === 'Canceled').length;
         const conflictBindCount = bindingStatuses.filter((s) => s.status === 'Conflict').length;
+        const openBindingCount = cBindings.filter((b) => !b.endedAt && b.statusOverride !== 'Canceled').length;
 
         let bindingHealth = 'No bindings';
         if (cBindings.length > 0) {
@@ -257,9 +317,11 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
             ? formatDateTimeWithTz(new Date(Math.max(...endTimes)).toISOString(), 'Asia/Kolkata')
             : 'Open-ended / Mixed';
 
+        const allocContext = { connections: store.connections, store };
         const activeAllocs = cAllocs.filter(
-          (a) => computeResourceAllocationStatus(a, store.resourceAllocations, nowMs).status !== 'Ended'
+          (a) => computeResourceAllocationStatus(a, store.resourceAllocations, nowMs, allocContext).status === 'Active'
         );
+        const openAllocCount = cAllocs.filter((a) => !a.endedAt).length;
         const activeResources = Array.from(
           new Map(activeAllocs.map((a) => [`${a.resourceType}::${a.resourceId}`, a])).values()
         );
@@ -272,10 +334,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           conn,
           id: conn.id,
           name: conn.name,
+          effectiveStatus: effectiveStatusInfo.status,
+          statusReason: effectiveStatusInfo.reason,
           deviceCount,
           sensorCount,
           simCount,
           bindingCount: cBindings.length,
+          openBindingCount,
+          openAllocCount,
           cBindings,
           bindingStatuses: bindingStatuses.map((s) => s.status),
           cAllocs,
@@ -291,7 +357,23 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           hardwareIdentifiers: members.map((m) => m.identifierValue).join(', ') || '—'
         };
       });
-  }, [store.connections, store.hardwareBindings, store.resourceAllocations, bindingsByConn, allocationsByConn, activeCompanyScope]);
+  }, [store, bindingsByConn, allocationsByConn, activeCompanyScope]);
+
+  const organizationOptions = useMemo(() => {
+    const set = new Set<string>();
+    store.connections.forEach((c) => {
+      if (c.companyName) set.add(c.companyName);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [store.connections]);
+
+  const siteOptions = useMemo(() => {
+    const set = new Set<string>();
+    enrichedConnections.forEach((r) => {
+      if (r.conn.site) set.add(r.conn.site);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [enrichedConnections]);
 
   // Summary bar totals (computed, no architecture counts)
   const summaryStats = useMemo(() => {
@@ -309,10 +391,15 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
     const q = searchQuery.trim().toLowerCase();
     const fromMs = filterUpdatedFrom ? Date.parse(`${filterUpdatedFrom}T00:00:00`) : null;
     const toMs = filterUpdatedTo ? Date.parse(`${filterUpdatedTo}T23:59:59`) : null;
+    const validDateRange = !(fromMs && toMs && fromMs > toMs);
 
     return enrichedConnections.filter((row) => {
       const { conn } = row;
-      if (filterStatus !== 'All' && conn.status !== filterStatus) return false;
+      if (filterOrganization !== 'All' && !doesItemBelongToCompany(conn.companyName, filterOrganization)) {
+        return false;
+      }
+      if (filterStatus !== 'All' && row.effectiveStatus !== filterStatus) return false;
+      if (filterSite !== 'All' && (conn.site || '') !== filterSite) return false;
       if (filterCategory !== 'All' && !conn.members.some((m) => m.category === filterCategory)) return false;
       if (
         filterDeviceModelId !== 'All' &&
@@ -338,14 +425,22 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         }
       }
 
-      if (filterResourceAllocated !== 'All') {
-        if (filterResourceAllocated === 'Vehicle' && !row.activeVehicle) return false;
-        if (filterResourceAllocated === 'Driver' && !row.activeDriver) return false;
-        if (filterResourceAllocated === 'Unallocated' && (row.activeVehicle || row.activeDriver)) return false;
+      if (filterBindingHealth !== 'All' && row.bindingHealth !== filterBindingHealth) {
+        return false;
       }
 
-      if (fromMs && !Number.isNaN(fromMs) && Date.parse(conn.updatedAt) < fromMs) return false;
-      if (toMs && !Number.isNaN(toMs) && Date.parse(conn.updatedAt) > toMs) return false;
+      if (filterResourceAllocated !== 'All') {
+        if (filterResourceAllocated === 'Unallocated') {
+          if (row.activeResources.length > 0) return false;
+        } else {
+          if (!row.activeResources.some((a) => a.resourceType === filterResourceAllocated)) return false;
+        }
+      }
+
+      if (validDateRange) {
+        if (fromMs && !Number.isNaN(fromMs) && Date.parse(conn.updatedAt) < fromMs) return false;
+        if (toMs && !Number.isNaN(toMs) && Date.parse(conn.updatedAt) > toMs) return false;
+      }
 
       if (q) {
         const hay = [
@@ -366,11 +461,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   }, [
     enrichedConnections,
     searchQuery,
+    filterOrganization,
     filterStatus,
+    filterSite,
     filterCategory,
     filterDeviceModelId,
     filterBindingMode,
     filterBindingState,
+    filterBindingHealth,
     filterResourceAllocated,
     filterUpdatedFrom,
     filterUpdatedTo
@@ -391,7 +489,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
       } else if (sortKey === 'deviceCount' || sortKey === 'sensorCount' || sortKey === 'simCount' || sortKey === 'bindingCount') {
         cmp = a[sortKey] - b[sortKey];
       } else if (sortKey === 'status') {
-        cmp = a.conn.status.localeCompare(b.conn.status);
+        cmp = a.effectiveStatus.localeCompare(b.effectiveStatus);
       } else if (sortKey === 'updatedAt') {
         cmp = Date.parse(a.conn.updatedAt) - Date.parse(b.conn.updatedAt);
       } else {
@@ -414,11 +512,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   );
 
   const activeFilterCount =
+    (filterOrganization !== 'All' ? 1 : 0) +
     (filterStatus !== 'All' ? 1 : 0) +
+    (filterSite !== 'All' ? 1 : 0) +
     (filterCategory !== 'All' ? 1 : 0) +
     (filterDeviceModelId !== 'All' ? 1 : 0) +
     (filterBindingMode !== 'All' ? 1 : 0) +
     (filterBindingState !== 'All' ? 1 : 0) +
+    (filterBindingHealth !== 'All' ? 1 : 0) +
     (filterResourceAllocated !== 'All' ? 1 : 0) +
     (filterUpdatedFrom ? 1 : 0) +
     (filterUpdatedTo ? 1 : 0);
@@ -496,6 +597,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
     connection: ConnectionRecord;
     bindings: HardwareBinding[];
     allocations: ModalMasterStore['resourceAllocations'];
+    resourceRelationships?: ResourceRelationship[];
     addedDevices: ModalMasterStore['devices'];
     addedSensors: ModalMasterStore['sensors'];
     addedSims: ModalMasterStore['sims'];
@@ -504,10 +606,23 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
     setStore((prev) => {
       const otherConnections = prev.connections.filter((c) => c.id !== payload.connection.id);
       const otherBindings = prev.hardwareBindings.filter((b) => b.connectionId !== payload.connection.id);
-      const otherAllocs = prev.resourceAllocations.filter((a) => a.connectionId !== payload.connection.id);
-      const preservedEndedAllocs = prev.resourceAllocations.filter(
-        (a) => a.connectionId === payload.connection.id && !!a.endedAt
+      const payloadBindingIds = new Set(payload.bindings.map((b) => b.id));
+      const preservedEndedBindings = prev.hardwareBindings.filter(
+        (b) =>
+          b.connectionId === payload.connection.id &&
+          !payloadBindingIds.has(b.id) &&
+          (Boolean(b.endedAt) || b.statusOverride === 'Canceled')
       );
+
+      const otherAllocs = prev.resourceAllocations.filter((a) => a.connectionId !== payload.connection.id);
+      const payloadAllocIds = new Set(payload.allocations.map((a) => a.id));
+      const preservedEndedAllocs = prev.resourceAllocations.filter(
+        (a) =>
+          a.connectionId === payload.connection.id &&
+          !payloadAllocIds.has(a.id) &&
+          Boolean(a.endedAt)
+      );
+
       const existingDevIds = new Set(prev.devices.map((d) => d.id));
       const existingSenIds = new Set(prev.sensors.map((s) => s.id));
       const existingSimIds = new Set(prev.sims.map((s) => s.id));
@@ -520,8 +635,9 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         connections: payload.isEdit
           ? prev.connections.map((c) => (c.id === payload.connection.id ? payload.connection : c))
           : [payload.connection, ...otherConnections],
-        hardwareBindings: [...payload.bindings, ...otherBindings],
-        resourceAllocations: [...payload.allocations, ...preservedEndedAllocs, ...otherAllocs]
+        hardwareBindings: [...payload.bindings, ...preservedEndedBindings, ...otherBindings],
+        resourceAllocations: [...payload.allocations, ...preservedEndedAllocs, ...otherAllocs],
+        resourceRelationships: payload.resourceRelationships ?? prev.resourceRelationships
       };
     });
     if (!payload.isEdit) {
@@ -576,7 +692,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
     showToast(`Duplicated ${conn.id} as Draft ${newId} (select fresh hardware units to bind).`);
   };
 
-  // Deactivate / Activate connection
+  // Deactivate connection (MAP-P0-05: ends open/scheduled hardwareBindings AND resourceAllocations)
   const handleConfirmDeactivate = (conn: ConnectionRecord) => {
     const nowIso = new Date().toISOString();
     setStore((prev) => ({
@@ -596,7 +712,8 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
                   actor: actorName,
                   action: 'Deactivated connection',
                   beforeSummary: c.status,
-                  afterSummary: 'Inactive; active pairwise bindings ended with history preserved'
+                  afterSummary:
+                    'Inactive; active/scheduled pairwise bindings and resource allocations ended with history preserved'
                 },
                 ...(c.activity || [])
               ]
@@ -604,7 +721,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           : c
       ),
       hardwareBindings: prev.hardwareBindings.map((b) =>
-        b.connectionId === conn.id && !b.endedAt
+        b.connectionId === conn.id && !b.endedAt && b.statusOverride !== 'Canceled'
           ? {
               ...b,
               endedAt: nowIso,
@@ -613,10 +730,22 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
               updatedAt: nowIso
             }
           : b
+      ),
+      resourceAllocations: prev.resourceAllocations.map((a) =>
+        a.connectionId === conn.id && !a.endedAt
+          ? {
+              ...a,
+              endedAt: nowIso,
+              effectiveEndAt: nowIso,
+              endReason: 'Parent connection deactivated',
+              unassignedBy: actorName,
+              updatedAt: nowIso
+            }
+          : a
       )
     }));
     setDeactivateTarget(null);
-    showToast(`Connection ${conn.id} deactivated and active bindings ended.`);
+    showToast(`Connection ${conn.id} deactivated; open bindings and resource allocations ended.`);
   };
 
   const handleEndSingleBindingFromDrawer = (binding: HardwareBinding) => {
@@ -670,9 +799,13 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   // Export handler (supports Filtered vs Selected AND Visible Columns CSV vs 4-Sheet Relational Export)
   const runExportConnections = (singleConn?: ConnectionRecord) => {
     const selectedRows = enrichedConnections.filter((r) => selectedIds.has(r.id));
+    if (!singleConn && exportScope === 'selected' && selectedRows.length === 0) {
+      showToast('No selected connections to export.', 'error');
+      return;
+    }
     const source = singleConn
       ? enrichedConnections.filter((r) => r.id === singleConn.id)
-      : exportScope === 'selected' && selectedRows.length > 0
+      : exportScope === 'selected'
       ? selectedRows
       : sortedRows;
 
@@ -694,7 +827,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           name: r.name,
           companyName: r.conn.companyName,
           site: r.conn.site || '',
-          status: r.conn.status,
+          status: r.effectiveStatus,
           updatedAt: formatDateTimeWithTz(r.conn.updatedAt, 'Asia/Kolkata', true)
         }))
       );
@@ -789,10 +922,10 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           sensorCount: r.sensorCount,
           simCount: r.simCount,
           bindingCount: r.bindingCount,
-          resourceAllocation: [r.activeVehicle?.resourceIdentifier, r.activeDriver?.resourceIdentifier]
-            .filter(Boolean)
-            .join(' · ') || 'Not allocated',
-          status: r.conn.status,
+          resourceAllocation:
+            r.activeResources.map((a) => `${a.resourceIdentifier} (${a.resourceType})`).join(' · ') ||
+            'Not allocated',
+          status: r.effectiveStatus,
           updatedAt: formatDateTimeWithTz(r.conn.updatedAt, 'Asia/Kolkata', true),
           primaryDevice: r.primaryUnit?.identifierValue || '—',
           primaryModel: r.primaryUnit?.modelLabel || '—',
@@ -814,7 +947,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
     setActiveOverlay(null);
   };
 
-  // Direct Import parser helper
+  // Direct Import parser helper (MAP-P0-06 & MAP-P0-07)
   const parseConnectionImportPayload = (fmt: 'csv' | 'json', rawText: string) => {
     const raw = rawText.trim();
     if (!raw) {
@@ -830,6 +963,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
       .map((c) => Number(c.id.replace(/\D/g, '')))
       .filter((n) => !Number.isNaN(n));
     let nextNum = (nums.length > 0 ? Math.max(...nums) : 1282) + 1;
+    const allModelCategories = loadModelCategoryStore();
 
     const validateItem = (
       line: number,
@@ -844,23 +978,47 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         invalid.push({ line, raw: rawLine, reason: 'Missing Connection Name' });
         return;
       }
-      if (!MODAL_OWNERS.some((o) => o.toLowerCase() === client.toLowerCase())) {
-        invalid.push({ line, raw: rawLine, reason: `Unknown client "${client}"` });
+      if (!client) {
+        invalid.push({ line, raw: rawLine, reason: 'Missing Client Organization' });
         return;
       }
-      const matchedOwner = MODAL_OWNERS.find((o) => o.toLowerCase() === client.toLowerCase())!;
+      const resolvedCompany = resolveClientCompanyByNameOrId(client);
+      if (!resolvedCompany) {
+        invalid.push({ line, raw: rawLine, reason: `Unknown client organization "${client}"` });
+        return;
+      }
+      const matchedOwner = resolvedCompany.name;
+      const companyId = resolvedCompany.id || COMPANY_NAME_TO_ID[matchedOwner];
+      if (!companyId) {
+        invalid.push({ line, raw: rawLine, reason: `No canonical company ID for "${client}"` });
+        return;
+      }
+
+      if (
+        activeCompanyScope &&
+        activeCompanyScope !== 'All Clients' &&
+        !doesItemBelongToCompany(matchedOwner, activeCompanyScope)
+      ) {
+        invalid.push({
+          line,
+          raw: rawLine,
+          reason: `Client "${matchedOwner}" is outside active company scope "${activeCompanyScope}"`
+        });
+        return;
+      }
+
       const dev = store.devices.find(
         (d) =>
-          d.company.toLowerCase() === matchedOwner.toLowerCase() &&
+          doesItemBelongToCompany(d.company, matchedOwner) &&
           (d.imei === hwIdent || d.deviceId === hwIdent || d.serial === hwIdent)
       );
       const sen = store.sensors.find(
         (s) =>
-          s.company.toLowerCase() === matchedOwner.toLowerCase() &&
+          doesItemBelongToCompany(s.company, matchedOwner) &&
           (s.deviceId === hwIdent || s.serial === hwIdent)
       );
       const sim = store.sims.find(
-        (s) => s.owner.toLowerCase() === matchedOwner.toLowerCase() && s.iccid === hwIdent
+        (s) => doesItemBelongToCompany(s.owner, matchedOwner) && s.iccid === hwIdent
       );
       if (!dev && !sen && !sim) {
         invalid.push({
@@ -870,51 +1028,118 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         });
         return;
       }
+
+      const devPhysicalStatus = dev ? dev.statusOverride || dev.hardwareLifecycle : undefined;
+      if (dev && (devPhysicalStatus === 'Decommissioned' || devPhysicalStatus === 'In Maintenance')) {
+        invalid.push({
+          line,
+          raw: rawLine,
+          reason: `Device "${hwIdent}" is ${devPhysicalStatus} and cannot be mapped`
+        });
+        return;
+      }
+      const senPhysicalStatus = sen ? sen.statusOverride || sen.hardwareLifecycle : undefined;
+      if (sen && (senPhysicalStatus === 'Decommissioned' || senPhysicalStatus === 'In Maintenance')) {
+        invalid.push({
+          line,
+          raw: rawLine,
+          reason: `Sensor "${hwIdent}" is ${senPhysicalStatus} and cannot be mapped`
+        });
+        return;
+      }
+      if (sim) {
+        const simLifecycle = sim.status;
+        if (
+          simLifecycle === 'Retired' ||
+          simLifecycle === 'Suspended' ||
+          simLifecycle === 'Inactive'
+        ) {
+          invalid.push({
+            line,
+            raw: rawLine,
+            reason: `SIM "${hwIdent}" has carrier status ${simLifecycle} and cannot be mapped`
+          });
+          return;
+        }
+      }
+
+      const unitModelId = dev ? dev.modelTypeId : sen ? sen.modelTypeId : sim!.modelTypeId;
+      if (!unitModelId) {
+        invalid.push({
+          line,
+          raw: rawLine,
+          reason: `Hardware "${hwIdent}" has no assigned Model Category`
+        });
+        return;
+      }
+      const globalModel = allModelCategories.find((m) => m.id === unitModelId);
+      if (!globalModel || globalModel.status !== 'Active') {
+        invalid.push({
+          line,
+          raw: rawLine,
+          reason: `Model Category for "${hwIdent}" is Inactive or missing`
+        });
+        return;
+      }
+      const companyEnabledModels = getEnabledModelsForCompanyName(matchedOwner);
+      if (!companyEnabledModels.some((m) => m.id === unitModelId)) {
+        invalid.push({
+          line,
+          raw: rawLine,
+          reason: `Model Category "${globalModel.typeName}" is not enabled for ${matchedOwner}`
+        });
+        return;
+      }
+
       const id = `CON-${nextNum++}`;
-      const member = dev
+      const member: HardwareMembership = dev
         ? {
             hardwareId: dev.id,
-            category: 'Device' as const,
-            modelTypeId: dev.modelTypeId || 'mcat-01',
+            category: 'Device',
+            modelTypeId: dev.modelTypeId || unitModelId,
             modelLabel: `${dev.kind} · ${dev.manufacturer} · ${dev.modelText}`,
             identifierType: dev.identifierType || 'IMEI',
             identifierValue: resolveHardwareIdentifierValue(dev, 'Device', dev.identifierType),
-            registrationStatus: dev.hardwareLifecycle,
+            registrationStatus: dev.statusOverride || dev.hardwareLifecycle || 'Active',
             isPrimary: true
           }
         : sen
         ? {
             hardwareId: sen.id,
-            category: 'Sensor' as const,
-            modelTypeId: sen.modelTypeId || 'mcat-07',
+            category: 'Sensor',
+            modelTypeId: sen.modelTypeId || unitModelId,
             modelLabel: `${sen.kind} · ${sen.manufacturer} · ${sen.modelText}`,
             identifierType: 'Sensor ID',
             identifierValue: sen.deviceId,
-            registrationStatus: sen.hardwareLifecycle,
+            registrationStatus: sen.statusOverride || sen.hardwareLifecycle || 'Active',
             isPrimary: true
           }
         : {
             hardwareId: sim!.id,
-            category: 'SIM' as const,
-            modelTypeId: sim!.modelTypeId || 'mcat-10',
+            category: 'SIM',
+            modelTypeId: sim!.modelTypeId || unitModelId,
             modelLabel: `${sim!.category || 'M2M SIM'} · ${sim!.operator}`,
             identifierType: sim!.identifierType || 'ICCID',
             identifierValue: sim!.iccid,
-            registrationStatus: sim!.status,
+            registrationStatus: sim!.status || 'Active',
             isPrimary: true
           };
 
-      const status: ConnectionLifecycleStatus =
-        statusRaw === 'Active' && member.category !== 'SIM' ? 'Active' : 'Draft';
+      // MAP-P0-07: Single-hardware CSV import has no pairwise binding or resource allocation yet -> always Draft
+      const status: ConnectionLifecycleStatus = 'Draft';
+      const requestedActiveNote =
+        statusRaw.toLowerCase() === 'active'
+          ? ' (requested Active downgraded to Draft until a binding or resource allocation is added)'
+          : '';
 
       valid.push({
         id,
         connectionId: id,
-        companyId: COMPANY_NAME_TO_ID[matchedOwner] || 'comp-adani-mundra',
+        companyId,
         companyName: matchedOwner,
         name,
         description: 'Imported via Modal Mapping CSV/JSON',
-        site: siteName || 'Mundra CT2',
+        site: siteName.trim() || undefined,
         memberIds: [member.hardwareId],
         members: [member],
         status,
@@ -930,7 +1155,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
             timestamp: nowIso,
             actor: actorName,
             action: 'Imported connection record',
-            afterSummary: `${member.identifierValue} (${status})`
+            afterSummary: `${member.identifierValue} (${status})${requestedActiveNote}`
           }
         ]
       });
@@ -976,11 +1201,37 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
 
   const handleBulkEndBindings = () => {
     const nowIso = new Date().toISOString();
-    const connIds = new Set(selectedConnections.map((r) => r.id));
+    const eligibleConnIds = new Set(
+      selectedConnections.filter((r) => r.openBindingCount > 0).map((r) => r.id)
+    );
+    if (eligibleConnIds.size === 0) {
+      showToast('No open or scheduled bindings found on selected connections.', 'error');
+      return;
+    }
     setStore((prev) => ({
       ...prev,
+      connections: prev.connections.map((c) =>
+        eligibleConnIds.has(c.id)
+          ? {
+              ...c,
+              updatedAt: nowIso,
+              updatedBy: actorName,
+              version: c.version + 1,
+              activity: [
+                {
+                  id: `act-${Date.now()}-${c.id}`,
+                  timestamp: nowIso,
+                  actor: actorName,
+                  action: 'Bulk ended active/scheduled hardware bindings',
+                  afterSummary: 'Open pairwise hardware bindings ended with history preserved'
+                },
+                ...(c.activity || [])
+              ]
+            }
+          : c
+      ),
       hardwareBindings: prev.hardwareBindings.map((b) =>
-        connIds.has(b.connectionId) && !b.endedAt
+        eligibleConnIds.has(b.connectionId) && !b.endedAt && b.statusOverride !== 'Canceled'
           ? {
               ...b,
               endedAt: nowIso,
@@ -991,21 +1242,47 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           : b
       )
     }));
-    showToast(`Ended active/scheduled bindings across ${connIds.size} selected connection(s).`);
+    showToast(`Ended active/scheduled bindings across ${eligibleConnIds.size} selected connection(s).`);
     setSelectedIds(new Set());
     setActiveOverlay(null);
   };
 
   const handleBulkDeactivate = () => {
     const nowIso = new Date().toISOString();
-    const connIds = new Set(selectedConnections.map((r) => r.id));
+    const eligibleConnIds = new Set(
+      selectedConnections.filter((r) => r.effectiveStatus !== 'Inactive').map((r) => r.id)
+    );
+    if (eligibleConnIds.size === 0) {
+      showToast('Selected connections are already Inactive.', 'error');
+      return;
+    }
     setStore((prev) => ({
       ...prev,
       connections: prev.connections.map((c) =>
-        connIds.has(c.id) ? { ...c, status: 'Inactive', updatedAt: nowIso, updatedBy: actorName } : c
+        eligibleConnIds.has(c.id)
+          ? {
+              ...c,
+              status: 'Inactive',
+              updatedAt: nowIso,
+              updatedBy: actorName,
+              version: c.version + 1,
+              activity: [
+                {
+                  id: `act-${Date.now()}-${c.id}`,
+                  timestamp: nowIso,
+                  actor: actorName,
+                  action: 'Bulk deactivated connection',
+                  beforeSummary: c.status,
+                  afterSummary:
+                    'Inactive; active/scheduled pairwise bindings and resource allocations ended with history preserved'
+                },
+                ...(c.activity || [])
+              ]
+            }
+          : c
       ),
       hardwareBindings: prev.hardwareBindings.map((b) =>
-        connIds.has(b.connectionId) && !b.endedAt
+        eligibleConnIds.has(b.connectionId) && !b.endedAt && b.statusOverride !== 'Canceled'
           ? {
               ...b,
               endedAt: nowIso,
@@ -1014,9 +1291,23 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
               updatedAt: nowIso
             }
           : b
+      ),
+      resourceAllocations: prev.resourceAllocations.map((a) =>
+        eligibleConnIds.has(a.connectionId) && !a.endedAt
+          ? {
+              ...a,
+              endedAt: nowIso,
+              effectiveEndAt: nowIso,
+              endReason: 'Parent connection deactivated (bulk)',
+              unassignedBy: actorName,
+              updatedAt: nowIso
+            }
+          : a
       )
     }));
-    showToast(`Deactivated ${connIds.size} connection(s) and ended their active bindings.`);
+    showToast(
+      `Deactivated ${eligibleConnIds.size} connection(s) and ended their open bindings & resource allocations.`
+    );
     setSelectedIds(new Set());
     setActiveOverlay(null);
   };
@@ -1207,11 +1498,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
             <button
               type="button"
               onClick={() => {
+                setFilterOrganization('All');
                 setFilterStatus('All');
+                setFilterSite('All');
                 setFilterCategory('All');
                 setFilterDeviceModelId('All');
                 setFilterBindingMode('All');
                 setFilterBindingState('All');
+                setFilterBindingHealth('All');
                 setFilterResourceAllocated('All');
                 setFilterUpdatedFrom('');
                 setFilterUpdatedTo('');
@@ -1541,7 +1835,11 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
                           );
                         }
                         if (col.key === 'status') {
-                          return <td key={col.key} className={`px-3 ${rowPad}`}>{statusChip(conn.status)}</td>;
+                          return (
+                            <td key={col.key} className={`px-3 ${rowPad}`} title={row.statusReason}>
+                              {statusChip(row.effectiveStatus)}
+                            </td>
+                          );
                         }
                         if (col.key === 'updatedAt') {
                           return (
@@ -1637,7 +1935,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
                                 label: 'Deactivate Connection',
                                 icon: <Power className="w-3.5 h-3.5" />,
                                 tone: 'warning',
-                                hidden: !canEdit || conn.status === 'Inactive',
+                                hidden: !canEdit || row.effectiveStatus === 'Inactive',
                                 onClick: () => setDeactivateTarget(conn),
                               },
                               {
@@ -1663,6 +1961,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
                             connection={conn}
                             connectionBindings={row.cBindings}
                             allGlobalBindings={store.hardwareBindings}
+                            store={store}
                             canEdit={canEdit}
                             onOpenDetails={(targetConn, tab) =>
                               setDetailsState({ conn: targetConn, tab })
@@ -1750,8 +2049,16 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
       {/* Overlays & Drawers */}
       {activeOverlay === 'filters' && (
         <ModalConnectionFiltersDrawer
+          isPlatformAdmin={isPlatformAdmin}
+          activeCompanyScope={activeCompanyScope}
+          filterOrganization={filterOrganization}
+          setFilterOrganization={setFilterOrganization}
+          organizationOptions={organizationOptions}
           filterStatus={filterStatus}
           setFilterStatus={setFilterStatus}
+          filterSite={filterSite}
+          setFilterSite={setFilterSite}
+          siteOptions={siteOptions}
           filterCategory={filterCategory}
           setFilterCategory={setFilterCategory}
           filterDeviceModelId={filterDeviceModelId}
@@ -1760,6 +2067,8 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           setFilterBindingMode={setFilterBindingMode}
           filterBindingState={filterBindingState}
           setFilterBindingState={setFilterBindingState}
+          filterBindingHealth={filterBindingHealth}
+          setFilterBindingHealth={setFilterBindingHealth}
           filterResourceAllocated={filterResourceAllocated}
           setFilterResourceAllocated={setFilterResourceAllocated}
           filterUpdatedFrom={filterUpdatedFrom}
@@ -1767,12 +2076,16 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           filterUpdatedTo={filterUpdatedTo}
           setFilterUpdatedTo={setFilterUpdatedTo}
           enabledDeviceModels={enabledDeviceModels}
+          activeFilterCount={activeFilterCount}
           onClearAll={() => {
+            setFilterOrganization('All');
             setFilterStatus('All');
+            setFilterSite('All');
             setFilterCategory('All');
             setFilterDeviceModelId('All');
             setFilterBindingMode('All');
             setFilterBindingState('All');
+            setFilterBindingHealth('All');
             setFilterResourceAllocated('All');
             setFilterUpdatedFrom('');
             setFilterUpdatedTo('');
@@ -1794,10 +2107,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
               name: newViewName.trim(),
               query: searchQuery,
               filters: {
+                organization: filterOrganization,
                 status: filterStatus,
+                site: filterSite,
                 category: filterCategory,
+                deviceModelId: filterDeviceModelId,
                 bindingMode: filterBindingMode,
                 bindingState: filterBindingState,
+                bindingHealth: filterBindingHealth,
                 resourceAllocated: filterResourceAllocated
               },
               sortKey,
@@ -1811,10 +2128,14 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           }}
           onApplyView={(v) => {
             setSearchQuery(v.query || '');
+            setFilterOrganization(v.filters.organization || 'All');
             setFilterStatus(v.filters.status || 'All');
+            setFilterSite(v.filters.site || 'All');
             setFilterCategory(v.filters.category || 'All');
+            setFilterDeviceModelId(v.filters.deviceModelId || 'All');
             setFilterBindingMode(v.filters.bindingMode || 'All');
             setFilterBindingState(v.filters.bindingState || 'All');
+            setFilterBindingHealth(v.filters.bindingHealth || 'All');
             setFilterResourceAllocated(v.filters.resourceAllocated || 'All');
             setSortKey(v.sortKey || 'id');
             setSortDir(v.sortDir || 'asc');
@@ -1876,12 +2197,20 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         <ModalConnectionBulkDrawer
           selectedCount={selectedConnections.length}
           activeSelectedCount={
-            selectedConnections.filter((r) => r.conn.status === 'Active' || r.conn.status === 'Scheduled').length
+            selectedConnections.filter((r) => r.effectiveStatus !== 'Inactive').length
           }
           activeBindingsInSelection={selectedConnections.reduce(
-            (acc, r) => acc + r.bindingStatuses.filter((s) => s === 'Active' || s === 'Scheduled').length,
+            (acc, r) => acc + r.openBindingCount,
             0
           )}
+          selectedItems={selectedConnections.map((r) => ({
+            id: r.id,
+            name: r.name,
+            companyName: r.conn.companyName,
+            effectiveStatus: r.effectiveStatus,
+            openBindingCount: r.openBindingCount,
+            openAllocCount: r.openAllocCount
+          }))}
           onExportSelected={() => {
             setExportScope('selected');
             setActiveOverlay('export');
@@ -1900,6 +2229,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           initialTab={detailsState.tab}
           allBindings={store.hardwareBindings}
           allAllocations={store.resourceAllocations}
+          store={store}
           canEdit={canEdit}
           onClose={() => setDetailsState(null)}
           onEdit={(c) => {
@@ -1929,7 +2259,10 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
       {/* Deactivate Confirmation Modal with Confirmation Chips */}
       {deactivateTarget && (() => {
         const activeBindingsCount = store.hardwareBindings.filter(
-          (b) => b.connectionId === deactivateTarget.id && !b.endedAt
+          (b) => b.connectionId === deactivateTarget.id && !b.endedAt && b.statusOverride !== 'Canceled'
+        ).length;
+        const activeAllocsCount = store.resourceAllocations.filter(
+          (a) => a.connectionId === deactivateTarget.id && !a.endedAt
         ).length;
         return (
           <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4">
@@ -1953,6 +2286,9 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
                   <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-amber-200 bg-amber-50 text-amber-800">
                     {activeBindingsCount} Binding(s) to End
                   </span>
+                  <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-purple-200 bg-purple-50 text-purple-800">
+                    {activeAllocsCount} Allocation(s) to End
+                  </span>
                   <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-emerald-200 bg-emerald-50 text-emerald-700">
                     Audit History Preserved
                   </span>
@@ -1961,7 +2297,9 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
                   Deactivating <strong className="text-slate-900">{deactivateTarget.name}</strong> will set the connection status to{' '}
                   <strong>Inactive</strong> and end its{' '}
                   <strong>{activeBindingsCount}</strong>{' '}
-                  active/scheduled pairwise binding(s) as of now while preserving full historical audit records.
+                  active/scheduled pairwise binding(s) and{' '}
+                  <strong>{activeAllocsCount}</strong>{' '}
+                  active/scheduled resource allocation(s) as of now while preserving full historical audit records.
                 </p>
               </div>
               <div className="px-5 py-3 border-t border-slate-200 flex justify-end gap-2 bg-slate-50">
@@ -1981,29 +2319,53 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         );
       })()}
 
-      {/* Delete Connection Confirmation Modal with Confirmation Chips */}
+      {/* Delete Connection Confirmation Modal with MAP-P0-03 Safe Delete Guard */}
       {(() => {
         if (!connectionToDelete) return null;
+        const totalBindingsCount = store.hardwareBindings.filter(
+          (b) => b.connectionId === connectionToDelete.id
+        ).length;
         const activeBindingsCount = store.hardwareBindings.filter(
-          (b) => b.connectionId === connectionToDelete.id && !b.endedAt
+          (b) => b.connectionId === connectionToDelete.id && !b.endedAt && b.statusOverride !== 'Canceled'
+        ).length;
+        const totalAllocsCount = store.resourceAllocations.filter(
+          (a) => a.connectionId === connectionToDelete.id
         ).length;
         const activeAllocsCount = store.resourceAllocations.filter(
           (a) => a.connectionId === connectionToDelete.id && !a.endedAt
         ).length;
+        const memberCount = connectionToDelete.members?.length || 0;
+        const effectiveSt = computeEffectiveConnectionStatus(connectionToDelete, store).status;
+        const isDeleteBlocked =
+          totalBindingsCount > 0 ||
+          totalAllocsCount > 0 ||
+          memberCount > 0 ||
+          connectionToDelete.status !== 'Draft';
+
         return (
           <DeleteConfirmationModal
             isOpen={Boolean(connectionToDelete)}
             zIndexClass="z-[95]"
-            title="Delete Connection Mapping?"
+            title={isDeleteBlocked ? 'Permanent Delete Blocked — History Protected' : 'Delete Draft Connection?'}
             description={
-              <>
-                Are you sure you want to delete connection{' '}
-                <strong className="text-slate-900 font-semibold">{connectionToDelete.name}</strong> (
-                {connectionToDelete.connectionId})? This will permanently remove the hardware-vehicle
-                mapping relationship.
-              </>
+              isDeleteBlocked ? (
+                <>
+                  Connection{' '}
+                  <strong className="text-slate-900 font-semibold">{connectionToDelete.name}</strong> (
+                  {connectionToDelete.connectionId}) contains attached hardware, pairwise bindings, or resource
+                  allocation history and cannot be hard-deleted. Use <strong>Deactivate Instead</strong> to end
+                  open relationships while preserving historical audit trails.
+                </>
+              ) : (
+                <>
+                  Are you sure you want to permanently delete clean draft connection{' '}
+                  <strong className="text-slate-900 font-semibold">{connectionToDelete.name}</strong> (
+                  {connectionToDelete.connectionId})?
+                </>
+              )
             }
             confirmLabel="Delete Connection"
+            confirmDisabled={isDeleteBlocked}
             targetChips={[
               {
                 id: 'conId',
@@ -2013,54 +2375,54 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
               { id: 'org', label: connectionToDelete.companyName, tone: 'blue' },
               {
                 id: 'hw',
-                label: `${connectionToDelete.members?.length || 0} Hardware Unit(s)`,
+                label: `${memberCount} Hardware Unit(s)`,
                 tone: 'purple',
               },
               {
                 id: 'status',
-                label: connectionToDelete.status,
-                tone: connectionToDelete.status === 'Active' ? 'emerald' : 'slate',
+                label: effectiveSt,
+                tone: effectiveSt === 'Active' ? 'emerald' : 'slate',
               },
             ]}
             confirmationChips={[
-              activeBindingsCount > 0
+              totalBindingsCount > 0
                 ? {
                     id: 'bindings',
-                    label: `${activeBindingsCount} Open Hardware Binding(s)`,
+                    label: `${totalBindingsCount} Total Binding(s) (${activeBindingsCount} Open)`,
                     tone: 'amber',
                   }
                 : {
                     id: 'bindings',
-                    label: '0 Open Bindings',
+                    label: '0 Bindings',
                     tone: 'emerald',
                   },
-              activeAllocsCount > 0
+              totalAllocsCount > 0
                 ? {
                     id: 'allocs',
-                    label: `${activeAllocsCount} Active Resource Allocation(s)`,
+                    label: `${totalAllocsCount} Total Allocation(s) (${activeAllocsCount} Open)`,
                     tone: 'amber',
                   }
                 : {
                     id: 'allocs',
-                    label: '0 Active Allocations · Safe to Delete',
+                    label: '0 Allocations',
                     tone: 'emerald',
                   },
               {
                 id: 'scope',
-                label: 'Permanent Connection Delete',
-                tone: 'rose',
+                label: isDeleteBlocked ? 'Audit Protected · Cannot Hard Delete' : 'Empty Draft · Safe to Delete',
+                tone: isDeleteBlocked ? 'rose' : 'emerald',
               },
             ]}
             warningNote={
-              activeBindingsCount > 0 || activeAllocsCount > 0 ? (
+              isDeleteBlocked ? (
                 <>
-                  This connection still has open bindings or resource allocations. Recommended:{' '}
-                  <strong>Deactivate Instead</strong> to preserve audit history cleanly.
+                  Hard deletion is restricted to empty <strong>Draft</strong> connections with 0 members, 0 bindings,
+                  and 0 allocations so that historical bindings and resource allocations are never orphaned.
                 </>
               ) : undefined
             }
             secondaryAction={
-              connectionToDelete.status === 'Active'
+              effectiveSt !== 'Inactive'
                 ? {
                     label: 'Deactivate Instead',
                     tone: 'amber',

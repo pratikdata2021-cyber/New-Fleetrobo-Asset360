@@ -550,3 +550,425 @@ export const ALL_61_FILTERS: FilterDefinition[] = [
     note: 'The vehicle type classification (e.g. Truck, Bus, LCV).'
   }
 ];
+
+import {
+  Vehicle,
+  DEMO_LOOKUPS,
+  getVehicleOwningCompany,
+  normalizeRegistrationNumber
+} from './vehicle';
+import { getCanonicalTransporterNames } from '../data/vendorsSeed';
+
+export interface RangeFilterValue {
+  from?: string;
+  to?: string;
+  includeMissing?: boolean;
+}
+
+const FILTER_DEF_MAP = new Map<string, FilterDefinition>(
+  ALL_61_FILTERS.map((d) => [d.key, d])
+);
+
+export function getFilterDefinition(key: string): FilterDefinition | undefined {
+  return FILTER_DEF_MAP.get(key);
+}
+
+export function isRangeFilterActive(val: unknown): boolean {
+  if (!val || typeof val !== 'object') return false;
+  const r = val as RangeFilterValue;
+  return Boolean(
+    (r.from !== undefined && String(r.from).trim() !== '') ||
+      (r.to !== undefined && String(r.to).trim() !== '') ||
+      r.includeMissing
+  );
+}
+
+export function sanitizeVehicleFilters(raw: Record<string, any> | undefined | null): Record<string, any> {
+  if (!raw || typeof raw !== 'object') return {};
+  const cleaned: Record<string, any> = {};
+  Object.entries(raw).forEach(([key, val]) => {
+    if (val === undefined || val === null) return;
+    if (typeof val === 'boolean') {
+      cleaned[key] = val;
+      return;
+    }
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (trimmed) cleaned[key] = trimmed;
+      return;
+    }
+    if (Array.isArray(val)) {
+      const items = val.map((x) => String(x).trim()).filter(Boolean);
+      if (items.length > 0) cleaned[key] = Array.from(new Set(items));
+      return;
+    }
+    if (typeof val === 'object') {
+      const r = val as RangeFilterValue;
+      const from = r.from !== undefined ? String(r.from).trim() : '';
+      const to = r.to !== undefined ? String(r.to).trim() : '';
+      const includeMissing = Boolean(r.includeMissing);
+      if (from || to || includeMissing) {
+        cleaned[key] = {
+          ...(from ? { from } : {}),
+          ...(to ? { to } : {}),
+          ...(includeMissing ? { includeMissing: true } : {})
+        };
+      }
+    }
+  });
+  return cleaned;
+}
+
+export function countActiveVehicleFilters(raw: Record<string, any> | undefined | null): number {
+  return Object.keys(sanitizeVehicleFilters(raw)).length;
+}
+
+function parseDateFilterTimestamp(raw: string, bound: 'start' | 'end' | 'value'): number | null {
+  const s = (raw || '').trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const suffix =
+      bound === 'start'
+        ? 'T00:00:00.000'
+        : bound === 'end'
+        ? 'T23:59:59.999'
+        : 'T12:00:00.000';
+    const ms = Date.parse(`${s}${suffix}`);
+    return Number.isNaN(ms) ? null : ms;
+  }
+  const normalized = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s) ? s.replace(' ', 'T') : s;
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+export function validateFilterRange(
+  def: FilterDefinition,
+  value: RangeFilterValue | undefined
+): string | null {
+  if (!value) return null;
+  const fromStr = (value.from ?? '').toString().trim();
+  const toStr = (value.to ?? '').toString().trim();
+  if (!fromStr || !toStr) return null;
+
+  if (def.control === 'date-range') {
+    const fromMs = parseDateFilterTimestamp(fromStr, 'start');
+    const toMs = parseDateFilterTimestamp(toStr, 'end');
+    if (fromMs === null || toMs === null) {
+      return 'Enter valid From and To dates';
+    }
+    if (fromMs > toMs) {
+      return 'From date cannot be after To date';
+    }
+    return null;
+  }
+
+  if (def.control === 'numeric-range') {
+    const fromNum = Number(fromStr);
+    const toNum = Number(toStr);
+    if (Number.isNaN(fromNum) || Number.isNaN(toNum)) {
+      return 'Enter valid numeric From and To values';
+    }
+    if (fromNum > toNum) {
+      return 'From value cannot exceed To value';
+    }
+  }
+  return null;
+}
+
+export function getVehicleFilterValues(veh: Vehicle, key: string): string[] {
+  switch (key) {
+    case 'company': {
+      const owner = getVehicleOwningCompany(veh);
+      return owner ? [owner] : [];
+    }
+    case 'vin':
+      return Array.from(new Set([veh.vin, veh.chassis_number].filter((x): x is string => Boolean(x && x.trim()))));
+    case 'model':
+      return Array.from(
+        new Set([veh.machine_model, veh.model].filter((x): x is string => Boolean(x && x.trim())))
+      );
+    case 'category': {
+      const vals = [veh.category, veh.vehicle_segment, veh.class].filter(
+        (x): x is string => Boolean(x && String(x).trim())
+      );
+      return Array.from(new Set(vals));
+    }
+    case 'fleets':
+      return (veh.fleets || []).filter(Boolean);
+    case 'trailers':
+      return (veh.trailers || []).filter(Boolean);
+    case 'route':
+      return Array.from(new Set((veh.routes || []).map((r) => r.route).filter(Boolean)));
+    case 'route_type':
+      return Array.from(
+        new Set([
+          ...(veh.routes || []).map((r) => r.route_type),
+          ...(veh.allocations || []).map((a) => a.route_type),
+          ...(veh.outbound || []).map((o) => o.route_type || '')
+        ].filter(Boolean))
+      );
+    case 'allocation_date':
+      return (veh.allocations || []).map((a) => a.allocation_date).filter(Boolean);
+    case 'shared_company':
+      return Array.from(
+        new Set(
+          (veh.sharing || [])
+            .filter((s) => s.is_shared)
+            .map((s) => s.shared_company)
+            .filter(Boolean)
+        )
+      );
+    case 'fitness_due_date':
+      return veh.documents?.fitness?.due_date ? [veh.documents.fitness.due_date] : [];
+    case 'permit_due_date':
+      return veh.documents?.permit?.due_date ? [veh.documents.permit.due_date] : [];
+    case 'state_tax_due_date':
+      return veh.documents?.state_tax?.due_date ? [veh.documents.state_tax.due_date] : [];
+    case 'insurance_due_date': {
+      const d = veh.documents?.insurance?.due_date || veh.insurance_to;
+      return d ? [d] : [];
+    }
+    case 'pollution_due_date':
+      return veh.documents?.pollution?.due_date ? [veh.documents.pollution.due_date] : [];
+    case 'breakdown_date_time':
+      return (veh.breakdowns || []).map((b) => b.breakdown_date_time).filter(Boolean);
+    case 'alert_type':
+      return Array.from(new Set((veh.alerts || []).map((a) => a.alert_type).filter(Boolean)));
+    case 'petrocard_child_id':
+      return veh.petro?.child_id ? [veh.petro.child_id] : [];
+    case 'petrocard_created_at':
+      return veh.petro?.created_at ? [veh.petro.created_at] : [];
+    case 'purchased_at': {
+      const p = veh.purchased_at || veh.purchase_date;
+      return p ? [p] : [];
+    }
+    default: {
+      const raw = (veh as any)[key];
+      if (raw === undefined || raw === null) return [];
+      if (Array.isArray(raw)) return raw.map((x) => String(x).trim()).filter(Boolean);
+      const str = String(raw).trim();
+      return str ? [str] : [];
+    }
+  }
+}
+
+export function getVehicleBooleanFilterState(veh: Vehicle, key: string): boolean {
+  switch (key) {
+    case 'dpf_equipped':
+      return Boolean(veh.dpf_equipped);
+    case 'scr_equipped':
+      return Boolean(veh.scr_equipped);
+    case 'overspeed_rule_enabled':
+      return Boolean(veh.routes?.some((r) => r.overspeed_rule_enabled));
+    case 'is_shared':
+      return Boolean(veh.sharing?.some((s) => s.is_shared));
+    case 'online':
+      return Boolean(veh.online);
+    case 'has_trailer':
+      return Boolean(veh.trailers && veh.trailers.length > 0);
+    case 'has_driver':
+      return Boolean(veh.driver && veh.driver.trim().length > 0);
+    default:
+      return Boolean((veh as any)[key]);
+  }
+}
+
+export function matchesVehicleFilter(veh: Vehicle, key: string, target: any): boolean {
+  const def = FILTER_DEF_MAP.get(key);
+  if (target === undefined || target === null || target === '') return true;
+
+  if (def?.control === 'yes-no' || typeof target === 'boolean') {
+    return getVehicleBooleanFilterState(veh, key) === Boolean(target);
+  }
+
+  if (def?.control === 'date-range') {
+    const range = target as RangeFilterValue;
+    const fromStr = (range.from ?? '').trim();
+    const toStr = (range.to ?? '').trim();
+    const includeMissing = Boolean(range.includeMissing);
+    if (!fromStr && !toStr && !includeMissing) return true;
+
+    const rawDates = getVehicleFilterValues(veh, key);
+    const parsedDates = rawDates
+      .map((d) => parseDateFilterTimestamp(d, 'value'))
+      .filter((ms): ms is number => ms !== null);
+
+    if (parsedDates.length === 0) {
+      return includeMissing;
+    }
+
+    const fromMs = fromStr ? parseDateFilterTimestamp(fromStr, 'start') : null;
+    const toMs = toStr ? parseDateFilterTimestamp(toStr, 'end') : null;
+    if (!fromStr && !toStr && includeMissing) {
+      // Only includeMissing toggled without bounds -> return records missing date?
+      // If neither bound is set and includeMissing is true, return true for records lacking dates OR all?
+      // Most intuitive: when includeMissing is only constraint, show records missing that date; when bounds + includeMissing, show matching OR missing.
+      return false;
+    }
+    return parsedDates.some((ms) => {
+      if (fromMs !== null && ms < fromMs) return false;
+      if (toMs !== null && ms > toMs) return false;
+      return true;
+    });
+  }
+
+  if (def?.control === 'numeric-range') {
+    const range = target as RangeFilterValue;
+    const fromStr = (range.from ?? '').toString().trim();
+    const toStr = (range.to ?? '').toString().trim();
+    const includeMissing = Boolean(range.includeMissing);
+    if (!fromStr && !toStr && !includeMissing) return true;
+
+    const rawVals = getVehicleFilterValues(veh, key);
+    const numVal = rawVals.length > 0 ? Number(rawVals[0]) : NaN;
+    if (rawVals.length === 0 || Number.isNaN(numVal)) {
+      return includeMissing;
+    }
+    if (!fromStr && !toStr && includeMissing) {
+      return false;
+    }
+    if (fromStr && numVal < Number(fromStr)) return false;
+    if (toStr && numVal > Number(toStr)) return false;
+    return true;
+  }
+
+  if (Array.isArray(target)) {
+    if (target.length === 0) return true;
+    const targetLower = new Set(target.map((t) => String(t).trim().toLowerCase()));
+    const values = getVehicleFilterValues(veh, key);
+    return values.some((v) => targetLower.has(v.trim().toLowerCase()));
+  }
+
+  if (typeof target === 'string') {
+    const needle = target.trim().toLowerCase();
+    if (!needle) return true;
+    const values = getVehicleFilterValues(veh, key);
+    if (key === 'registration_number') {
+      const normalizedNeedle = normalizeRegistrationNumber(target).toLowerCase();
+      return values.some(
+        (v) =>
+          v.toLowerCase().includes(needle) ||
+          (normalizedNeedle.length > 0 &&
+            normalizeRegistrationNumber(v).toLowerCase().includes(normalizedNeedle))
+      );
+    }
+    return values.some((v) => v.toLowerCase().includes(needle));
+  }
+
+  return true;
+}
+
+export function evaluateVehicleFilters(
+  veh: Vehicle,
+  filters: Record<string, any>,
+  mode: 'basic' | 'advanced'
+): boolean {
+  const cleaned = sanitizeVehicleFilters(filters);
+  const keys = Object.keys(cleaned);
+  if (keys.length === 0) return true;
+  if (mode === 'basic') {
+    return keys.every((k) => matchesVehicleFilter(veh, k, cleaned[k]));
+  }
+  return keys.some((k) => matchesVehicleFilter(veh, k, cleaned[k]));
+}
+
+export function getOptionsForVehicleFilter(
+  key: string,
+  scopedVehicles: Vehicle[],
+  companyContext?: string,
+  historicalSelected?: unknown
+): string[] {
+  const datasetValues = Array.from(
+    new Set(scopedVehicles.flatMap((v) => getVehicleFilterValues(v, key)).filter(Boolean))
+  );
+  const historical = Array.isArray(historicalSelected)
+    ? historicalSelected.map((x) => String(x).trim()).filter(Boolean)
+    : [];
+
+  const mergeWithHistorical = (primary: string[]): string[] => {
+    const merged = Array.from(new Set([...primary, ...historical].filter(Boolean)));
+    return merged.sort((a, b) => a.localeCompare(b));
+  };
+
+  switch (key) {
+    case 'company': {
+      if (
+        companyContext &&
+        companyContext !== 'All Clients' &&
+        companyContext !== 'Platform Admin' &&
+        companyContext !== 'Binary'
+      ) {
+        return mergeWithHistorical([companyContext]);
+      }
+      return mergeWithHistorical(
+        datasetValues.length > 0 ? datasetValues : DEMO_LOOKUPS.companies
+      );
+    }
+    case 'status':
+      return Array.from(new Set([...DEMO_LOOKUPS.operationalStatuses, ...historical]));
+    case 'transporter': {
+      const canonical = getCanonicalTransporterNames(companyContext, []);
+      return mergeWithHistorical(
+        canonical.length > 0 ? [...canonical, ...datasetValues] : datasetValues
+      );
+    }
+    case 'fuel_type':
+      return mergeWithHistorical([...DEMO_LOOKUPS.fuelTypes, ...datasetValues]);
+    case 'type':
+      return mergeWithHistorical([...DEMO_LOOKUPS.vehicleTypes, ...datasetValues]);
+    case 'measurement_system':
+      return mergeWithHistorical(
+        datasetValues.length > 0 ? datasetValues : DEMO_LOOKUPS.measurementSystems
+      );
+    case 'odometer_unit':
+      return mergeWithHistorical(
+        datasetValues.length > 0 ? datasetValues : DEMO_LOOKUPS.odometerUnits
+      );
+    case 'fuel_volume_unit':
+      return mergeWithHistorical(datasetValues.length > 0 ? datasetValues : ['L', 'gal']);
+    // Dataset-derived / canonical relationship & spec fields (never fake 'Option 1/2/3')
+    case 'vendor':
+    case 'driver':
+    case 'fleets':
+    case 'trailers':
+    case 'hub':
+    case 'client':
+    case 'category':
+    case 'class':
+    case 'make':
+    case 'model':
+    case 'route':
+    case 'route_type':
+    case 'alert_type':
+    case 'shared_company':
+    case 'body_type':
+    case 'body_sub_type':
+    case 'usage_type':
+    case 'ownership_type':
+    case 'transmission':
+    case 'emission_standard':
+    case 'currency':
+    case 'warranty':
+    case 'financing_status':
+      return mergeWithHistorical(datasetValues);
+    default:
+      return mergeWithHistorical(datasetValues);
+  }
+}
+
+export function formatVehicleFilterChip(key: string, val: any): string {
+  if (typeof val === 'boolean') return val ? 'Yes' : 'No';
+  if (Array.isArray(val)) return val.join(', ');
+  if (val && typeof val === 'object') {
+    const r = val as RangeFilterValue;
+    const parts: string[] = [];
+    if (r.from || r.to) {
+      parts.push(`${r.from || '...'} – ${r.to || '...'}`);
+    }
+    if (r.includeMissing) {
+      parts.push('incl. missing');
+    }
+    return parts.join(' · ') || 'Configured';
+  }
+  return String(val);
+}

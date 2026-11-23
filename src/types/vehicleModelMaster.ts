@@ -509,9 +509,9 @@ export const VEHICLE_MODEL_MASTER_STORAGE_KEY = 'fleetrobo_vehicle_model_master_
 export function loadVehicleModelStore(): VehicleModelRecord[] {
   try {
     const raw = localStorage.getItem(VEHICLE_MODEL_MASTER_STORAGE_KEY);
-    if (raw) {
+    if (raw !== null) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
         return parsed.map((item: VehicleModelRecord) => {
           const fallbackIcons = createDefaultIconsMap();
           const mergedIcons = { ...fallbackIcons };

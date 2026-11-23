@@ -17,6 +17,8 @@ import {
   HardwareMembership,
   HardwareBinding,
   HardwareBindingMode,
+  ConnectionRecord,
+  ResourceAllocation,
   DeviceRecord,
   SensorRecord,
   SimRecord,
@@ -24,11 +26,19 @@ import {
   MODAL_FIELD_TOOLTIPS,
   resolveHardwareIdentifierValue,
   validateHardwareBindingPair,
+  getNextHardwareBindingId,
+  deriveDeviceStatus,
+  deriveSensorStatus,
+  deriveSimEffectiveInventoryStatus,
   formatDateTimeWithTz,
   formatLocalInputParts,
   buildIsoWithTimezone
 } from '../../types/modalMaster';
-import { ModelCategoryRecord, getRecordIdentifierTypes } from '../../types/modelCategoryMaster';
+import {
+  ModelCategoryRecord,
+  getRecordIdentifierTypes,
+  loadModelCategoryStore
+} from '../../types/modelCategoryMaster';
 import { MappingInfoTooltip } from './ModalConnectionOverlays';
 import {
   FullCreateDeviceDrawer,
@@ -68,7 +78,8 @@ interface HardwareCompositionModalProps {
   members: HardwareMembership[];
   draftBindings: HardwareBinding[];
   allGlobalBindings: HardwareBinding[];
-  allConnections: { id: string; name: string; companyName: string; status: string; memberIds: string[] }[];
+  allConnections: ConnectionRecord[];
+  allAllocations?: ResourceAllocation[];
   localDevices: DeviceRecord[];
   localSensors: SensorRecord[];
   localSims: SimRecord[];
@@ -96,6 +107,7 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
   draftBindings,
   allGlobalBindings,
   allConnections,
+  allAllocations = [],
   localDevices,
   localSensors,
   localSims,
@@ -251,18 +263,28 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
     return { activeBindings, activeConns };
   };
 
-  // Matching client-owned hardware units directly across all registered models
+  // Matching client-owned hardware units directly across company-enabled models
   const matchingUnits = useMemo(() => {
     if (isEditingBinding) return [];
     const q = idSearchQuery.trim().toLowerCase();
     const clientLower = targetClient.trim().toLowerCase();
     const seen = new Set<string>();
+    const allModelCategories = loadModelCategoryStore();
+    const enabledModelIdSet = new Set(categoryModels.map((m) => m.id));
 
     if (category === 'Device') {
       return effectiveDevices
         .filter((d) => {
           if ((d.company || '').trim().toLowerCase() !== clientLower) return false;
           if (seen.has(d.id)) return false;
+          if (d.modelTypeId) {
+            const globalModel = allModelCategories.find((m) => m.id === d.modelTypeId);
+            if (!globalModel || globalModel.status !== 'Active' || !enabledModelIdSet.has(d.modelTypeId)) {
+              return false;
+            }
+          } else if (categoryModels.length === 0) {
+            return false;
+          }
           const matchesQuery =
             !q ||
             [d.deviceId, d.serial, d.imei, d.name, d.kind, d.manufacturer, d.modelText]
@@ -291,6 +313,15 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
             ? [matchedModel.typeName, matchedModel.manufacturer, matchedModel.modelReference].filter(Boolean).join(' · ')
             : [d.kind, d.manufacturer, d.modelText].filter(Boolean).join(' · ');
 
+          const effectiveStatus = deriveDeviceStatus(d, {
+            connections: allConnections,
+            hardwareBindings: allGlobalBindings,
+            resourceAllocations: allAllocations,
+            devices: effectiveDevices,
+            sensors: effectiveSensors,
+            sims: effectiveSims
+          });
+
           return {
             hardwareId: d.id,
             code: d.deviceId,
@@ -302,7 +333,7 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
             manufacturer: d.manufacturer,
             modelText: d.modelText,
             subtitle: `${d.deviceId} · ${d.manufacturer} ${d.modelText}`,
-            status: d.hardwareLifecycle,
+            status: effectiveStatus,
             simSlots: d.simSlots || 0
           };
         });
@@ -313,6 +344,14 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
         .filter((s) => {
           if ((s.company || '').trim().toLowerCase() !== clientLower) return false;
           if (seen.has(s.id)) return false;
+          if (s.modelTypeId) {
+            const globalModel = allModelCategories.find((m) => m.id === s.modelTypeId);
+            if (!globalModel || globalModel.status !== 'Active' || !enabledModelIdSet.has(s.modelTypeId)) {
+              return false;
+            }
+          } else if (categoryModels.length === 0) {
+            return false;
+          }
           const matchesQuery =
             !q ||
             [s.deviceId, s.serial, s.name, s.kind, s.manufacturer, s.modelText]
@@ -340,6 +379,15 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
             ? [matchedModel.typeName, matchedModel.manufacturer, matchedModel.modelReference].filter(Boolean).join(' · ')
             : [s.kind, s.manufacturer, s.modelText].filter(Boolean).join(' · ');
 
+          const effectiveStatus = deriveSensorStatus(s, {
+            connections: allConnections,
+            hardwareBindings: allGlobalBindings,
+            resourceAllocations: allAllocations,
+            devices: effectiveDevices,
+            sensors: effectiveSensors,
+            sims: effectiveSims
+          });
+
           return {
             hardwareId: s.id,
             code: s.deviceId,
@@ -351,7 +399,7 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
             manufacturer: s.manufacturer,
             modelText: s.modelText,
             subtitle: `${s.deviceId} · ${s.manufacturer} ${s.modelText}`,
-            status: s.hardwareLifecycle,
+            status: effectiveStatus,
             simSlots: 0
           };
         });
@@ -361,6 +409,14 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
       .filter((sim) => {
         if ((sim.owner || '').trim().toLowerCase() !== clientLower) return false;
         if (seen.has(sim.id)) return false;
+        if (sim.modelTypeId) {
+          const globalModel = allModelCategories.find((m) => m.id === sim.modelTypeId);
+          if (!globalModel || globalModel.status !== 'Active' || !enabledModelIdSet.has(sim.modelTypeId)) {
+            return false;
+          }
+        } else if (categoryModels.length === 0) {
+          return false;
+        }
         const matchesQuery =
           !q ||
           [sim.iccid, sim.id, sim.msisdn, sim.operator, sim.category, sim.formFactor, sim.plan]
@@ -386,6 +442,14 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
           ? [matchedModel.typeName, matchedModel.manufacturer, matchedModel.modelReference].filter(Boolean).join(' · ')
           : [sim.category || 'SIM', sim.operator, sim.formFactor].filter(Boolean).join(' · ');
 
+        const effectiveStatus = deriveSimEffectiveInventoryStatus(sim, {
+          connections: allConnections,
+          hardwareBindings: allGlobalBindings,
+          devices: effectiveDevices,
+          sensors: effectiveSensors,
+          simAssignments: []
+        });
+
         return {
           hardwareId: sim.id,
           code: sim.id,
@@ -396,8 +460,9 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
           modelDef: matchedModel,
           manufacturer: sim.operator,
           modelText: `${sim.formFactor} · ${sim.plan}`,
-          subtitle: `${sim.operator} · ${sim.formFactor} · ${sim.msisdn || 'No MSISDN'}`,
-          status: sim.status,
+          subtitle: `${sim.operator} · ${sim.formFactor} · ${sim.msisdn || 'No MSISDN'} · Carrier: ${sim.status}`,
+          status: effectiveStatus,
+          carrierStatus: sim.status,
           simSlots: 0
         };
       });
@@ -409,7 +474,10 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
     category,
     effectiveDevices,
     effectiveSensors,
-    effectiveSims
+    effectiveSims,
+    allConnections,
+    allGlobalBindings,
+    allAllocations
   ]);
 
   const selectedUnitSummary = useMemo(
@@ -588,6 +656,44 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
       return;
     }
 
+    if (
+      !isEditingBinding &&
+      (category === 'Device' || category === 'Sensor') &&
+      selectedUnitSummary?.status === 'Decommissioned'
+    ) {
+      setLocalError(
+        `${category} ${selectedUnitSummary.code} is Decommissioned and unavailable for new or active mappings.`
+      );
+      return;
+    }
+
+    if (
+      !isEditingBinding &&
+      (category === 'Device' || category === 'Sensor') &&
+      selectedUnitSummary?.status === 'In Maintenance'
+    ) {
+      setLocalError(
+        `${category} ${selectedUnitSummary.code} is currently In Maintenance. Return it to service before mapping.`
+      );
+      return;
+    }
+
+    if (!isEditingBinding && category === 'SIM') {
+      const selectedSimRecord = effectiveSims.find((s) => s.id === selectedHardwareId);
+      if (selectedSimRecord?.status === 'Retired') {
+        setLocalError(
+          `SIM ${selectedSimRecord.iccid} is Retired and cannot be added to new or active mappings.`
+        );
+        return;
+      }
+      if (selectedSimRecord?.status === 'Suspended' || selectedSimRecord?.status === 'Inactive') {
+        setLocalError(
+          `SIM ${selectedSimRecord.iccid} has carrier lifecycle "${selectedSimRecord.status}" and is blocked from new mappings until service is restored.`
+        );
+        return;
+      }
+    }
+
     if (!isEditingBinding && selectedNewMember && members.some((m) => m.hardwareId === selectedNewMember.hardwareId)) {
       setLocalError(`${selectedNewMember.identifierValue} is already added in this connection.`);
       return;
@@ -652,7 +758,7 @@ export const HardwareCompositionModal: React.FC<HardwareCompositionModalProps> =
 
     const newBinding: HardwareBinding | undefined = parentHardwareId
       ? {
-          id: `BND-${3001 + allGlobalBindings.length + draftBindings.length + 1}`,
+          id: getNextHardwareBindingId([...allGlobalBindings, ...draftBindings]),
           connectionId: connId,
           fromHardwareId: parentHardwareId,
           toHardwareId: selectedNewMember!.hardwareId,

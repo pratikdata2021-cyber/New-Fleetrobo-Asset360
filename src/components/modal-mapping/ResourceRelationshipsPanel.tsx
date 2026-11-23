@@ -41,10 +41,15 @@ import {
   getAvailableRelationshipRules,
   computeResourceRelationshipStatus,
   validateResourceRelationship,
+  getNextResourceRelationshipId,
   formatDateTimeWithTz,
   formatLocalInputParts,
   buildIsoWithTimezone
 } from '../../types/modalMaster';
+import {
+  resolveClientCompanyByNameOrId,
+  doesItemBelongToCompany
+} from '../../types/companyModelEnablement';
 import { Vehicle, loadVehicleMasterStore } from '../../types/vehicle';
 import { Driver, loadDriverMasterStore } from '../../types/driver';
 import { Fleet, INITIAL_DEMO_FLEETS } from '../../types/fleet';
@@ -167,88 +172,84 @@ export const ResourceRelationshipsPanel: React.FC<ResourceRelationshipsPanelProp
 
   // Build unified Master catalog keyed by ResourceType (no duplicate records)
   const masterCatalogByType = useMemo(() => {
-    const normClient = targetClient.trim().toLowerCase();
-    const isAdaniClient = normClient.includes('adani');
     const matchesClient = (comp?: string) => {
-      const c = (comp || '').trim().toLowerCase();
-      if (!c) return true;
-      if (c === normClient) return true;
-      if (isAdaniClient && c.includes('adani')) return true;
-      return false;
+      if (!targetClient) return false;
+      return doesItemBelongToCompany(comp, targetClient);
     };
 
     const prioritizeClient = (list: MasterResourceItem[]) =>
-      [...list].sort((a, b) => {
-        const aMatch = matchesClient(a.company) ? 0 : 1;
-        const bMatch = matchesClient(b.company) ? 0 : 1;
-        if (aMatch !== bMatch) return aMatch - bMatch;
-        return a.displayName.localeCompare(b.displayName);
-      });
+      [...list].sort((a, b) => a.displayName.localeCompare(b.displayName));
 
     const vehicleItems: MasterResourceItem[] = prioritizeClient(
-      vehicles.map((v) => ({
-        id: v.id,
-        resourceType: 'Vehicle',
-        identifier: v.registration_number,
-        displayName: `${v.machine_model || v.model || 'Vehicle'} · ${v.registration_number}`,
-        company: v.company || v.client || 'Adani Port',
-        subtitle: `${v.public_id} · ${v.transporter || 'No Transporter'} · ${v.status}`,
-        status: v.status,
-        details: {
-          'Master ID': v.id,
-          'Public ID': v.public_id,
-          'Registration No.': v.registration_number,
-          Model: v.machine_model || v.model || '—',
-          Company: v.company || v.client || '—',
-          Transporter: v.transporter || '—',
-          Status: v.status
-        }
-      }))
+      vehicles
+        .filter((v) => matchesClient(v.company || v.client))
+        .map((v) => ({
+          id: v.id,
+          resourceType: 'Vehicle',
+          identifier: v.registration_number,
+          displayName: `${v.machine_model || v.model || 'Vehicle'} · ${v.registration_number}`,
+          company: v.company || v.client || targetClient,
+          subtitle: `${v.public_id} · ${v.transporter || 'No Transporter'} · ${v.status}`,
+          status: v.status,
+          details: {
+            'Master ID': v.id,
+            'Public ID': v.public_id,
+            'Registration No.': v.registration_number,
+            Model: v.machine_model || v.model || '—',
+            Company: v.company || v.client || '—',
+            Transporter: v.transporter || '—',
+            Status: v.status
+          }
+        }))
     );
 
     const driverItems: MasterResourceItem[] = prioritizeClient(
-      drivers.map((d) => {
-        const formattedPhone = d.phone.startsWith('+') ? d.phone : `+91 ${d.phone}`;
-        return {
-          id: d.id,
-          resourceType: 'Driver',
-          identifier: formattedPhone,
-          displayName: d.name,
-          company: d.company || 'Adani Port',
-          subtitle: `${d.licence} · ${d.transporter} · ${d.status}`,
-          status: d.status,
-          details: {
-            'Master ID': d.id,
-            Name: d.name,
-            'Contact No.': formattedPhone,
-            'Licence No.': d.licence,
-            Company: d.company || '—',
-            Transporter: d.transporter || '—',
-            Status: d.status
-          }
-        };
-      })
+      drivers
+        .filter((d) => matchesClient(d.company))
+        .map((d) => {
+          const formattedPhone = d.phone.startsWith('+') ? d.phone : `+91 ${d.phone}`;
+          return {
+            id: d.id,
+            resourceType: 'Driver',
+            identifier: formattedPhone,
+            displayName: d.name,
+            company: d.company || targetClient,
+            subtitle: `${d.licence} · ${d.transporter} · ${d.status}`,
+            status: d.status,
+            details: {
+              'Master ID': d.id,
+              Name: d.name,
+              'Contact No.': formattedPhone,
+              'Licence No.': d.licence,
+              Company: d.company || '—',
+              Transporter: d.transporter || '—',
+              Status: d.status
+            }
+          };
+        })
     );
 
     const fleetItems: MasterResourceItem[] = prioritizeClient(
-      fleets.map((f) => ({
-        id: f.id,
-        resourceType: 'Fleet',
-        identifier: f.public_id,
-        displayName: f.name,
-        company: f.company || 'Adani Port',
-        subtitle: `${f.public_id} · ${f.service_area || 'General'}${f.zone ? ` · ${f.zone}` : ''} · ${f.status}`,
-        status: f.status,
-        details: {
-          'Master ID': f.id,
-          'Public ID': f.public_id,
-          'Fleet Name': f.name,
-          'Service Area': f.service_area || '—',
-          Zone: f.zone || '—',
-          Vendor: f.vendor || '—',
-          Status: f.status
-        }
-      }))
+      fleets
+        .filter((f) => matchesClient(f.company))
+        .map((f) => ({
+          id: f.id,
+          resourceType: 'Fleet',
+          identifier: f.public_id,
+          displayName: f.name,
+          company: f.company || targetClient,
+          subtitle: `${f.public_id} · ${f.service_area || 'General'}${f.zone ? ` · ${f.zone}` : ''} · ${f.status}`,
+          status: f.status,
+          details: {
+            'Master ID': f.id,
+            'Public ID': f.public_id,
+            'Fleet Name': f.name,
+            'Service Area': f.service_area || '—',
+            Zone: f.zone || '—',
+            Vendor: f.vendor || '—',
+            Status: f.status
+          }
+        }))
     );
 
     const vendorItems: MasterResourceItem[] = prioritizeClient(
@@ -777,7 +778,12 @@ export const ResourceRelationshipsPanel: React.FC<ResourceRelationshipsPanelProp
     }
 
     const nowIso = new Date().toISOString();
-    const companyId = COMPANY_NAME_TO_ID[targetClient] || 'comp-adani-mundra';
+    const resolvedCompany = resolveClientCompanyByNameOrId(targetClient);
+    const companyId = resolvedCompany?.id || COMPANY_NAME_TO_ID[targetClient];
+    if (!companyId) {
+      setRelFormError(`Invalid or unrecognized client organization "${targetClient}".`);
+      return;
+    }
 
     if (editingRel) {
       const updatedRel: ResourceRelationship = {
@@ -832,16 +838,12 @@ export const ResourceRelationshipsPanel: React.FC<ResourceRelationshipsPanelProp
       return;
     }
 
-    const existingNums = relationships
-      .map((r) => Number(r.id.replace(/\D/g, '')))
-      .filter((n) => !Number.isNaN(n));
-    const nextNum = existingNums.length > 0 ? Math.max(...existingNums) + 1 : 4005;
-    const newId = `REL-${nextNum}`;
+    const newId = getNextResourceRelationshipId(relationships);
 
     const createdRel: ResourceRelationship = {
       id: newId,
       companyId,
-      companyName: targetClient,
+      companyName: resolvedCompany?.name || targetClient,
       sourceResourceType: sourceType,
       sourceResourceId: selectedSource!.id,
       sourceResourceIdentifier: selectedSource!.identifier,

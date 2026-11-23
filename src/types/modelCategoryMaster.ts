@@ -71,6 +71,7 @@ export interface ModelCategoryRecord {
   supportedProtocols?: string[];
   connectivity?: DeviceConnectivity[];
   simSupported?: SimSupportedChoice;
+  maxCameraChannels?: number | null;
 
   // Sensor-specific fields
   measurementType?: SensorMeasurementType;
@@ -555,51 +556,52 @@ export function getTopIndiaManufacturersForType(
 
 export const MODEL_CATEGORY_TOOLTIPS = {
   // Table columns & common headers
-  typeName: 'Name created by Admin for a supported hardware/SIM type; this is not an individual installed unit.',
-  category: 'Top-level classification: Device, Sensor or SIM. This decides which additional dynamic fields are shown.',
-  manufacturerProvider: 'Vendor or hardware maker for Device/Sensor, or telecom operator/provider for SIM.',
-  modelReference: "Mandatory maker's model code or reference, e.g. MC202N; do not put an asset serial number here.",
-  identifierType: 'Kind of unique ID used when physical items are registered, e.g. IMEI or ICCID; not the actual ID.',
-  categoryDetail: 'Short summary selected from category-specific fields: Device Function & Mode; Sensor Measurement/Unit; SIM Type/Form Factor.',
-  supportingDocs: 'Number or names of attached type-level datasheets, installation guides or support files.',
-  status: 'Active types can be used for new registrations; Inactive remain in historical records.',
-  updatedOn: 'Date this type definition was last modified.',
-  actions: 'View details, edit type, activate/deactivate; disabling a type does not erase existing assets.',
-  
+  typeName: 'Canonical Model Type name for a supported hardware or SIM definition; not an individual installed unit.',
+  category: 'Top-level classification: Device, Sensor, or SIM. Controls which category-specific attributes are shown.',
+  manufacturerProvider: 'Hardware Manufacturer / Brand for Device and Sensor models, or Network Operator / Provider for SIM models.',
+  modelReference: 'Manufacturer model name or part number (e.g., MC202N, FMB140). Required for new Device models; do not enter a unit serial/IMEI.',
+  identifierType: 'One or more unique identifier formats captured during client registration (e.g., IMEI, Serial Number, ICCID); not an actual asset ID.',
+  categoryDetail: 'Summary derived from category-specific fields: Device Function & Modes; Sensor Measurement/Unit; SIM Type/Form Factor.',
+  supportingDocs: 'Metadata list of attached type-level datasheets or guides (prototype metadata only; file bytes are not uploaded to a server).',
+  status: 'Active models are eligible for platform catalogue and company enablement. Inactive models remain in historical records only.',
+  updatedOn: 'Date this model definition was last modified.',
+  actions: 'View details, edit definition, activate/deactivate, or delete (only when unreferenced).',
+
   // Filters & Top Controls
-  search: 'Search Type Name, vendor/manufacturer or model/reference.',
-  categoryFilter: 'Display all types or only Device, Sensor or SIM types.',
-  statusFilter: 'Filter by whether types can be used for new registrations.',
-  addTypeBtn: 'Create a new Device, Sensor or SIM type in the global catalogue.',
-  rowsPerPage: 'Control how many type records appear on one page.',
+  search: 'Search across Model Type, Manufacturer / Provider, Model Name / Number, and Identifier Types.',
+  categoryFilter: 'Display all model definitions or filter to Device, Sensor, or SIM.',
+  statusFilter: 'Filter by Model Status (Active or Inactive).',
+  addTypeBtn: 'Create a new Device, Sensor, or SIM model definition in the global catalogue.',
+  rowsPerPage: 'Control how many model definitions appear per page.',
 
   // Drawer Form fields
-  formCategory: 'Choose whether this new type is a Device, Sensor or SIM. This decides which additional fields are shown.',
-  formTypeName: 'Enter or pick the type name you are creating, such as ADAS/DMS Dashcam or Face Terminal.',
-  formManufacturer: 'Select a Vendor from Vendor Master, a standard hardware manufacturer, or add a custom vendor.',
-  formModelReference: 'Mandatory hardware model name/part number, such as MC202N. Do not enter the individual device serial/IMEI here.',
-  formIdentifierType: 'Select one or more unique physical ID formats captured during client registration (e.g. IMEI + Serial Number for GPS/Dashcam, Sensor ID + BLE MAC for Sensors, ICCID + EID for SIM).',
-  formDescription: 'Brief explanation of what this type represents or where it is used.',
-  formSupportingDocs: 'Attach a manufacturer datasheet, installation guide or support document describing this type.',
-  formDocUrl: 'Public or internal support/documentation link for the type; not a media stream or device endpoint.',
-  formStatus: 'Active makes the type available for new asset registrations. Inactive retains existing references but prevents new use.',
+  formCategory: 'Choose Device, Sensor, or SIM. Locked on existing models that are referenced downstream.',
+  formTypeName: 'Enter or select the Model Type name, such as ADAS/DMS Dashcam, Face Terminal, or M2M SIM.',
+  formManufacturer: 'Select a Manufacturer / Brand (Device/Sensor) or Network Operator / Provider (SIM), or add a custom entry.',
+  formModelReference: 'Manufacturer model name or part number (e.g., MC202N). Required for new Device models; do not enter a physical serial or IMEI.',
+  formIdentifierType: 'Select one or more physical identifier formats captured during registration (e.g., IMEI + Serial Number for Devices, ICCID + EID for SIMs).',
+  formDescription: 'Optional summary of what this model definition represents or where it is used.',
+  formSupportingDocs: 'Attach type-level datasheets or guides. Prototype stores attachment metadata only (file bytes are not stored for download).',
+  formDocUrl: 'Optional public or internal http:// or https:// documentation link; not a device stream endpoint.',
+  formStatus: 'Active models can be enabled for clients and used in new registrations. Inactive models preserve existing records but block new use.',
 
   // Device Specific
-  deviceFunction: 'Main purpose of this device type; it does not constrain which type name Admin may create.',
-  deviceMode: 'Operating or channel mode for this device model (e.g. ADAS/DMS for Dashcam, Cam1–Cam6 for DVR/MDVR and IP Camera, or add a custom mode).',
-  platformProtocols: 'Platform integration protocols supported by this hardware model (e.g. Metta, BSL, Streamax API, ISUP, ONVIF, Codec8). Clients choose one when registering a physical unit.',
-  connectivity: 'Connection modes the manufacturer says the device type supports; select only documented modes.',
-  simSupported: 'Whether a SIM can be used by this device type; this is not a SIM assignment.',
+  deviceFunction: 'Primary operational function of this Device model.',
+  deviceMode: 'Operating or channel modes supported by this Device model (e.g., ADAS, DMS, Cam1–Cam6, or custom).',
+  platformProtocols: 'Integration protocols supported by this Device model (e.g., Metta, BSL, Streamax API, ISUP, ONVIF, Codec8).',
+  connectivity: 'Documented connectivity interfaces supported by this Device model (e.g., Cellular, Wi-Fi, BLE, Ethernet).',
+  simSupported: 'Whether this Device model supports a SIM card (capability only; not a per-device SIM assignment).',
+  maxCameraChannels: 'Optional maximum camera channels supported by video-capable Device models (capability only; not per-device channel assignment).',
 
   // Sensor Specific
-  measurementType: 'What this sensor type measures or detects. This does not replace the editable Type Name.',
-  measurementUnit: "Unit expected for this sensor's reading; choose Not Applicable for binary states if needed.",
-  connectionMode: 'Whether the sensor depends on a gateway/device or can communicate independently.',
+  measurementType: 'What physical quantity or state this Sensor model measures or detects.',
+  measurementUnit: 'Measurement unit expected for readings. Required for numeric measurements; use State or Not Applicable for binary sensors.',
+  connectionMode: 'Whether this Sensor model connects via a gateway/device, operates standalone, or supports both.',
 
   // SIM Specific
-  simType: 'Commercial/service classification of SIM. This is different from the Admin-created Type Name and from Physical/eSIM form factor.',
-  simFormFactor: 'Whether the SIM is a removable physical card or an embedded/electronic SIM profile.',
-  validityMonths: "Optional default validity for this type; actual activation/expiry for an issued SIM is stored in the client's SIM record.",
+  simType: 'Commercial/service classification of SIM (M2M, Standard, IoT, Other).',
+  simFormFactor: 'Physical removable SIM card or embedded eSIM profile.',
+  validityMonths: 'Optional default validity period in positive whole months; actual issued SIM expiry is tracked per SIM record.',
 };
 
 export const INITIAL_MODEL_CATEGORY_RECORDS: ModelCategoryRecord[] = [
@@ -932,12 +934,53 @@ export function saveCustomConnectivityOption(name: string): string[] {
   return saveCustomStringItem(CUSTOM_CONNECTIVITY_STORAGE_KEY, name);
 }
 
+export function isValidHttpUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+export function parseStrictPositiveInteger(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (!/^[1-9]\d*$/.test(trimmed)) return NaN;
+  const num = Number(trimmed);
+  return Number.isSafeInteger(num) && num > 0 ? num : NaN;
+}
+
+export function sensorMeasurementNeedsUnit(measurementType?: SensorMeasurementType | string): boolean {
+  return (
+    measurementType === 'Temperature' ||
+    measurementType === 'Fuel Level' ||
+    measurementType === 'Pressure'
+  );
+}
+
+export function buildModelDuplicateKey(fields: {
+  category: string;
+  typeName: string;
+  manufacturer: string;
+  modelReference?: string;
+}): string {
+  return [
+    (fields.category || '').trim().toLowerCase(),
+    (fields.typeName || '').trim().toLowerCase(),
+    (fields.manufacturer || '').trim().toLowerCase(),
+    (fields.modelReference || '').trim().toLowerCase(),
+  ].join('||');
+}
+
 export function loadModelCategoryStore(): ModelCategoryRecord[] {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (raw) {
+    if (raw !== null) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
         const seedById = new Map(INITIAL_MODEL_CATEGORY_RECORDS.map((r) => [r.id, r]));
         const hydrated: ModelCategoryRecord[] = parsed.map((rec: ModelCategoryRecord): ModelCategoryRecord => {
           const seed = seedById.get(rec.id);
@@ -945,14 +988,15 @@ export function loadModelCategoryStore(): ModelCategoryRecord[] {
           const base = seed
             ? {
                 ...rec,
-                modelReference: rec.modelReference || seed.modelReference,
-                manufacturer: rec.manufacturer || seed.manufacturer,
-                deviceMode: rec.deviceMode || seed.deviceMode,
-                supportedModes: rec.supportedModes || seed.supportedModes,
+                modelReference: rec.modelReference !== undefined ? rec.modelReference : seed.modelReference,
+                manufacturer: rec.manufacturer !== undefined ? rec.manufacturer : seed.manufacturer,
+                deviceMode: rec.deviceMode !== undefined ? rec.deviceMode : seed.deviceMode,
+                supportedModes: rec.supportedModes !== undefined ? rec.supportedModes : seed.supportedModes,
                 supportedProtocols:
-                  rec.supportedProtocols && rec.supportedProtocols.length > 0
-                    ? rec.supportedProtocols
-                    : seed.supportedProtocols,
+                  rec.supportedProtocols !== undefined ? rec.supportedProtocols : seed.supportedProtocols,
+                connectivity: rec.connectivity !== undefined ? rec.connectivity : seed.connectivity,
+                simSupported: rec.simSupported !== undefined ? rec.simSupported : seed.simSupported,
+                connectionMode: rec.connectionMode !== undefined ? rec.connectionMode : seed.connectionMode,
               }
             : rec;
           return {
@@ -963,11 +1007,6 @@ export function loadModelCategoryStore(): ModelCategoryRecord[] {
                 : resolvedIds,
           };
         });
-        const existingIds = new Set(hydrated.map((r: ModelCategoryRecord) => r.id));
-        const faceSeed = seedById.get('mcat-13');
-        if (faceSeed && !existingIds.has('mcat-13')) {
-          hydrated.push(faceSeed);
-        }
         return hydrated;
       }
     }
@@ -975,6 +1014,11 @@ export function loadModelCategoryStore(): ModelCategoryRecord[] {
     // ignore
   }
   return INITIAL_MODEL_CATEGORY_RECORDS;
+}
+
+export function getModelCategoryById(id?: string | null): ModelCategoryRecord | undefined {
+  if (!id) return undefined;
+  return loadModelCategoryStore().find((m) => m.id === id);
 }
 
 export function saveModelCategoryStore(records: ModelCategoryRecord[]) {

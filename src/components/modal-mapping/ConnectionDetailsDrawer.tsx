@@ -12,12 +12,15 @@ import {
   Download
 } from 'lucide-react';
 import {
+  ModalMasterStore,
   ConnectionRecord,
   HardwareBinding,
   ResourceAllocation,
   HardwareBindingStatus,
   ResourceAllocationStatus,
   ConnectionLifecycleStatus,
+  loadModalMasterStore,
+  computeEffectiveConnectionStatus,
   computeHardwareBindingStatus,
   computeResourceAllocationStatus,
   formatDateTimeWithTz
@@ -31,6 +34,7 @@ interface ConnectionDetailsDrawerProps {
   initialTab: DetailsDrawerTab;
   allBindings: HardwareBinding[];
   allAllocations: ResourceAllocation[];
+  store?: ModalMasterStore;
   canEdit: boolean;
   onClose: () => void;
   onEdit: (conn: ConnectionRecord) => void;
@@ -43,6 +47,7 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
   initialTab,
   allBindings,
   allAllocations,
+  store,
   canEdit,
   onClose,
   onEdit,
@@ -50,15 +55,42 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
   onExportRecord
 }) => {
   const [activeTab, setActiveTab] = useState<DetailsDrawerTab>(initialTab);
+  const resolvedStore = store || loadModalMasterStore();
+  const effectiveStatusInfo = computeEffectiveConnectionStatus(connection, resolvedStore);
 
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab, connection.id]);
 
+  const resolveLiveHardwareStatus = (m: ConnectionRecord['members'][number]): string => {
+    if (m.category === 'Device') {
+      const dev = resolvedStore.devices.find((d) => d.id === m.hardwareId);
+      if (dev) {
+        return dev.statusOverride || dev.hardwareLifecycle || m.registrationStatus;
+      }
+    } else if (m.category === 'Sensor') {
+      const sen = resolvedStore.sensors.find((s) => s.id === m.hardwareId);
+      if (sen) {
+        return sen.statusOverride || sen.hardwareLifecycle || m.registrationStatus;
+      }
+    } else if (m.category === 'SIM') {
+      const sim = resolvedStore.sims.find((s) => s.id === m.hardwareId);
+      if (sim) {
+        return sim.status || m.registrationStatus;
+      }
+    }
+    return m.registrationStatus;
+  };
+
+  const liveMembers = connection.members.map((m) => ({
+    ...m,
+    registrationStatus: resolveLiveHardwareStatus(m)
+  }));
+
   const connBindings = allBindings.filter((b) => b.connectionId === connection.id);
   const connAllocations = allAllocations.filter((a) => a.connectionId === connection.id);
 
-  const memberMap = new Map(connection.members.map((m) => [m.hardwareId, m]));
+  const memberMap = new Map(liveMembers.map((m) => [m.hardwareId, m]));
 
   const statusBadge = (status: ConnectionLifecycleStatus) => {
     const map: Record<ConnectionLifecycleStatus, string> = {
@@ -120,7 +152,7 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
               <span className="font-mono text-[12px] font-bold text-slate-900 bg-white border border-slate-200 px-2 py-0.5 rounded">
                 {connection.id}
               </span>
-              {statusBadge(connection.status)}
+              {statusBadge(effectiveStatusInfo.status)}
               <span className="text-[11px] font-medium text-slate-500">{connection.companyName}</span>
             </div>
             <h2 className="text-[15px] font-bold text-slate-900 mt-1 truncate">{connection.name}</h2>
@@ -194,7 +226,10 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
                 </div>
                 <div>
                   <div className="text-[10px] font-bold text-slate-400 uppercase">Lifecycle Status</div>
-                  <div className="mt-0.5">{statusBadge(connection.status)}</div>
+                  <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
+                    {statusBadge(effectiveStatusInfo.status)}
+                    <span className="text-[10px] text-slate-500">{effectiveStatusInfo.reason}</span>
+                  </div>
                 </div>
                 <div className="col-span-2">
                   <div className="text-[10px] font-bold text-slate-400 uppercase">Purpose / Description</div>
@@ -281,29 +316,38 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
                         </td>
                       </tr>
                     ) : (
-                      connection.members.map((m) => (
-                        <tr key={m.hardwareId} className="hover:bg-slate-50/60">
-                          <td className="px-3 py-2.5">
-                            <span className="inline-flex items-center gap-1.5 font-semibold text-slate-800">
-                              {categoryIcon(m.category)}
-                              {m.category}
-                              {false && m.isPrimary && (
-                                <span className="px-1.5 py-0.2 rounded bg-orange-50 text-[#F26522] border border-orange-200 text-[9px] font-bold">
-                                  Primary
-                                </span>
-                              )}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2.5 text-slate-700">{m.modelLabel}</td>
-                          <td className="px-3 py-2.5 text-slate-500">{m.identifierType}</td>
-                          <td className="px-3 py-2.5 font-mono font-semibold text-slate-900">{m.identifierValue}</td>
-                          <td className="px-3 py-2.5">
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                              {m.registrationStatus}
-                            </span>
-                          </td>
-                        </tr>
-                      ))
+                      liveMembers.map((m) => {
+                        const isBlocked =
+                          m.registrationStatus === 'Decommissioned' ||
+                          m.registrationStatus === 'In Maintenance' ||
+                          m.registrationStatus === 'Retired' ||
+                          m.registrationStatus === 'Suspended' ||
+                          m.registrationStatus === 'Inactive';
+                        return (
+                          <tr key={m.hardwareId} className="hover:bg-slate-50/60">
+                            <td className="px-3 py-2.5">
+                              <span className="inline-flex items-center gap-1.5 font-semibold text-slate-800">
+                                {categoryIcon(m.category)}
+                                {m.category}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2.5 text-slate-700">{m.modelLabel}</td>
+                            <td className="px-3 py-2.5 text-slate-500">{m.identifierType}</td>
+                            <td className="px-3 py-2.5 font-mono font-semibold text-slate-900">{m.identifierValue}</td>
+                            <td className="px-3 py-2.5">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
+                                  isBlocked
+                                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                    : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                }`}
+                              >
+                                {m.registrationStatus}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -343,7 +387,7 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
                       connBindings.map((b) => {
                         const fromMem = memberMap.get(b.fromHardwareId);
                         const toMem = memberMap.get(b.toHardwareId);
-                        const st = computeHardwareBindingStatus(b, allBindings, connection.members);
+                        const st = computeHardwareBindingStatus(b, allBindings, liveMembers);
                         return (
                           <tr key={b.id} className="hover:bg-slate-50/60">
                             <td className="px-3 py-2.5 font-mono font-semibold text-slate-800">{b.id}</td>
@@ -426,7 +470,10 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
                       </tr>
                     ) : (
                       connAllocations.map((a, idx) => {
-                        const st = computeResourceAllocationStatus(a, allAllocations);
+                        const st = computeResourceAllocationStatus(a, allAllocations, Date.now(), {
+                          connections: resolvedStore.connections,
+                          store: resolvedStore
+                        });
                         return (
                           <tr key={`${a.id}-${idx}`} className="hover:bg-slate-50/60">
                             <td className="px-3 py-2.5 font-mono font-semibold text-slate-800">{a.id}</td>

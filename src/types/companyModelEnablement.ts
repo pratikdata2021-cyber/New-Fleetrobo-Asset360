@@ -11,6 +11,7 @@ export interface ClientCompany {
   industry: string;
   sitesCount: number;
   status: 'Active' | 'Onboarding' | 'Inactive';
+  allowOnboardingRegistration?: boolean;
   contactEmail: string;
   contactPhone: string;
   city: string;
@@ -19,6 +20,14 @@ export interface ClientCompany {
   notes?: string;
   updatedAt: string;
   createdAt: string;
+}
+
+export interface InUseDetail {
+  count: number;
+  liveInventoryCount: number;
+  liveMappingCount: number;
+  seedBaselineCount: number;
+  provenance: 'live' | 'baseline' | 'none';
 }
 
 export interface CompanyAuditEntry {
@@ -426,14 +435,14 @@ export const COMPANY_MODEL_TOOLTIPS = {
   // Model Access Tab tooltips
   enableCol: 'Allow this company to select this model/type for new physical asset registration and mapping.',
   categoryCol: 'High-level classification: Device, Sensor, or SIM.',
-  typeNameCol: 'User-defined hardware type name created in the global Model Category Master.',
+  typeNameCol: 'Model Type name defined in the global Model Category Master.',
   manufacturerCol: 'Hardware manufacturer or telecommunications SIM service provider.',
-  modelReferenceCol: 'Manufacturer model code or hardware specification designation (e.g., MC202N, FMB140).',
-  identifierTypeCol: 'Kind of identifier expected for a physical unit (e.g., IMEI, Serial Number, ICCID), not an actual physical value.',
-  globalStatusCol: 'Whether the global model definition is active in Model Category Master. Globally inactive types cannot be enabled.',
-  inUseStatusCol: 'Shows active physical hardware instances or PMO mappings currently assigned to this model type. Disabling in-use models requires impact confirmation.',
-  
-  companyContext: 'The tenant whose model access is being configured. All changes remain strictly scoped to this company.',
+  modelReferenceCol: 'Model Name / Number designation from Model Category Master (e.g., MC202N, FMB140).',
+  identifierTypeCol: 'Expected identifier formats for physical units (e.g., IMEI, Serial Number, ICCID).',
+  globalStatusCol: 'Whether the global model definition is Active or Inactive in Model Category Master. Globally Inactive models cannot be newly enabled.',
+  inUseStatusCol: 'Assigned inventory instances and asset mappings using this model for this company. Disabling in-use models requires confirmation and preserves existing history.',
+
+  companyContext: 'The tenant whose model access is being configured. All changes remain strictly scoped to this company ID.',
   enableSelectedBtn: 'Enable all currently selected model types for this client company.',
   disableSelectedBtn: 'Disable all currently selected model types for this client company.',
   saveChangesBtn: 'Commit pending model access changes to the client tenant profile with audit logging.',
@@ -448,6 +457,49 @@ const STORAGE_KEYS = {
   ACCESS_MAP: 'fleetrobo_company_model_access_v2',
   IN_USE_MAP: 'fleetrobo_company_in_use_map_v1',
   AUDIT_LOGS: 'fleetrobo_company_audit_logs_v1',
+  PROTOTYPE_ACTOR: 'fleetrobo_prototype_actor_v1',
+};
+
+export interface PrototypeActorInfo {
+  id: string;
+  name: string;
+  role: string;
+  isDemoActor: boolean;
+}
+
+export const PROTOTYPE_DEMO_ACTORS: PrototypeActorInfo[] = [
+  { id: 'actor-pa', name: 'Platform Admin (Demo)', role: 'Platform Admin', isDemoActor: true },
+  { id: 'actor-sec-ops', name: 'Fleet Security Ops (Demo)', role: 'Platform Admin', isDemoActor: true },
+  { id: 'actor-impl-lead', name: 'Onboarding Lead (Demo)', role: 'Platform Admin', isDemoActor: true },
+];
+
+export const getActivePrototypeActor = (): PrototypeActorInfo => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.PROTOTYPE_ACTOR);
+    if (raw) {
+      const parsed = JSON.parse(raw) as PrototypeActorInfo;
+      if (parsed && parsed.name && parsed.role) return parsed;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return PROTOTYPE_DEMO_ACTORS[0];
+};
+
+export const saveActivePrototypeActor = (actor: PrototypeActorInfo) => {
+  try {
+    localStorage.setItem(STORAGE_KEYS.PROTOTYPE_ACTOR, JSON.stringify(actor));
+  } catch {
+    // ignore storage errors
+  }
+};
+
+export const isCompanyEligibleForNewRegistration = (company?: ClientCompany | null): boolean => {
+  if (!company) return false;
+  if (company.isPlatformOwner) return true;
+  if (company.status === 'Active') return true;
+  if (company.status === 'Onboarding') return Boolean(company.allowOnboardingRegistration);
+  return false; // Inactive companies must never register new hardware
 };
 
 export const loadClientCompanies = (): ClientCompany[] => {
@@ -463,15 +515,13 @@ export const loadClientCompanies = (): ClientCompany[] => {
       const existingIds = new Set(normalized.map((c) => c.id));
       const missingInitial = INITIAL_CLIENT_COMPANIES.filter((c) => !existingIds.has(c.id));
       if (missingInitial.length > 0) {
-        // Place missing initial companies right after Adani Mundra if possible
         const adaniIdx = normalized.findIndex((c) => c.id === 'comp-adani-mundra');
         if (adaniIdx >= 0) {
-          const merged = [
+          return [
             ...normalized.slice(0, adaniIdx + 1),
             ...missingInitial,
-            ...normalized.slice(adaniIdx + 1)
+            ...normalized.slice(adaniIdx + 1),
           ];
-          return merged;
         }
         return [...normalized, ...missingInitial];
       }
@@ -485,7 +535,7 @@ export const loadClientCompanies = (): ClientCompany[] => {
 
 export const getAvailableClientCompanies = (): string[] => {
   return loadClientCompanies()
-    .filter((c) => !c.isPlatformOwner)
+    .filter((c) => !c.isPlatformOwner && isCompanyEligibleForNewRegistration(c))
     .map((c) => c.name);
 };
 
@@ -505,12 +555,27 @@ export const loadCompanyModelAccessMap = (): Record<string, Record<string, boole
     const raw = localStorage.getItem(STORAGE_KEYS.ACCESS_MAP);
     if (raw) {
       const parsed = JSON.parse(raw) as Record<string, Record<string, boolean>>;
-      return { ...INITIAL_COMPANY_MODEL_ACCESS, ...parsed };
+      const merged: Record<string, Record<string, boolean>> = {};
+      // Preserve explicit legacy defaults only for known initial company IDs
+      Object.keys(INITIAL_COMPANY_MODEL_ACCESS).forEach((legacyId) => {
+        merged[legacyId] = { ...INITIAL_COMPANY_MODEL_ACCESS[legacyId] };
+      });
+      // Apply saved per-company maps strictly by companyId
+      Object.keys(parsed || {}).forEach((compId) => {
+        if (parsed[compId] && typeof parsed[compId] === 'object') {
+          merged[compId] = { ...parsed[compId] };
+        }
+      });
+      return merged;
     }
   } catch (e) {
     console.error('Failed to load company model access from localStorage', e);
   }
-  return INITIAL_COMPANY_MODEL_ACCESS;
+  const initialCopy: Record<string, Record<string, boolean>> = {};
+  Object.keys(INITIAL_COMPANY_MODEL_ACCESS).forEach((k) => {
+    initialCopy[k] = { ...INITIAL_COMPANY_MODEL_ACCESS[k] };
+  });
+  return initialCopy;
 };
 
 export const saveCompanyModelAccessMap = (map: Record<string, Record<string, boolean>>) => {
@@ -524,26 +589,88 @@ export const saveCompanyModelAccessMap = (map: Record<string, Record<string, boo
   }
 };
 
+/**
+ * Resolves currently selectable (Active + Granted + Eligible Company) models for a company name.
+ * Fails closed for blank or unknown companies. Only explicit Platform Admin context views all global active models.
+ */
 export const getEnabledModelsForCompanyName = (companyName: string): ModelCategoryRecord[] => {
-  const globalModels = loadModelCategoryStore().filter((m) => m.status === 'Active');
+  const globalActiveModels = loadModelCategoryStore().filter((m) => m.status === 'Active');
   const norm = (companyName || '').trim().toLowerCase();
-  if (!norm || norm === 'platform admin' || norm === 'binary') {
-    return globalModels;
+  if (!norm) {
+    return [];
+  }
+  if (norm === 'platform admin' || norm === 'binary') {
+    return globalActiveModels;
   }
   const companies = loadClientCompanies();
   const matchedCompany = companies.find(
-    (c) => c.name.trim().toLowerCase() === norm
+    (c) => c.name.trim().toLowerCase() === norm || c.id.trim().toLowerCase() === norm
   );
-  if (!matchedCompany || matchedCompany.isPlatformOwner) {
-    return globalModels;
+  if (!matchedCompany) {
+    return [];
+  }
+  if (matchedCompany.isPlatformOwner) {
+    return globalActiveModels;
+  }
+  if (!isCompanyEligibleForNewRegistration(matchedCompany)) {
+    return [];
   }
   const accessMap = loadCompanyModelAccessMap();
-  const companyAccess =
-    accessMap[matchedCompany.id] ||
-    INITIAL_COMPANY_MODEL_ACCESS[matchedCompany.id] ||
-    accessMap['comp-adani-mundra'] ||
-    {};
-  return globalModels.filter((m) => !!companyAccess[m.id]);
+  const hasStored = Object.prototype.hasOwnProperty.call(accessMap, matchedCompany.id);
+  const companyAccess = hasStored
+    ? accessMap[matchedCompany.id]
+    : INITIAL_COMPANY_MODEL_ACCESS[matchedCompany.id] || {};
+  return globalActiveModels.filter((m) => !!companyAccess[m.id]);
+};
+
+export const getEnabledModelsForCompanyId = (companyId: string): ModelCategoryRecord[] => {
+  const globalActiveModels = loadModelCategoryStore().filter((m) => m.status === 'Active');
+  const normId = (companyId || '').trim();
+  if (!normId) return [];
+  const companies = loadClientCompanies();
+  const matchedCompany = companies.find((c) => c.id === normId);
+  if (!matchedCompany) return [];
+  if (matchedCompany.isPlatformOwner) return globalActiveModels;
+  if (!isCompanyEligibleForNewRegistration(matchedCompany)) return [];
+  const accessMap = loadCompanyModelAccessMap();
+  const hasStored = Object.prototype.hasOwnProperty.call(accessMap, matchedCompany.id);
+  const companyAccess = hasStored
+    ? accessMap[matchedCompany.id]
+    : INITIAL_COMPANY_MODEL_ACCESS[matchedCompany.id] || {};
+  return globalActiveModels.filter((m) => !!companyAccess[m.id]);
+};
+
+export const resolveClientCompanyByNameOrId = (nameOrId: string): ClientCompany | null => {
+  const norm = (nameOrId || '').trim().toLowerCase();
+  if (!norm) return null;
+  const companies = loadClientCompanies();
+  return (
+    companies.find(
+      (c) => c.name.trim().toLowerCase() === norm || c.id.trim().toLowerCase() === norm
+    ) || null
+  );
+};
+
+export const doesItemBelongToCompany = (
+  itemCompany: string | undefined | null,
+  targetCompanyOrId: string | undefined | null
+): boolean => {
+  const normItem = (itemCompany || '').trim().toLowerCase();
+  const normTarget = (targetCompanyOrId || '').trim().toLowerCase();
+  if (!normItem || !normTarget) return false;
+  if (normItem === normTarget) return true;
+  const resolvedItem = resolveClientCompanyByNameOrId(normItem);
+  const resolvedTarget = resolveClientCompanyByNameOrId(normTarget);
+  if (resolvedItem && resolvedTarget) {
+    return resolvedItem.id === resolvedTarget.id;
+  }
+  if (resolvedTarget) {
+    return (
+      normItem === resolvedTarget.name.trim().toLowerCase() ||
+      normItem === resolvedTarget.id.trim().toLowerCase()
+    );
+  }
+  return false;
 };
 
 export const loadCompanyInUseMap = (): Record<string, Record<string, number>> => {
@@ -573,3 +700,58 @@ export const saveCompanyAuditLogs = (logs: CompanyAuditEntry[]) => {
     console.error('Failed to save audit logs to localStorage', e);
   }
 };
+
+export interface CompanyActivationState {
+  transportEntitled: boolean;
+  transportOperatingAccess: boolean;
+  transportActivated: boolean;
+  dispatcherHandle: string;
+  otherModules: {
+    live: boolean;
+    plantOperations: boolean;
+    safety: boolean;
+    video: boolean;
+  };
+  adminVerified: boolean;
+}
+
+const ACTIVATION_STORAGE_KEY = 'fleetrobo_company_activation_v1';
+
+export const getDefaultCompanyActivation = (company: ClientCompany): CompanyActivationState => {
+  const isNewOnboarding = company.status === 'Onboarding';
+  const slug = company.name.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.|\.$/g, '') || 'ops';
+  return {
+    transportEntitled: true,
+    transportOperatingAccess: !isNewOnboarding && company.id !== 'comp-akpl' ? false : false,
+    transportActivated: false,
+    dispatcherHandle: `${slug}.ops`,
+    otherModules: {
+      live: false,
+      plantOperations: false,
+      safety: false,
+      video: false,
+    },
+    adminVerified: true,
+  };
+};
+
+export const loadCompanyActivationMap = (): Record<string, CompanyActivationState> => {
+  try {
+    const raw = localStorage.getItem(ACTIVATION_STORAGE_KEY);
+    if (raw) {
+      return JSON.parse(raw) as Record<string, CompanyActivationState>;
+    }
+  } catch (e) {
+    console.error('Failed to load company activation map', e);
+  }
+  return {};
+};
+
+export const saveCompanyActivationMap = (map: Record<string, CompanyActivationState>) => {
+  try {
+    localStorage.setItem(ACTIVATION_STORAGE_KEY, JSON.stringify(map));
+  } catch (e) {
+    console.error('Failed to save company activation map', e);
+  }
+};
+

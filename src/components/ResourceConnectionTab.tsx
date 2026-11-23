@@ -34,7 +34,10 @@ import {
   Building2,
   Store,
   MapPin,
-  Wrench
+  Wrench,
+  RotateCcw,
+  ChevronUp,
+  Ban
 } from 'lucide-react';
 import {
   DirectBulkUploadView,
@@ -59,6 +62,7 @@ import {
   SUPPORTED_TIMEZONES,
   COMPANY_NAME_TO_ID,
   MODAL_FIELD_TOOLTIPS,
+  computeEffectiveConnectionStatus,
   computeResourceAllocationStatus,
   computeResourceRelationshipStatus,
   getScopedHardwareAndBindings,
@@ -72,6 +76,10 @@ import {
   getNextResourceAllocationId
 } from '../types/modalMaster';
 import {
+  resolveClientCompanyByNameOrId,
+  doesItemBelongToCompany
+} from '../types/companyModelEnablement';
+import {
   Vehicle,
   loadVehicleMasterStore,
   saveVehicleMasterStore
@@ -81,6 +89,14 @@ import {
   loadDriverMasterStore,
   saveDriverMasterStore
 } from '../types/driver';
+import { Fleet, INITIAL_DEMO_FLEETS } from '../types/fleet';
+import {
+  VendorRecord,
+  PlaceRecord,
+  INITIAL_DEMO_PLACES,
+  VENDOR_MASTER_STORAGE_KEY,
+  loadCanonicalVendors
+} from '../data/vendorsSeed';
 import {
   ExpandableHardwareRows,
   HardwareCountChips
@@ -93,6 +109,37 @@ import { ColumnCataloguePopover } from './ColumnCataloguePopover';
 import { VehicleDrawer } from './VehicleDrawer';
 import { DriverDrawer } from './DriverDrawer';
 import { RowActionMenu } from './common/RowActionMenu';
+
+const CANONICAL_EQUIPMENT_MASTER: {
+  id: string;
+  code: string;
+  name: string;
+  category: string;
+  site: string;
+  status: string;
+}[] = [
+  { id: 'eqp-101', code: 'EQP-RS45', name: 'Kalmar Reach Stacker RS-45', category: 'Container Handler', site: 'Mundra CT2', status: 'Active' },
+  { id: 'eqp-102', code: 'EQP-RTG09', name: 'Liebherr RTG Crane #09', category: 'Yard Crane', site: 'Mundra South Basin', status: 'Active' },
+  { id: 'eqp-103', code: 'EQP-RG204', name: 'Thermo King Reefer Genset RG-204', category: 'Power Pack', site: 'Mundra CT2', status: 'Active' },
+  { id: 'eqp-104', code: 'EQP-FL18', name: 'Godrej Heavy Forklift FL-18', category: 'Warehouse Forklift', site: 'Pune Hub', status: 'Available' },
+  { id: 'eqp-105', code: 'EQP-WB02', name: 'Mettler Weighbridge Terminal WB-02', category: 'Weighbridge', site: 'Hazira Terminal', status: 'Active' },
+  { id: 'eqp-106', code: 'EQP-DS07', name: 'Hydraulic Dock Seal & Lock DS-07', category: 'Dock Equipment', site: 'Chennai CFS', status: 'Active' }
+];
+
+function loadMasterPlaces(): PlaceRecord[] {
+  try {
+    const raw = localStorage.getItem(VENDOR_MASTER_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && Array.isArray(parsed.places) && parsed.places.length > 0) {
+        return parsed.places as PlaceRecord[];
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return INITIAL_DEMO_PLACES;
+}
 
 interface ResourceConnectionTabProps {
   store: ModalMasterStore;
@@ -152,30 +199,45 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   canEdit,
   actorName
 }) => {
-  // Live sync with Vehicle & Driver Masters
+  // Live sync with Vehicle, Driver, Vendor & Place Masters
   const [vehicles, setVehicles] = useState<Vehicle[]>(() => loadVehicleMasterStore());
   const [drivers, setDrivers] = useState<Driver[]>(() => loadDriverMasterStore());
+  const [vendors, setVendors] = useState<VendorRecord[]>(() => loadCanonicalVendors());
+  const [places, setPlaces] = useState<PlaceRecord[]>(() => loadMasterPlaces());
+  const [fleets] = useState<Fleet[]>(() => INITIAL_DEMO_FLEETS);
 
   useEffect(() => {
     const syncRes = () => {
       setVehicles(loadVehicleMasterStore());
       setDrivers(loadDriverMasterStore());
+      setVendors(loadCanonicalVendors());
+      setPlaces(loadMasterPlaces());
     };
     window.addEventListener('fleetrobo:resources-updated', syncRes);
+    window.addEventListener('fleetrobo:vendors-updated', syncRes);
     window.addEventListener('storage', syncRes);
     return () => {
       window.removeEventListener('fleetrobo:resources-updated', syncRes);
+      window.removeEventListener('fleetrobo:vendors-updated', syncRes);
       window.removeEventListener('storage', syncRes);
     };
   }, []);
 
   // Independent Tab 2 state
   const [searchQuery, setSearchQuery] = useState('');
+  const [filterOrganization, setFilterOrganization] = useState<string>('All');
   const [filterResourceType, setFilterResourceType] = useState<string>('All');
+  const [filterConnectionId, setFilterConnectionId] = useState<string>('All');
+  const [filterHardwareScope, setFilterHardwareScope] = useState<string>('All');
   const [filterStatus, setFilterStatus] = useState<string>('All');
   const [filterMode, setFilterMode] = useState<string>('All');
   const [filterDateFrom, setFilterDateFrom] = useState<string>('');
   const [filterDateTo, setFilterDateTo] = useState<string>('');
+  const [filterSectionsOpen, setFilterSectionsOpen] = useState<Record<string, boolean>>({
+    res_conn: true,
+    allocation: true,
+    period: true
+  });
 
   const [sortKey, setSortKey] = useState<string>('');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
@@ -207,6 +269,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   const [endDateInput, setEndDateInput] = useState('2026-11-13');
   const [endTimeInput, setEndTimeInput] = useState('18:00:00');
   const [endReasonInput, setEndReasonInput] = useState('Operational reassignment completed');
+  const [endAllocError, setEndAllocError] = useState<string | null>(null);
 
   // Create / Edit Allocation Form State
   const [editingAlloc, setEditingAlloc] = useState<ResourceAllocation | null>(null);
@@ -239,12 +302,31 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   const [exportScope, setExportScope] = useState<'filtered' | 'selected'>('filtered');
 
   // Bulk state
+  const [bulkActionMode, setBulkActionMode] = useState<'end' | 'export'>('end');
   const [bulkEndReason, setBulkEndReason] = useState('Bulk operational end of allocation');
+
+  // Clear selection when company scope changes so out-of-scope records are never bulk-modified
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setFilterOrganization('All');
+    setFilterConnectionId('All');
+  }, [activeCompanyScope]);
 
   // Reset page when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, filterResourceType, filterStatus, filterMode, filterDateFrom, filterDateTo, activeCompanyScope]);
+  }, [
+    searchQuery,
+    filterOrganization,
+    filterResourceType,
+    filterConnectionId,
+    filterHardwareScope,
+    filterStatus,
+    filterMode,
+    filterDateFrom,
+    filterDateTo,
+    activeCompanyScope
+  ]);
 
   const connectionsMap = useMemo(() => {
     const map = new Map<string, ModalMasterStore['connections'][number]>();
@@ -265,13 +347,11 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   // Enrich allocations with derived status, scoped hardware & bindings
   const enrichedAllocations = useMemo(() => {
     const nowMs = Date.now();
-    const companyTarget =
-      activeCompanyScope && activeCompanyScope !== 'All Clients'
-        ? activeCompanyScope.trim().toLowerCase()
-        : null;
+    const hasScopedCompany = Boolean(activeCompanyScope && activeCompanyScope !== 'All Clients');
+    const allocContext = { connections: store.connections, store };
 
     return store.resourceAllocations
-      .filter((a) => !companyTarget || (a.companyName || '').trim().toLowerCase() === companyTarget)
+      .filter((a) => !hasScopedCompany || doesItemBelongToCompany(a.companyName, activeCompanyScope))
       .map((a) => {
         const conn = connectionsMap.get(a.connectionId);
         const connBindings = bindingsByConn.get(a.connectionId) || [];
@@ -280,7 +360,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
           connBindings,
           a.hardwareId
         );
-        const computed = computeResourceAllocationStatus(a, store.resourceAllocations, nowMs);
+        const computed = computeResourceAllocationStatus(a, store.resourceAllocations, nowMs, allocContext);
         const hwMember = a.hardwareId
           ? conn?.members?.find((m) => m.hardwareId === a.hardwareId)
           : null;
@@ -303,25 +383,53 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
           vehicleDisplayName: a.resourceType === 'Vehicle' ? a.resourceDisplayName : '—'
         };
       });
-  }, [store.resourceAllocations, connectionsMap, bindingsByConn, activeCompanyScope]);
+  }, [store, connectionsMap, bindingsByConn, activeCompanyScope]);
+
+  const organizationOptions = useMemo(() => {
+    const set = new Set<string>();
+    store.resourceAllocations.forEach((a) => {
+      if (a.companyName) set.add(a.companyName);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [store.resourceAllocations]);
+
+  const scopedConnectionOptions = useMemo(() => {
+    const hasScopedCompany = Boolean(activeCompanyScope && activeCompanyScope !== 'All Clients');
+    return store.connections.filter(
+      (c) =>
+        (!hasScopedCompany || doesItemBelongToCompany(c.companyName, activeCompanyScope)) &&
+        (filterOrganization === 'All' || doesItemBelongToCompany(c.companyName, filterOrganization))
+    );
+  }, [store.connections, activeCompanyScope, filterOrganization]);
 
   const filteredRows = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const fromMs = filterDateFrom ? Date.parse(`${filterDateFrom}T00:00:00`) : null;
     const toMs = filterDateTo ? Date.parse(`${filterDateTo}T23:59:59`) : null;
+    const validDateRange = !(fromMs && toMs && fromMs > toMs);
 
     return enrichedAllocations.filter((row) => {
+      if (filterOrganization !== 'All' && !doesItemBelongToCompany(row.companyName, filterOrganization)) {
+        return false;
+      }
       if (filterResourceType !== 'All' && row.resourceType !== filterResourceType) return false;
+      if (filterConnectionId !== 'All' && row.connectionId !== filterConnectionId) return false;
+      if (filterHardwareScope !== 'All') {
+        if (filterHardwareScope === 'ALL_HARDWARE' && row.hardwareId) return false;
+        if (filterHardwareScope === 'SPECIFIC_HARDWARE' && !row.hardwareId) return false;
+      }
       if (filterStatus !== 'All' && row.computedStatus !== filterStatus) return false;
       if (filterMode !== 'All' && row.mode !== filterMode) return false;
 
-      if (fromMs && !Number.isNaN(fromMs)) {
-        const sMs = Date.parse(row.effectiveStartAt);
-        if (!Number.isNaN(sMs) && sMs < fromMs) return false;
-      }
-      if (toMs && !Number.isNaN(toMs)) {
-        const sMs = Date.parse(row.effectiveStartAt);
-        if (!Number.isNaN(sMs) && sMs > toMs) return false;
+      if (validDateRange) {
+        if (fromMs && !Number.isNaN(fromMs)) {
+          const sMs = Date.parse(row.effectiveStartAt);
+          if (!Number.isNaN(sMs) && sMs < fromMs) return false;
+        }
+        if (toMs && !Number.isNaN(toMs)) {
+          const sMs = Date.parse(row.effectiveStartAt);
+          if (!Number.isNaN(sMs) && sMs > toMs) return false;
+        }
       }
 
       if (q) {
@@ -348,7 +456,10 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   }, [
     enrichedAllocations,
     searchQuery,
+    filterOrganization,
     filterResourceType,
+    filterConnectionId,
+    filterHardwareScope,
     filterStatus,
     filterMode,
     filterDateFrom,
@@ -366,6 +477,23 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       }
       if (sortKey === 'bindingCount') {
         const cmp = a.bindingCount - b.bindingCount;
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+      if (
+        sortKey === 'effectiveStartAt' ||
+        sortKey === 'effectiveEndAt' ||
+        sortKey === 'assignedOn' ||
+        sortKey === 'updatedAt'
+      ) {
+        const rawA =
+          sortKey === 'effectiveEndAt' ? a.endedAt || a.effectiveEndAt : (a as any)[sortKey];
+        const rawB =
+          sortKey === 'effectiveEndAt' ? b.endedAt || b.effectiveEndAt : (b as any)[sortKey];
+        const msA = rawA ? Date.parse(String(rawA)) : Number.MAX_SAFE_INTEGER;
+        const msB = rawB ? Date.parse(String(rawB)) : Number.MAX_SAFE_INTEGER;
+        const safeA = Number.isNaN(msA) ? Number.MAX_SAFE_INTEGER : msA;
+        const safeB = Number.isNaN(msB) ? Number.MAX_SAFE_INTEGER : msB;
+        const cmp = safeA - safeB;
         return sortDir === 'asc' ? cmp : -cmp;
       }
       const av = String((a as any)[sortKey === 'status' ? 'computedStatus' : sortKey] ?? '').toLowerCase();
@@ -389,7 +517,10 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   );
 
   const activeFilterCount =
+    (filterOrganization !== 'All' ? 1 : 0) +
     (filterResourceType !== 'All' ? 1 : 0) +
+    (filterConnectionId !== 'All' ? 1 : 0) +
+    (filterHardwareScope !== 'All' ? 1 : 0) +
     (filterStatus !== 'All' ? 1 : 0) +
     (filterMode !== 'All' ? 1 : 0) +
     (filterDateFrom ? 1 : 0) +
@@ -494,19 +625,117 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
 
   // Client-scoped Connections & Master Resources for Create/Edit Allocation drawer
   const clientConnections = useMemo(() => {
-    const target = formClient.trim().toLowerCase();
-    return store.connections.filter((c) => (c.companyName || '').trim().toLowerCase() === target);
-  }, [store.connections, formClient]);
+    return store.connections.filter(
+      (c) =>
+        doesItemBelongToCompany(c.companyName, formClient) &&
+        (c.status !== 'Inactive' || c.id === editingAlloc?.connectionId)
+    );
+  }, [store.connections, formClient, editingAlloc]);
 
   const clientVehicles = useMemo(() => {
-    const target = formClient.trim().toLowerCase();
-    return vehicles.filter((v) => (v.client || v.company || '').trim().toLowerCase() === target);
+    return vehicles.filter((v) => doesItemBelongToCompany(v.client || v.company, formClient));
   }, [vehicles, formClient]);
 
   const clientDrivers = useMemo(() => {
-    const target = formClient.trim().toLowerCase();
-    return drivers.filter((d) => (d.company || '').trim().toLowerCase() === target);
+    return drivers.filter((d) => doesItemBelongToCompany(d.company, formClient));
   }, [drivers, formClient]);
+
+  const clientFleets = useMemo(() => {
+    return fleets.filter((f) => doesItemBelongToCompany(f.company, formClient));
+  }, [fleets, formClient]);
+
+  const resolveMasterResourceRecord = (
+    companyName: string,
+    resType: ResourceType,
+    identifierOrLookup: string,
+    explicitId?: string
+  ): { id: string; identifier: string; displayName: string } | null => {
+    const q = identifierOrLookup.trim().toLowerCase();
+    const normPhone = q.replace(/[\s-]/g, '');
+
+    if (resType === 'Vehicle') {
+      const match = vehicles.find(
+        (v) =>
+          doesItemBelongToCompany(v.client || v.company, companyName) &&
+          ((explicitId && v.id === explicitId) ||
+            v.registration_number.trim().toLowerCase() === q ||
+            v.public_id.trim().toLowerCase() === q)
+      );
+      return match
+        ? {
+            id: match.id,
+            identifier: match.registration_number,
+            displayName: `${match.machine_model || match.model || 'Vehicle'} · ${match.registration_number}`
+          }
+        : null;
+    }
+
+    if (resType === 'Driver') {
+      const match = drivers.find((d) => {
+        if (!doesItemBelongToCompany(d.company, companyName)) return false;
+        if (explicitId && d.id === explicitId) return true;
+        const formatted = (d.phone.startsWith('+') ? d.phone : `+91 ${d.phone}`).trim().toLowerCase();
+        const rawP = d.phone.replace(/[\s-]/g, '').toLowerCase();
+        return (
+          formatted === q ||
+          formatted.replace(/[\s-]/g, '') === normPhone ||
+          rawP === normPhone ||
+          d.licence.trim().toLowerCase() === q
+        );
+      });
+      if (!match) return null;
+      const formattedPhone = match.phone.startsWith('+') ? match.phone : `+91 ${match.phone}`;
+      return {
+        id: match.id,
+        identifier: formattedPhone,
+        displayName: match.name
+      };
+    }
+
+    if (resType === 'Fleet') {
+      const match = fleets.find(
+        (f) =>
+          doesItemBelongToCompany(f.company, companyName) &&
+          ((explicitId && f.id === explicitId) ||
+            f.public_id.trim().toLowerCase() === q ||
+            f.name.trim().toLowerCase() === q)
+      );
+      return match ? { id: match.id, identifier: match.public_id, displayName: match.name } : null;
+    }
+
+    if (resType === 'Vendor') {
+      const match = vendors.find(
+        (v) =>
+          (explicitId && v.id === explicitId) ||
+          v.public_id.trim().toLowerCase() === q ||
+          v.name.trim().toLowerCase() === q
+      );
+      return match ? { id: match.id, identifier: match.public_id, displayName: match.name } : null;
+    }
+
+    if (resType === 'Place') {
+      const match = places.find(
+        (p) =>
+          (explicitId && p.id === explicitId) ||
+          p.id.trim().toLowerCase() === q ||
+          p.name.trim().toLowerCase() === q
+      );
+      return match ? { id: match.id, identifier: match.id.toUpperCase(), displayName: match.name } : null;
+    }
+
+    if (resType === 'Equipment') {
+      const match = CANONICAL_EQUIPMENT_MASTER.find(
+        (e) =>
+          (explicitId && e.id === explicitId) ||
+          e.code.trim().toLowerCase() === q ||
+          e.id.trim().toLowerCase() === q ||
+          e.name.trim().toLowerCase() === q
+      );
+      return match ? { id: match.id, identifier: match.code, displayName: match.name } : null;
+    }
+
+    return null;
+  };
 
   const resourceSearchMatches = useMemo(() => {
     const q = formResourceLookup.trim().toLowerCase();
@@ -543,14 +772,77 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
           sub: `${d.status} · Licence ${d.licence}`
         }));
     }
+    if (formResourceType === 'Fleet') {
+      return clientFleets
+        .filter(
+          (f) =>
+            !q ||
+            f.public_id.toLowerCase().includes(q) ||
+            f.name.toLowerCase().includes(q)
+        )
+        .slice(0, 12)
+        .map((f) => ({
+          id: f.id,
+          identifier: f.public_id,
+          displayName: f.name,
+          sub: `${f.status} · ${f.service_area || 'General'}`
+        }));
+    }
+    if (formResourceType === 'Vendor') {
+      return vendors
+        .filter(
+          (v) =>
+            !q ||
+            v.public_id.toLowerCase().includes(q) ||
+            v.name.toLowerCase().includes(q)
+        )
+        .slice(0, 12)
+        .map((v) => ({
+          id: v.id,
+          identifier: v.public_id,
+          displayName: v.name,
+          sub: `${v.status} · ${v.type}`
+        }));
+    }
+    if (formResourceType === 'Place') {
+      return places
+        .filter(
+          (p) =>
+            !q ||
+            p.id.toLowerCase().includes(q) ||
+            p.name.toLowerCase().includes(q)
+        )
+        .slice(0, 12)
+        .map((p) => ({
+          id: p.id,
+          identifier: p.id.toUpperCase(),
+          displayName: p.name,
+          sub: `${p.country} · ${p.address}`
+        }));
+    }
+    if (formResourceType === 'Equipment') {
+      return CANONICAL_EQUIPMENT_MASTER.filter(
+        (e) =>
+          !q ||
+          e.code.toLowerCase().includes(q) ||
+          e.name.toLowerCase().includes(q)
+      )
+        .slice(0, 12)
+        .map((e) => ({
+          id: e.id,
+          identifier: e.code,
+          displayName: e.name,
+          sub: `${e.status} · ${e.site}`
+        }));
+    }
     return [];
-  }, [formResourceType, formResourceLookup, clientVehicles, clientDrivers]);
+  }, [formResourceType, formResourceLookup, clientVehicles, clientDrivers, clientFleets, vendors, places]);
 
   const openCreateAllocation = () => {
     const defaultClient =
       activeCompanyScope === 'All Clients' ? MODAL_OWNERS[0] : activeCompanyScope;
     const firstConn = store.connections.find(
-      (c) => c.companyName.toLowerCase() === defaultClient.toLowerCase()
+      (c) => doesItemBelongToCompany(c.companyName, defaultClient) && c.status !== 'Inactive'
     );
     setEditingAlloc(null);
     setFormClient(defaultClient);
@@ -634,40 +926,116 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     saveDriverMasterStore(updated);
     setFormResourceType('Driver');
     setFormSelectedResourceId(driverRecord.id);
-    setFormSelectedIdentifier(driverRecord.phone);
+    setFormSelectedIdentifier(driverRecord.phone.startsWith('+') ? driverRecord.phone : `+91 ${driverRecord.phone}`);
     setFormSelectedDisplayName(driverRecord.name);
-    setFormResourceLookup(driverRecord.phone);
+    setFormResourceLookup(driverRecord.phone.startsWith('+') ? driverRecord.phone : `+91 ${driverRecord.phone}`);
     setQuickCreateKind(null);
     setQcDriverPhone('');
     setFormError(null);
     showToast(`Driver ${driverRecord.name} created in ${driverRecord.company} Master & selected.`);
   };
 
+  const isHardwareUnitPhysicallyBlocked = (member: ConnectionRecord['members'][number]): string | null => {
+    if (member.category === 'Device') {
+      const dev = store.devices.find((d) => d.id === member.hardwareId);
+      const st = dev ? dev.statusOverride || dev.hardwareLifecycle : undefined;
+      if (dev && (st === 'Decommissioned' || st === 'In Maintenance')) {
+        return `Device ${member.identifierValue} is currently ${st}`;
+      }
+    } else if (member.category === 'Sensor') {
+      const sen = store.sensors.find((s) => s.id === member.hardwareId);
+      const st = sen ? sen.statusOverride || sen.hardwareLifecycle : undefined;
+      if (sen && (st === 'Decommissioned' || st === 'In Maintenance')) {
+        return `Sensor ${member.identifierValue} is currently ${st}`;
+      }
+    } else if (member.category === 'SIM') {
+      const sim = store.sims.find((s) => s.id === member.hardwareId);
+      if (sim) {
+        const st = sim.status;
+        if (st === 'Retired' || st === 'Suspended' || st === 'Inactive') {
+          return `SIM ${member.identifierValue} has carrier status ${st}`;
+        }
+      }
+    }
+    return null;
+  };
+
   const handleSaveAllocation = (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
+
+    const resolvedCompany = resolveClientCompanyByNameOrId(formClient);
+    const companyId = resolvedCompany?.id || COMPANY_NAME_TO_ID[formClient];
+    if (!companyId) {
+      setFormError(`Unrecognized client organization "${formClient}".`);
+      return;
+    }
+
+    if (
+      activeCompanyScope &&
+      activeCompanyScope !== 'All Clients' &&
+      !doesItemBelongToCompany(formClient, activeCompanyScope)
+    ) {
+      setFormError(`Cannot save allocation for "${formClient}" while scoped to "${activeCompanyScope}".`);
+      return;
+    }
 
     if (!formConnectionId) {
       setFormError('Select a Connection to allocate this resource to.');
       return;
     }
 
-    const finalIdentifier = (formSelectedIdentifier || formResourceLookup).trim();
-    if (!finalIdentifier) {
+    const selectedConn = connectionsMap.get(formConnectionId);
+    if (!selectedConn || !doesItemBelongToCompany(selectedConn.companyName, formClient)) {
+      setFormError('Selected Connection does not belong to the chosen client organization.');
+      return;
+    }
+    if (selectedConn.status === 'Inactive') {
+      setFormError(`Connection ${selectedConn.id} is Inactive. Activate or choose a non-inactive connection first.`);
+      return;
+    }
+
+    // MAP-P0-10: Validate scoped hardware membership & live physical eligibility
+    if (formHardwareId !== 'ALL') {
+      const scopedMem = (selectedConn.members || []).find((m) => m.hardwareId === formHardwareId);
+      if (!scopedMem) {
+        setFormError(
+          `Selected hardware unit "${formHardwareId}" is not a member of connection ${selectedConn.id}.`
+        );
+        return;
+      }
+      const blockedReason = isHardwareUnitPhysicallyBlocked(scopedMem);
+      if (blockedReason) {
+        setFormError(`${blockedReason} and cannot receive a resource allocation.`);
+        return;
+      }
+    }
+
+    const lookupInput = (formSelectedIdentifier || formResourceLookup).trim();
+    if (!lookupInput) {
       setFormError(
         formResourceType === 'Vehicle'
           ? 'Search and select a Vehicle by Registration No.'
           : formResourceType === 'Driver'
           ? 'Search and select a Driver by Contact No.'
-          : 'Enter a valid Resource Identifier.'
+          : `Select or enter a valid ${formResourceType} Identifier from ${formClient} Master.`
       );
       return;
     }
 
-    // For Vehicle / Driver, require actual match in client's master if not custom fleet/place
-    if ((formResourceType === 'Vehicle' || formResourceType === 'Driver') && !formSelectedResourceId) {
+    const masterResource = resolveMasterResourceRecord(
+      formClient,
+      formResourceType,
+      lookupInput,
+      formSelectedResourceId || undefined
+    );
+    if (!masterResource) {
       setFormError(
-        `No matching ${formResourceType} selected from ${formClient} master. Select a search result or use + Create ${formResourceType}.`
+        `No matching ${formResourceType} "${lookupInput}" found in ${formClient} master. Select a master record${
+          formResourceType === 'Vehicle' || formResourceType === 'Driver'
+            ? ` or use + Create ${formResourceType}.`
+            : '.'
+        }`
       );
       return;
     }
@@ -676,30 +1044,51 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     const endIso =
       formMode === 'Temporal' ? buildIsoWithTimezone(formEndDate, formEndTime, formTimezone) : null;
 
-    if (!startIso) {
+    if (!startIso || Number.isNaN(Date.parse(startIso))) {
       setFormError('Effective Start date and time are required.');
       return;
     }
     if (formMode === 'Temporal') {
-      if (!endIso || Date.parse(endIso) <= Date.parse(startIso)) {
+      if (!endIso || Number.isNaN(Date.parse(endIso)) || Date.parse(endIso) <= Date.parse(startIso)) {
         setFormError('Effective End date & time must be strictly after Effective Start.');
         return;
       }
     }
 
-    const resId = formSelectedResourceId || `res-${formResourceType.toLowerCase()}-${Date.now()}`;
-    const overlap = store.resourceAllocations.find(
-      (other) =>
-        other.id !== editingAlloc?.id &&
-        !other.endedAt &&
-        other.connectionId === formConnectionId &&
-        other.resourceType === formResourceType &&
-        other.resourceIdentifier.toLowerCase() === finalIdentifier.toLowerCase() &&
-        dateTimeIntervalsOverlap(startIso, endIso, other.effectiveStartAt, other.endedAt || other.effectiveEndAt)
-    );
+    const resId = masterResource.id;
+    const finalIdentifier = masterResource.identifier;
+    const finalDisplayName = masterResource.displayName;
+    const targetHwId = formHardwareId === 'ALL' ? null : formHardwareId;
+
+    // MAP-P0-09: Canonical resourceId + same-company identifier overlap check across ALL/specific hardware scopes and connections
+    const overlap = store.resourceAllocations.find((other) => {
+      if (other.id === editingAlloc?.id) return false;
+      if (other.endedAt) return false;
+      const otherConn = connectionsMap.get(other.connectionId);
+      if (otherConn && otherConn.status === 'Inactive') return false;
+
+      const sameCanonicalResource =
+        (Boolean(resId) && Boolean(other.resourceId) && other.resourceId === resId) ||
+        (other.resourceType === formResourceType &&
+          doesItemBelongToCompany(other.companyName, formClient) &&
+          other.resourceIdentifier.trim().toLowerCase() === finalIdentifier.trim().toLowerCase());
+      if (!sameCanonicalResource) return false;
+
+      if (!dateTimeIntervalsOverlap(startIso, endIso, other.effectiveStartAt, other.endedAt || other.effectiveEndAt)) {
+        return false;
+      }
+
+      if (other.connectionId === formConnectionId) {
+        // On same connection: ALL overlaps with specific hardware, or same specific hardware overlaps
+        return !targetHwId || !other.hardwareId || targetHwId === other.hardwareId;
+      }
+      // Across different connections: same Vehicle or Driver cannot be concurrently allocated
+      return true;
+    });
+
     if (overlap) {
       setFormError(
-        `Overlapping active allocation ${overlap.id} already exists for ${finalIdentifier} on ${formConnectionId}. End the prior allocation first or choose a non-overlapping period.`
+        `Overlapping active/scheduled allocation ${overlap.id} already exists for ${finalIdentifier} (on ${overlap.connectionId}). End the prior allocation first or choose a non-overlapping period.`
       );
       return;
     }
@@ -708,43 +1097,63 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     if (editingAlloc) {
       const updated: ResourceAllocation = {
         ...editingAlloc,
-        companyId: COMPANY_NAME_TO_ID[formClient] || editingAlloc.companyId,
-        companyName: formClient,
+        companyId,
+        companyName: resolvedCompany?.name || formClient,
         connectionId: formConnectionId,
         resourceType: formResourceType,
         resourceId: resId,
         resourceIdentifier: finalIdentifier,
-        resourceDisplayName: formSelectedDisplayName || finalIdentifier,
-        hardwareId: formHardwareId === 'ALL' ? null : formHardwareId,
+        resourceDisplayName: finalDisplayName,
+        hardwareId: targetHwId,
         mode: formMode,
         effectiveStartAt: startIso,
         effectiveEndAt: endIso,
         timezone: formTimezone,
-        site: editingAlloc.site || '',
+        site: editingAlloc.site || selectedConn.site || '',
         notes: formNotes.trim(),
         updatedAt: nowIso
       };
       setStore((prev) => ({
         ...prev,
-        resourceAllocations: prev.resourceAllocations.map((a) => (a.id === editingAlloc.id ? updated : a))
+        resourceAllocations: prev.resourceAllocations.map((a) => (a.id === editingAlloc.id ? updated : a)),
+        connections: prev.connections.map((c) =>
+          c.id === formConnectionId
+            ? {
+                ...c,
+                updatedAt: nowIso,
+                updatedBy: actorName,
+                version: c.version + 1,
+                activity: [
+                  {
+                    id: `act-${Date.now()}`,
+                    timestamp: nowIso,
+                    actor: actorName,
+                    action: `Updated resource allocation ${editingAlloc.id}`,
+                    afterSummary: `${formResourceType} ${finalIdentifier} (${formMode})`
+                  },
+                  ...(c.activity || [])
+                ]
+              }
+            : c
+        )
       }));
       showToast(`Allocation ${editingAlloc.id} updated.`);
     } else {
       const newAlloc: ResourceAllocation = {
         id: getNextResourceAllocationId(store.resourceAllocations),
-        companyId: COMPANY_NAME_TO_ID[formClient] || 'comp-adani-mundra',
-        companyName: formClient,
+        companyId,
+        companyName: resolvedCompany?.name || formClient,
         connectionId: formConnectionId,
         resourceType: formResourceType,
         resourceId: resId,
         resourceIdentifier: finalIdentifier,
-        resourceDisplayName: formSelectedDisplayName || finalIdentifier,
-        hardwareId: formHardwareId === 'ALL' ? null : formHardwareId,
+        resourceDisplayName: finalDisplayName,
+        hardwareId: targetHwId,
         mode: formMode,
         effectiveStartAt: startIso,
         effectiveEndAt: endIso,
         timezone: formTimezone,
-        site: '',
+        site: selectedConn.site || '',
         assignedBy: actorName,
         assignedOn: nowIso,
         updatedAt: nowIso,
@@ -759,6 +1168,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                 ...c,
                 updatedAt: nowIso,
                 updatedBy: actorName,
+                version: c.version + 1,
                 activity: [
                   {
                     id: `act-${Date.now()}`,
@@ -781,14 +1191,33 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     setActiveDrawer(null);
   };
 
+  // MAP-P0-15: End Allocation with chronological validation (Effective End > Effective Start)
   const handleConfirmEndAllocation = (e: React.FormEvent) => {
     e.preventDefault();
+    setEndAllocError(null);
     if (!endingAlloc) return;
+    if (endingAlloc.endedAt) {
+      setEndAllocError(`Allocation ${endingAlloc.id} has already ended.`);
+      return;
+    }
     const endedIso = buildIsoWithTimezone(
       endDateInput,
       endTimeInput,
       endingAlloc.timezone || 'Asia/Kolkata'
     );
+    const startMs = Date.parse(endingAlloc.effectiveStartAt);
+    const endMs = endedIso ? Date.parse(endedIso) : NaN;
+    if (!endedIso || Number.isNaN(endMs)) {
+      setEndAllocError('Enter a valid Effective End date and time.');
+      return;
+    }
+    if (!Number.isNaN(startMs) && endMs <= startMs) {
+      setEndAllocError(
+        `Effective End (${formatDateTimeWithTz(endedIso, endingAlloc.timezone)}) must be strictly after Effective Start (${formatDateTimeWithTz(endingAlloc.effectiveStartAt, endingAlloc.timezone)}).`
+      );
+      return;
+    }
+
     const nowIso = new Date().toISOString();
     setStore((prev) => ({
       ...prev,
@@ -796,8 +1225,8 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
         a.id === endingAlloc.id
           ? {
               ...a,
-              endedAt: endedIso || nowIso,
-              effectiveEndAt: endedIso || nowIso,
+              endedAt: endedIso,
+              effectiveEndAt: endedIso,
               endReason: endReasonInput.trim() || 'Ended by operator',
               unassignedBy: actorName,
               updatedAt: nowIso
@@ -810,6 +1239,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
               ...c,
               updatedAt: nowIso,
               updatedBy: actorName,
+              version: c.version + 1,
               activity: [
                 {
                   id: `act-${Date.now()}`,
@@ -826,6 +1256,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     }));
     showToast(`Allocation ${endingAlloc.id} ended; historical record preserved.`);
     setEndingAlloc(null);
+    setEndAllocError(null);
     setActiveDrawer(null);
   };
 
@@ -839,20 +1270,43 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     const eligible = selectedRows.filter((r) => r.computedStatus !== 'Ended');
     if (eligible.length === 0) return;
     const eligibleIds = new Set(eligible.map((r) => r.id));
+    const affectedConnIds = new Set(eligible.map((r) => r.connectionId));
     const nowIso = new Date().toISOString();
     setStore((prev) => ({
       ...prev,
-      resourceAllocations: prev.resourceAllocations.map((a) =>
-        eligibleIds.has(a.id)
+      resourceAllocations: prev.resourceAllocations.map((a) => {
+        if (!eligibleIds.has(a.id)) return a;
+        const startMs = Date.parse(a.effectiveStartAt);
+        const nowMs = Date.parse(nowIso);
+        const safeEndIso = !Number.isNaN(startMs) && nowMs <= startMs ? new Date(startMs + 1000).toISOString() : nowIso;
+        return {
+          ...a,
+          endedAt: safeEndIso,
+          effectiveEndAt: safeEndIso,
+          endReason: bulkEndReason.trim() || 'Bulk ended',
+          unassignedBy: actorName,
+          updatedAt: nowIso
+        };
+      }),
+      connections: prev.connections.map((c) =>
+        affectedConnIds.has(c.id)
           ? {
-              ...a,
-              endedAt: nowIso,
-              effectiveEndAt: nowIso,
-              endReason: bulkEndReason.trim() || 'Bulk ended',
-              unassignedBy: actorName,
-              updatedAt: nowIso
+              ...c,
+              updatedAt: nowIso,
+              updatedBy: actorName,
+              version: c.version + 1,
+              activity: [
+                {
+                  id: `act-${Date.now()}-${c.id}`,
+                  timestamp: nowIso,
+                  actor: actorName,
+                  action: 'Bulk ended resource allocation(s)',
+                  afterSummary: `Reason: ${bulkEndReason.trim() || 'Bulk ended'}`
+                },
+                ...(c.activity || [])
+              ]
             }
-          : a
+          : c
       )
     }));
     showToast(`Ended ${eligible.length} resource allocation(s) (${selectedRows.length - eligible.length} already ended).`);
@@ -862,7 +1316,11 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
 
   // Export handler (text-safe formatting + explicit timezone)
   const handleRunExport = () => {
-    const source = exportScope === 'selected' && selectedRows.length > 0 ? selectedRows : sortedRows;
+    if (exportScope === 'selected' && selectedRows.length === 0) {
+      showToast('No selected resource allocations to export.', 'error');
+      return;
+    }
+    const source = exportScope === 'selected' ? selectedRows : sortedRows;
     const colsToExport = visibleColumns.length > 0 ? visibleColumns : RESOURCE_VIEW_DEFAULT_COLUMNS;
     const rows = source.map((r) => ({
       id: r.id,
@@ -895,7 +1353,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     setActiveDrawer(null);
   };
 
-  // Direct CSV/JSON upload execution
+  // Direct CSV/JSON upload execution (MAP-P0-08)
   const processResourceUpload = (fmt: 'csv' | 'json', rawText: string, fileName: string, fileSize?: number) => {
     const raw = rawText.trim();
     if (!raw) {
@@ -907,42 +1365,189 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     const invalid: { line: number; reason: string }[] = [];
     const nowIso = new Date().toISOString();
 
+    const validateAndPushRow = (
+      lineNo: number,
+      connIdRaw: string,
+      resTypeRaw: string,
+      resIdentRaw: string,
+      modeRaw: string,
+      startIsoRaw: string,
+      endIsoRaw: string,
+      tzRaw?: string,
+      hwIdRaw?: string,
+      siteRaw?: string
+    ) => {
+      const connId = connIdRaw.trim();
+      const conn = connectionsMap.get(connId);
+      if (!conn) {
+        invalid.push({ line: lineNo, reason: `Unknown Connection ID "${connId}"` });
+        return;
+      }
+      if (
+        activeCompanyScope &&
+        activeCompanyScope !== 'All Clients' &&
+        !doesItemBelongToCompany(conn.companyName, activeCompanyScope)
+      ) {
+        invalid.push({
+          line: lineNo,
+          reason: `Connection "${conn.id}" (${conn.companyName}) is outside active scope "${activeCompanyScope}"`
+        });
+        return;
+      }
+      if (conn.status === 'Inactive') {
+        invalid.push({
+          line: lineNo,
+          reason: `Connection "${conn.id}" is Inactive and cannot receive new resource allocations`
+        });
+        return;
+      }
+
+      const matchedType = RESOURCE_TYPES.find((t) => t.toLowerCase() === resTypeRaw.trim().toLowerCase());
+      if (!matchedType) {
+        invalid.push({
+          line: lineNo,
+          reason: `Invalid resourceType "${resTypeRaw}". Must be one of: ${RESOURCE_TYPES.join(', ')}`
+        });
+        return;
+      }
+
+      const resIdent = resIdentRaw.trim();
+      if (!resIdent) {
+        invalid.push({ line: lineNo, reason: 'Missing resourceIdentifier' });
+        return;
+      }
+
+      const masterRec = resolveMasterResourceRecord(conn.companyName, matchedType, resIdent);
+      if (!masterRec) {
+        invalid.push({
+          line: lineNo,
+          reason: `${matchedType} "${resIdent}" not found in ${conn.companyName} Master`
+        });
+        return;
+      }
+
+      let targetHwId: string | null = null;
+      if (hwIdRaw && hwIdRaw.trim() && hwIdRaw.trim().toUpperCase() !== 'ALL') {
+        const hwTrim = hwIdRaw.trim();
+        const mem = (conn.members || []).find(
+          (m) => m.hardwareId === hwTrim || m.identifierValue.toLowerCase() === hwTrim.toLowerCase()
+        );
+        if (!mem) {
+          invalid.push({
+            line: lineNo,
+            reason: `Hardware "${hwTrim}" is not a member of connection ${conn.id}`
+          });
+          return;
+        }
+        const blocked = isHardwareUnitPhysicallyBlocked(mem);
+        if (blocked) {
+          invalid.push({ line: lineNo, reason: blocked });
+          return;
+        }
+        targetHwId = mem.hardwareId;
+      }
+
+      const modeNormalized = modeRaw.trim();
+      if (modeNormalized && modeNormalized !== 'Permanent' && modeNormalized !== 'Temporal') {
+        invalid.push({
+          line: lineNo,
+          reason: `Invalid mode "${modeNormalized}". Expected Permanent or Temporal`
+        });
+        return;
+      }
+      const mode: HardwareBindingMode = modeNormalized === 'Temporal' ? 'Temporal' : 'Permanent';
+
+      const tz = tzRaw?.trim() || 'Asia/Kolkata';
+      if (!SUPPORTED_TIMEZONES.some((t) => t.value === tz)) {
+        invalid.push({ line: lineNo, reason: `Unsupported timezone "${tz}"` });
+        return;
+      }
+
+      const startIso = startIsoRaw.trim() || nowIso;
+      const startMs = Date.parse(startIso);
+      if (Number.isNaN(startMs)) {
+        invalid.push({ line: lineNo, reason: `Invalid effectiveStartAt "${startIsoRaw}"` });
+        return;
+      }
+
+      const endIso = mode === 'Temporal' ? endIsoRaw.trim() || null : null;
+      if (mode === 'Temporal') {
+        const endMs = endIso ? Date.parse(endIso) : NaN;
+        if (!endIso || Number.isNaN(endMs) || endMs <= startMs) {
+          invalid.push({
+            line: lineNo,
+            reason: 'Temporal allocation requires valid Effective End strictly after Effective Start'
+          });
+          return;
+        }
+      }
+
+      const combinedPool = [...store.resourceAllocations, ...valid];
+      const conflict = combinedPool.find((other) => {
+        if (other.endedAt) return false;
+        const otherConn = connectionsMap.get(other.connectionId);
+        if (otherConn && otherConn.status === 'Inactive') return false;
+        const sameRes =
+          other.resourceId === masterRec.id ||
+          (other.resourceType === matchedType &&
+            doesItemBelongToCompany(other.companyName, conn.companyName) &&
+            other.resourceIdentifier.trim().toLowerCase() === masterRec.identifier.trim().toLowerCase());
+        if (!sameRes) return false;
+        if (!dateTimeIntervalsOverlap(startIso, endIso, other.effectiveStartAt, other.endedAt || other.effectiveEndAt)) {
+          return false;
+        }
+        if (other.connectionId === conn.id) {
+          return !targetHwId || !other.hardwareId || targetHwId === other.hardwareId;
+        }
+        return true;
+      });
+
+      if (conflict) {
+        invalid.push({
+          line: lineNo,
+          reason: `Overlaps with existing allocation ${conflict.id} (${conflict.connectionId})`
+        });
+        return;
+      }
+
+      valid.push({
+        id: getNextResourceAllocationId(store.resourceAllocations, valid.length),
+        companyId: conn.companyId,
+        companyName: conn.companyName,
+        connectionId: conn.id,
+        resourceType: matchedType,
+        resourceId: masterRec.id,
+        resourceIdentifier: masterRec.identifier,
+        resourceDisplayName: masterRec.displayName,
+        hardwareId: targetHwId,
+        mode,
+        effectiveStartAt: startIso,
+        effectiveEndAt: endIso,
+        timezone: tz,
+        site: siteRaw?.trim() || conn.site || '',
+        assignedBy: actorName,
+        assignedOn: nowIso,
+        updatedAt: nowIso
+      });
+    };
+
     if (fmt === 'json') {
       try {
         const parsed = JSON.parse(raw);
         const arr = Array.isArray(parsed) ? parsed : [parsed];
         arr.forEach((item, idx) => {
-          const connId = String(item.connectionId || '').trim();
-          const resType = (item.resourceType || 'Vehicle') as ResourceType;
-          const resIdent = String(item.resourceIdentifier || '').trim();
-          const conn = connectionsMap.get(connId);
-          if (!conn) {
-            invalid.push({ line: idx + 1, reason: `Unknown connectionId "${connId}"` });
-            return;
-          }
-          if (!resIdent) {
-            invalid.push({ line: idx + 1, reason: 'Missing resourceIdentifier' });
-            return;
-          }
-          valid.push({
-            id: getNextResourceAllocationId(store.resourceAllocations, valid.length),
-            companyId: conn.companyId,
-            companyName: conn.companyName,
-            connectionId: conn.id,
-            resourceType: resType,
-            resourceId: `res-imp-${Date.now()}-${idx}`,
-            resourceIdentifier: resIdent,
-            resourceDisplayName: String(item.resourceDisplayName || resIdent),
-            hardwareId: null,
-            mode: item.mode === 'Temporal' ? 'Temporal' : 'Permanent',
-            effectiveStartAt: item.effectiveStartAt || nowIso,
-            effectiveEndAt: item.effectiveEndAt || null,
-            timezone: item.timezone || 'Asia/Kolkata',
-            site: item.site || conn.site || 'Mundra CT2',
-            assignedBy: actorName,
-            assignedOn: nowIso,
-            updatedAt: nowIso
-          });
+          validateAndPushRow(
+            idx + 1,
+            String(item.connectionId || ''),
+            String(item.resourceType || ''),
+            String(item.resourceIdentifier || ''),
+            String(item.mode || 'Permanent'),
+            String(item.effectiveStartAt || ''),
+            String(item.effectiveEndAt || ''),
+            item.timezone ? String(item.timezone) : undefined,
+            item.hardwareId ? String(item.hardwareId) : undefined,
+            item.site ? String(item.site) : undefined
+          );
         });
       } catch {
         resourceUpload.fail('Invalid JSON syntax.');
@@ -953,40 +1558,18 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       lines.forEach((line, idx) => {
         const cols = parseCsvLine(line);
         if (idx === 0 && cols[0]?.toLowerCase().includes('connection')) return;
-        const [connId, resTypeRaw, resIdent, modeRaw, startIso, endIso] = cols;
-        const conn = connectionsMap.get((connId || '').trim());
-        if (!conn) {
-          invalid.push({ line: idx + 1, reason: `Unknown Connection ID "${connId || ''}"` });
-          return;
-        }
-        if (!resIdent) {
-          invalid.push({ line: idx + 1, reason: 'Missing Resource Identifier (Reg No. or Contact No.)' });
-          return;
-        }
-        const mode: HardwareBindingMode = modeRaw === 'Temporal' ? 'Temporal' : 'Permanent';
-        if (mode === 'Temporal' && (!endIso || Date.parse(endIso) <= Date.parse(startIso || nowIso))) {
-          invalid.push({ line: idx + 1, reason: 'Temporal allocation requires Effective End > Effective Start' });
-          return;
-        }
-        valid.push({
-          id: getNextResourceAllocationId(store.resourceAllocations, valid.length),
-          companyId: conn.companyId,
-          companyName: conn.companyName,
-          connectionId: conn.id,
-          resourceType: (RESOURCE_TYPES.includes(resTypeRaw as ResourceType) ? resTypeRaw : 'Vehicle') as ResourceType,
-          resourceId: `res-imp-${Date.now()}-${idx}`,
-          resourceIdentifier: resIdent,
-          resourceDisplayName: resIdent,
-          hardwareId: null,
-          mode,
-          effectiveStartAt: startIso || nowIso,
-          effectiveEndAt: mode === 'Temporal' ? endIso : null,
-          timezone: 'Asia/Kolkata',
-          site: conn.site || 'Mundra CT2',
-          assignedBy: actorName,
-          assignedOn: nowIso,
-          updatedAt: nowIso
-        });
+        const [connId, resTypeRaw, resIdent, modeRaw, startIso, endIso, hwIdRaw] = cols;
+        validateAndPushRow(
+          idx + 1,
+          connId || '',
+          resTypeRaw || '',
+          resIdent || '',
+          modeRaw || 'Permanent',
+          startIso || '',
+          endIso || '',
+          'Asia/Kolkata',
+          hwIdRaw
+        );
       });
     }
 
@@ -1008,7 +1591,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       return {
         headline: 'Resource allocations uploaded successfully',
         description: `${valid.length} allocation${valid.length === 1 ? '' : 's'} created from ${fileName}.${
-          invalid.length > 0 ? ` ${invalid.length} invalid or unknown row${invalid.length === 1 ? '' : 's'} skipped.` : ''
+          invalid.length > 0 ? ` ${invalid.length} invalid or unmatched row${invalid.length === 1 ? '' : 's'} skipped.` : ''
         }`,
         stats: [
           { label: 'Uploaded', value: valid.length, tone: 'emerald' },
@@ -1026,7 +1609,10 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
 
   const handleApplyView = (view: SavedModalView) => {
     setSearchQuery(view.query || '');
+    setFilterOrganization(view.filters.organization || 'All');
     setFilterResourceType(view.filters.resourceType || 'All');
+    setFilterConnectionId(view.filters.connectionId || 'All');
+    setFilterHardwareScope(view.filters.hardwareScope || 'All');
     setFilterStatus(view.filters.status || 'All');
     setFilterMode(view.filters.mode || 'All');
     setSortKey(view.sortKey || 'id');
@@ -1048,7 +1634,10 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       name: newViewName.trim(),
       query: searchQuery,
       filters: {
+        organization: filterOrganization,
         resourceType: filterResourceType,
+        connectionId: filterConnectionId,
+        hardwareScope: filterHardwareScope,
         status: filterStatus,
         mode: filterMode
       },
@@ -1377,7 +1966,10 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                           type="button"
                           onClick={() => {
                             setSearchQuery('');
+                            setFilterOrganization('All');
                             setFilterResourceType('All');
+                            setFilterConnectionId('All');
+                            setFilterHardwareScope('All');
                             setFilterStatus('All');
                             setFilterMode('All');
                             setFilterDateFrom('');
@@ -1665,10 +2257,19 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                                   hidden: !canEdit || row.computedStatus === 'Ended',
                                   dividerBefore: true,
                                   onClick: () => {
+                                    const tz = row.timezone || 'Asia/Kolkata';
+                                    const startMs = Date.parse(row.effectiveStartAt);
+                                    const nowMs = Date.now();
+                                    const defaultEndIso =
+                                      !Number.isNaN(startMs) && nowMs <= startMs
+                                        ? new Date(startMs + 60 * 1000).toISOString()
+                                        : new Date(nowMs).toISOString();
+                                    const parts = formatLocalInputParts(defaultEndIso, tz);
                                     setEndingAlloc(row);
-                                    setEndDateInput('2026-11-13');
-                                    setEndTimeInput('18:00:00');
+                                    setEndDateInput(parts.date || '2026-11-13');
+                                    setEndTimeInput(parts.time || '18:00:00');
                                     setEndReasonInput('Operational reassignment completed');
+                                    setEndAllocError(null);
                                     setActiveDrawer('end-modal');
                                   },
                                 },
@@ -1687,6 +2288,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                               connectionBindings={row.connBindings}
                               allGlobalBindings={store.hardwareBindings}
                               scopeHardwareId={row.hardwareId}
+                              store={store}
                               canEdit={canEdit}
                               onOpenDetails={(targetConn, tab) =>
                                 setConnDetailsState({ conn: targetConn, tab })
@@ -1776,103 +2378,265 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       {/* ================================================================= */}
       {/* DRAWERS & MODALS FOR TAB 2                                        */}
       {/* ================================================================= */}
-      {activeDrawer === 'filters' && (
-        <div className="fixed inset-0 z-[70] flex justify-end bg-slate-900/30">
-          <div className="w-[380px] bg-white h-full shadow-2xl border-l border-slate-200 flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="text-[15px] font-bold text-slate-900">Filter Resource Allocations</h3>
-              <button type="button" onClick={() => setActiveDrawer(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              <div>
-                <FieldLabel label="Resource Type" tooltip="Filter by Vehicle, Driver, or other client resource class." />
-                <select
-                  value={filterResourceType}
-                  onChange={(e) => setFilterResourceType(e.target.value)}
-                  className="w-full h-9 px-3 rounded-lg border border-slate-200 text-[12px]"
-                >
-                  <option value="All">All Resource Types</option>
-                  {RESOURCE_TYPES.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <FieldLabel label="Allocation State" tooltip="Derived from validity timestamps and end history." />
-                <select
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                  className="w-full h-9 px-3 rounded-lg border border-slate-200 text-[12px]"
-                >
-                  <option value="All">All States</option>
-                  <option value="Active">Active</option>
-                  <option value="Scheduled">Scheduled</option>
-                  <option value="Ended">Ended</option>
-                  <option value="Conflict">Conflict</option>
-                </select>
-              </div>
-              <div>
-                <FieldLabel label="Validity Mode" tooltip="Filter Permanent vs Temporal resource allocations." />
-                <select
-                  value={filterMode}
-                  onChange={(e) => setFilterMode(e.target.value)}
-                  className="w-full h-9 px-3 rounded-lg border border-slate-200 text-[12px]"
-                >
-                  <option value="All">All Modes</option>
-                  <option value="Permanent">Permanent</option>
-                  <option value="Temporal">Temporal</option>
-                </select>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <FieldLabel label="Effective From" tooltip="Start of effective date range." />
-                  <input
-                    type="date"
-                    value={filterDateFrom}
-                    onChange={(e) => setFilterDateFrom(e.target.value)}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-200 text-[12px]"
-                  />
+      {activeDrawer === 'filters' && (() => {
+        const hasDateRangeError =
+          Boolean(filterDateFrom) && Boolean(filterDateTo) && filterDateFrom > filterDateTo;
+        const toggleFilterSection = (key: string) =>
+          setFilterSectionsOpen((prev) => ({ ...prev, [key]: !prev[key] }));
+
+        return (
+          <div className="fixed inset-0 z-[70] flex justify-end bg-slate-900/30 backdrop-blur-[1px]">
+            <div className="w-full max-w-[420px] bg-white h-full shadow-2xl border-l border-slate-200 flex flex-col">
+              {/* Header */}
+              <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-white shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-orange-50 border border-orange-200 flex items-center justify-center text-[#F26522]">
+                    <Filter className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-[15px] font-bold text-slate-900">Filter Resource Allocations</h3>
+                      {activeFilterCount > 0 && (
+                        <span className="px-2 py-0.5 rounded-full bg-[#FFF3EE] text-[#F26522] border border-[#F26522]/30 text-[11px] font-bold">
+                          {activeFilterCount} active
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11.5px] text-slate-500">
+                      Refine allocations by resource, connection, state & validity period
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <FieldLabel label="Effective To" tooltip="End of effective date range." />
-                  <input
-                    type="date"
-                    value={filterDateTo}
-                    onChange={(e) => setFilterDateTo(e.target.value)}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-200 text-[12px]"
-                  />
+                <button
+                  type="button"
+                  onClick={() => setActiveDrawer(null)}
+                  className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Sectional Collapsible Body */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#F8FAFC] text-[12px]">
+                {/* Section 1: Resource & Connection */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.02)]">
+                  <button
+                    type="button"
+                    onClick={() => toggleFilterSection('res_conn')}
+                    className="w-full px-4 py-2.5 bg-slate-50/70 border-b border-slate-100 flex items-center justify-between text-left cursor-pointer"
+                  >
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                      1. Resource & Connection
+                    </span>
+                    {filterSectionsOpen.res_conn ? (
+                      <ChevronUp className="w-4 h-4 text-slate-400" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-slate-400" />
+                    )}
+                  </button>
+                  {filterSectionsOpen.res_conn && (
+                    <div className="p-4 space-y-3.5">
+                      {activeCompanyScope === 'All Clients' && (
+                        <div>
+                          <FieldLabel label="Organization" tooltip="Filter resource allocations by client organization." />
+                          <select
+                            value={filterOrganization}
+                            onChange={(e) => setFilterOrganization(e.target.value)}
+                            className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
+                          >
+                            <option value="All">All Organizations</option>
+                            {organizationOptions.map((org) => (
+                              <option key={org} value={org}>
+                                {org}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      <div>
+                        <FieldLabel label="Resource Type" tooltip="Filter by Vehicle, Driver, or other client resource class." />
+                        <select
+                          value={filterResourceType}
+                          onChange={(e) => setFilterResourceType(e.target.value)}
+                          className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
+                        >
+                          <option value="All">All Resource Types</option>
+                          {RESOURCE_TYPES.map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <FieldLabel label="Connection" tooltip="Filter allocations attached to a specific parent connection." />
+                        <select
+                          value={filterConnectionId}
+                          onChange={(e) => setFilterConnectionId(e.target.value)}
+                          className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
+                        >
+                          <option value="All">All Connections</option>
+                          {scopedConnectionOptions.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.id} · {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <FieldLabel label="Assigned Hardware Scope" tooltip="Filter connection-wide allocations vs specific hardware unit allocations." />
+                        <select
+                          value={filterHardwareScope}
+                          onChange={(e) => setFilterHardwareScope(e.target.value)}
+                          className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
+                        >
+                          <option value="All">All Hardware Scopes</option>
+                          <option value="ALL_HARDWARE">All hardware in connection</option>
+                          <option value="SPECIFIC_HARDWARE">Specific hardware unit</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Section 2: Allocation */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.02)]">
+                  <button
+                    type="button"
+                    onClick={() => toggleFilterSection('allocation')}
+                    className="w-full px-4 py-2.5 bg-slate-50/70 border-b border-slate-100 flex items-center justify-between text-left cursor-pointer"
+                  >
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                      2. Allocation
+                    </span>
+                    {filterSectionsOpen.allocation ? (
+                      <ChevronUp className="w-4 h-4 text-slate-400" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-slate-400" />
+                    )}
+                  </button>
+                  {filterSectionsOpen.allocation && (
+                    <div className="p-4 space-y-3.5">
+                      <div>
+                        <FieldLabel label="Allocation State" tooltip="Derived from validity timestamps, parent connection status, and end history." />
+                        <select
+                          value={filterStatus}
+                          onChange={(e) => setFilterStatus(e.target.value)}
+                          className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
+                        >
+                          <option value="All">All States</option>
+                          <option value="Active">Active</option>
+                          <option value="Scheduled">Scheduled</option>
+                          <option value="Ended">Ended</option>
+                          <option value="Conflict">Conflict</option>
+                        </select>
+                      </div>
+                      <div>
+                        <FieldLabel label="Validity Mode" tooltip="Filter Permanent vs Temporal resource allocations." />
+                        <select
+                          value={filterMode}
+                          onChange={(e) => setFilterMode(e.target.value)}
+                          className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
+                        >
+                          <option value="All">All Modes</option>
+                          <option value="Permanent">Permanent</option>
+                          <option value="Temporal">Temporal</option>
+                        </select>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Section 3: Effective Period */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-[0_1px_2px_rgba(15,23,42,0.02)]">
+                  <button
+                    type="button"
+                    onClick={() => toggleFilterSection('period')}
+                    className="w-full px-4 py-2.5 bg-slate-50/70 border-b border-slate-100 flex items-center justify-between text-left cursor-pointer"
+                  >
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                      3. Effective Period
+                    </span>
+                    {filterSectionsOpen.period ? (
+                      <ChevronUp className="w-4 h-4 text-slate-400" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-slate-400" />
+                    )}
+                  </button>
+                  {filterSectionsOpen.period && (
+                    <div className="p-4 space-y-2.5">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <FieldLabel label="Effective From" tooltip="Start of effective date range." />
+                          <input
+                            type="date"
+                            value={filterDateFrom}
+                            max={filterDateTo || undefined}
+                            onChange={(e) => setFilterDateFrom(e.target.value)}
+                            className={`w-full h-9 px-2.5 rounded-lg border text-[12px] ${
+                              hasDateRangeError ? 'border-rose-400 bg-rose-50/40' : 'border-slate-200 bg-white'
+                            }`}
+                          />
+                        </div>
+                        <div>
+                          <FieldLabel label="Effective To" tooltip="End of effective date range." />
+                          <input
+                            type="date"
+                            value={filterDateTo}
+                            min={filterDateFrom || undefined}
+                            onChange={(e) => setFilterDateTo(e.target.value)}
+                            className={`w-full h-9 px-2.5 rounded-lg border text-[12px] ${
+                              hasDateRangeError ? 'border-rose-400 bg-rose-50/40' : 'border-slate-200 bg-white'
+                            }`}
+                          />
+                        </div>
+                      </div>
+                      {hasDateRangeError && (
+                        <div className="p-2 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>"Effective From" date must be earlier than or equal to "Effective To" date.</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-            <div className="px-5 py-3.5 border-t border-slate-200 flex items-center justify-between">
-              <button
-                type="button"
-                onClick={() => {
-                  setFilterResourceType('All');
-                  setFilterStatus('All');
-                  setFilterMode('All');
-                  setFilterDateFrom('');
-                  setFilterDateTo('');
-                }}
-                className="px-3 py-1.5 rounded-lg border border-slate-200 text-[12px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                Clear All
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveDrawer(null)}
-                className="px-4 py-1.5 rounded-lg bg-[#F26522] text-white text-[12px] font-semibold hover:bg-[#dc5719] cursor-pointer"
-              >
-                Apply Filters
-              </button>
+
+              {/* Footer */}
+              <div className="px-5 py-3.5 border-t border-slate-200 flex items-center justify-between bg-white shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterOrganization('All');
+                    setFilterResourceType('All');
+                    setFilterConnectionId('All');
+                    setFilterHardwareScope('All');
+                    setFilterStatus('All');
+                    setFilterMode('All');
+                    setFilterDateFrom('');
+                    setFilterDateTo('');
+                  }}
+                  className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Clear All
+                </button>
+                <button
+                  type="button"
+                  disabled={hasDateRangeError}
+                  onClick={() => setActiveDrawer(null)}
+                  className="h-9 px-5 rounded-lg bg-[#F26522] disabled:bg-slate-300 text-white text-[12px] font-semibold hover:bg-[#dc5719] cursor-pointer"
+                >
+                  Apply Filters
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {activeDrawer === 'saved-views' && (
         <div className="fixed inset-0 z-[70] flex justify-end bg-slate-900/30">
@@ -1932,76 +2696,255 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
         </div>
       )}
 
-      {activeDrawer === 'bulk' && (
-        <div className="fixed inset-0 z-[70] flex justify-end bg-slate-900/30">
-          <div className="w-[420px] bg-white h-full shadow-2xl border-l border-slate-200 flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="text-[15px] font-bold text-slate-900">
-                Bulk Actions ({selectedRows.length} Selected)
-              </h3>
-              <button type="button" onClick={() => setActiveDrawer(null)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              {(() => {
-                const eligibleCount = selectedRows.filter((r) => r.computedStatus !== 'Ended').length;
-                const alreadyEndedCount = selectedRows.filter((r) => r.computedStatus === 'Ended').length;
-                return (
-                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-[12px] space-y-2.5">
-                    <div className="font-semibold text-slate-800">Selected Allocations Confirmation</div>
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-slate-200 bg-white text-slate-700">
+      {activeDrawer === 'bulk' && (() => {
+        const evaluation = selectedRows.map((row) => {
+          if (bulkActionMode === 'export') {
+            return {
+              row,
+              eligible: true,
+              reason: 'Ready for CSV export with timezone & text-safe identifiers'
+            };
+          }
+          if (row.computedStatus === 'Ended') {
+            return {
+              row,
+              eligible: false,
+              reason: 'Skipped — Allocation is already Ended (history preserved)'
+            };
+          }
+          return {
+            row,
+            eligible: true,
+            reason: `Will end ${row.computedStatus.toLowerCase()} allocation on ${row.connectionId}`
+          };
+        });
+        const eligibleList = evaluation.filter((e) => e.eligible);
+        const skippedList = evaluation.filter((e) => !e.eligible);
+        const endEligibleCount = selectedRows.filter((r) => r.computedStatus !== 'Ended').length;
+
+        return (
+          <div className="fixed inset-0 z-[70] flex justify-end bg-slate-900/35 backdrop-blur-[1px]">
+            <div className="w-[675px] max-w-full bg-white h-full shadow-2xl border-l border-slate-200 flex flex-col">
+              {/* Header */}
+              <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-white shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-orange-50 border border-orange-200 flex items-center justify-center text-[#F26522]">
+                    <Layers className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-[15px] font-bold text-slate-900">
+                        Bulk Operations — Resource Allocations
+                      </h3>
+                      <span className="px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200 text-slate-700 text-[11px] font-bold">
                         {selectedRows.length} Selected
                       </span>
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-rose-200 bg-rose-50 text-rose-700">
-                        {eligibleCount} Eligible to End
-                      </span>
-                      {alreadyEndedCount > 0 && (
-                        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-[11px] font-semibold border border-amber-200 bg-amber-50 text-amber-800">
-                          {alreadyEndedCount} Already Ended (Skipped)
-                        </span>
-                      )}
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-emerald-200 bg-emerald-50 text-emerald-700">
-                        <CheckCircle2 className="w-3 h-3" /> History Preserved
-                      </span>
                     </div>
+                    <p className="text-[11.5px] text-slate-500">
+                      Review selected allocations, eligibility, and skip reasons before executing
+                    </p>
                   </div>
-                );
-              })()}
-              <div>
-                <FieldLabel label="End Reason" tooltip="Audit reason recorded when ending selected resource allocations." />
-                <input
-                  type="text"
-                  value={bulkEndReason}
-                  onChange={(e) => setBulkEndReason(e.target.value)}
-                  className="w-full h-9 px-3 rounded-lg border border-slate-200 text-[12px]"
-                />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveDrawer(null)}
+                  className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Body */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-5 bg-[#F8FAFC] text-[12px]">
+                {/* KPI Cards */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="p-3.5 rounded-xl bg-white border border-slate-200">
+                    <div className="text-[10.5px] font-bold uppercase text-slate-400">Selected</div>
+                    <div className="text-[20px] font-bold text-slate-900 mt-0.5">{selectedRows.length}</div>
+                    <div className="text-[11px] text-slate-500">Allocations in selection</div>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200">
+                    <div className="text-[10.5px] font-bold uppercase text-emerald-700">Eligible</div>
+                    <div className="text-[20px] font-bold text-emerald-800 mt-0.5">{eligibleList.length}</div>
+                    <div className="text-[11px] text-emerald-700">Will be processed</div>
+                  </div>
+                  <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200">
+                    <div className="text-[10.5px] font-bold uppercase text-amber-800">Already Ended / Skipped</div>
+                    <div className="text-[20px] font-bold text-amber-900 mt-0.5">{skippedList.length}</div>
+                    <div className="text-[11px] text-amber-700">Audit history preserved</div>
+                  </div>
+                </div>
+
+                {/* Step 1: Select Bulk Operation (Preserves exact 2 actions) */}
+                <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                      1. Select Bulk Operation
+                    </span>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10.5px] font-semibold border border-emerald-200 bg-emerald-50 text-emerald-700">
+                      <CheckCircle2 className="w-3 h-3" /> History Preserved
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setBulkActionMode('end')}
+                      className={`p-3 rounded-xl border text-left transition-colors cursor-pointer flex items-start justify-between gap-3 ${
+                        bulkActionMode === 'end'
+                          ? 'border-rose-500 bg-rose-50/70'
+                          : 'border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <StopCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        <div>
+                          <div className="font-bold text-slate-900">
+                            End Selected Allocations ({endEligibleCount} Eligible)
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Ends open or scheduled allocations immediately with audit reason while skipping already ended records.
+                          </div>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 text-[10.5px] font-semibold shrink-0">
+                        {endEligibleCount} eligible
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setBulkActionMode('export')}
+                      className={`p-3 rounded-xl border text-left transition-colors cursor-pointer flex items-start justify-between gap-3 ${
+                        bulkActionMode === 'export'
+                          ? 'border-[#F26522] bg-[#FFF3EE]/60'
+                          : 'border-slate-200 hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <Download className="w-4 h-4 text-[#F26522] shrink-0 mt-0.5" />
+                        <div>
+                          <div className="font-bold text-slate-900">Export Selected</div>
+                          <div className="text-[11px] text-slate-500">
+                            Download CSV containing your {selectedRows.length} selected resource allocation row(s).
+                          </div>
+                        </div>
+                      </div>
+                      <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[10.5px] font-semibold shrink-0">
+                        {selectedRows.length} rows
+                      </span>
+                    </button>
+                  </div>
+
+                  {bulkActionMode === 'end' && (
+                    <div className="pt-2">
+                      <FieldLabel label="End Reason" tooltip="Audit reason recorded when ending selected resource allocations." />
+                      <input
+                        type="text"
+                        value={bulkEndReason}
+                        onChange={(e) => setBulkEndReason(e.target.value)}
+                        className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Step 2: Row-by-Row Preview */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                      2. Selected Allocations Preview ({evaluation.length})
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      {eligibleList.length} Eligible · {skippedList.length} Skipped
+                    </span>
+                  </div>
+                  <div className="max-h-[260px] overflow-y-auto divide-y divide-slate-100">
+                    {evaluation.map(({ row, eligible, reason }) => (
+                      <div key={row.id} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono font-bold text-slate-900">{row.id}</span>
+                            <span className="font-semibold text-slate-800">
+                              {row.resourceType}: {row.resourceIdentifier}
+                            </span>
+                            <span className="text-[10.5px] font-mono text-slate-500">({row.connectionId})</span>
+                          </div>
+                          <div className={`text-[11px] mt-0.5 ${eligible ? 'text-slate-600' : 'text-amber-700 font-medium'}`}>
+                            {reason}
+                          </div>
+                        </div>
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10.5px] font-semibold border shrink-0 ${
+                            eligible
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : 'bg-amber-50 text-amber-800 border-amber-200'
+                          }`}
+                        >
+                          {eligible ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3" /> Eligible
+                            </>
+                          ) : (
+                            <>
+                              <Ban className="w-3 h-3" /> Skipped
+                            </>
+                          )}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div className="px-6 py-3.5 border-t border-slate-200 flex items-center justify-between gap-2 bg-white shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportScope('selected');
+                    handleRunExport();
+                  }}
+                  className="px-3.5 h-9 rounded-lg border border-slate-200 bg-white text-[12px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  Export Selected
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveDrawer(null)}
+                    className="px-3.5 h-9 rounded-lg border border-slate-200 bg-white text-[12px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  {bulkActionMode === 'export' ? (
+                    <button
+                      type="button"
+                      disabled={selectedRows.length === 0}
+                      onClick={() => {
+                        setExportScope('selected');
+                        handleRunExport();
+                      }}
+                      className="px-5 h-9 rounded-lg bg-[#F26522] hover:bg-[#dc5719] text-white text-[12px] font-semibold disabled:opacity-40 cursor-pointer"
+                    >
+                      Download Selected CSV ({selectedRows.length})
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={endEligibleCount === 0}
+                      onClick={handleBulkEndAllocations}
+                      className="px-5 h-9 rounded-lg bg-rose-600 text-white text-[12px] font-semibold disabled:opacity-40 hover:bg-rose-700 cursor-pointer"
+                    >
+                      End Selected Allocations ({endEligibleCount})
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
-            <div className="px-5 py-3.5 border-t border-slate-200 flex items-center justify-between gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setExportScope('selected');
-                  handleRunExport();
-                }}
-                className="px-3 py-1.5 rounded-lg border border-slate-200 text-[12px] font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                Export Selected
-              </button>
-              <button
-                type="button"
-                disabled={selectedRows.filter((r) => r.computedStatus !== 'Ended').length === 0}
-                onClick={handleBulkEndAllocations}
-                className="px-4 py-1.5 rounded-lg bg-rose-600 text-white text-[12px] font-semibold disabled:opacity-40 hover:bg-rose-700 cursor-pointer"
-              >
-                End Selected Allocations
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {activeDrawer === 'import' && (
         <div className="fixed inset-0 z-[70] flex justify-end bg-slate-900/30">
@@ -2313,13 +3256,36 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                   className="w-full h-9 px-3 rounded-lg border border-slate-200 bg-white text-[12px]"
                 />
 
-                {(formResourceType === 'Vehicle' || formResourceType === 'Driver') && (
+                {resourceSearchMatches.length > 0 && (
                   <div className="max-h-44 overflow-y-auto space-y-1">
-                    {resourceSearchMatches.length === 0 ? (
-                      <div className="p-2.5 rounded-lg bg-white border border-dashed border-slate-300 flex items-center justify-between text-[11px]">
-                        <span className="text-slate-500">
-                          No matching {formResourceType} in {formClient} master.
-                        </span>
+                    {resourceSearchMatches.map((item) => {
+                      const isChosen = formSelectedResourceId === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => {
+                            setFormSelectedResourceId(item.id);
+                            setFormSelectedIdentifier(item.identifier);
+                            setFormSelectedDisplayName(item.displayName);
+                            setFormResourceLookup(item.identifier);
+                          }}
+                          className={`w-full text-left px-3 py-2 rounded-lg border text-[12px] flex items-center justify-between cursor-pointer ${
+                            isChosen
+                              ? 'border-[#F26522] bg-[#FFF3EE]'
+                              : 'border-slate-200 bg-white hover:border-slate-300'
+                          }`}
+                        >
+                          <div>
+                            <div className="font-mono font-bold text-slate-900">{item.identifier}</div>
+                            <div className="text-[11px] text-slate-500">{item.displayName} · {item.sub}</div>
+                          </div>
+                          {isChosen && <CheckCircle2 className="w-4 h-4 text-[#F26522]" />}
+                        </button>
+                      );
+                    })}
+                    {(formResourceType === 'Vehicle' || formResourceType === 'Driver') && (
+                      <div className="pt-1 flex justify-end">
                         <button
                           type="button"
                           onClick={() => {
@@ -2327,54 +3293,31 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                             if (formResourceType === 'Vehicle') setQcVehicleReg(formResourceLookup.toUpperCase());
                             else setQcDriverPhone(formResourceLookup);
                           }}
-                          className="text-[#F26522] font-bold hover:underline cursor-pointer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#FFF3EE] hover:bg-[#ffe5db] border border-[#F26522]/30 text-[#F26522] text-[11px] font-semibold cursor-pointer"
                         >
-                          + Create {formResourceType}
+                          <Plus className="w-3 h-3" /> Create New {formResourceType}
                         </button>
                       </div>
-                    ) : (
-                      <>
-                        {resourceSearchMatches.map((item) => {
-                          const isChosen = formSelectedResourceId === item.id;
-                          return (
-                            <button
-                              key={item.id}
-                              type="button"
-                              onClick={() => {
-                                setFormSelectedResourceId(item.id);
-                                setFormSelectedIdentifier(item.identifier);
-                                setFormSelectedDisplayName(item.displayName);
-                                setFormResourceLookup(item.identifier);
-                              }}
-                              className={`w-full text-left px-3 py-2 rounded-lg border text-[12px] flex items-center justify-between cursor-pointer ${
-                                isChosen
-                                  ? 'border-[#F26522] bg-[#FFF3EE]'
-                                  : 'border-slate-200 bg-white hover:border-slate-300'
-                              }`}
-                            >
-                              <div>
-                                <div className="font-mono font-bold text-slate-900">{item.identifier}</div>
-                                <div className="text-[11px] text-slate-500">{item.displayName} · {item.sub}</div>
-                              </div>
-                              {isChosen && <CheckCircle2 className="w-4 h-4 text-[#F26522]" />}
-                            </button>
-                          );
-                        })}
-                        <div className="pt-1 flex justify-end">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setQuickCreateKind(formResourceType as 'Vehicle' | 'Driver');
-                              if (formResourceType === 'Vehicle') setQcVehicleReg(formResourceLookup.toUpperCase());
-                              else setQcDriverPhone(formResourceLookup);
-                            }}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-[#FFF3EE] hover:bg-[#ffe5db] border border-[#F26522]/30 text-[#F26522] text-[11px] font-semibold cursor-pointer"
-                          >
-                            <Plus className="w-3 h-3" /> Create New {formResourceType}
-                          </button>
-                        </div>
-                      </>
                     )}
+                  </div>
+                )}
+
+                {resourceSearchMatches.length === 0 && (formResourceType === 'Vehicle' || formResourceType === 'Driver') && (
+                  <div className="p-2.5 rounded-lg bg-white border border-dashed border-slate-300 flex items-center justify-between text-[11px]">
+                    <span className="text-slate-500">
+                      No matching {formResourceType} in {formClient} master.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQuickCreateKind(formResourceType as 'Vehicle' | 'Driver');
+                        if (formResourceType === 'Vehicle') setQcVehicleReg(formResourceLookup.toUpperCase());
+                        else setQcDriverPhone(formResourceLookup);
+                      }}
+                      className="text-[#F26522] font-bold hover:underline cursor-pointer"
+                    >
+                      + Create {formResourceType}
+                    </button>
                   </div>
                 )}
 
@@ -2512,6 +3455,12 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                   <CheckCircle2 className="w-3 h-3" /> History Preserved
                 </span>
               </div>
+              {endAllocError && (
+                <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>{endAllocError}</span>
+                </div>
+              )}
               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-slate-600">
                 Ending <strong>{endingAlloc.resourceType}</strong>{' '}
                 <span className="font-mono font-bold text-slate-900">{endingAlloc.resourceIdentifier}</span> on{' '}
@@ -2656,7 +3605,10 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {historyForInspected.map((h, idx) => {
-                        const st = computeResourceAllocationStatus(h, store.resourceAllocations).status;
+                        const st = computeResourceAllocationStatus(h, store.resourceAllocations, Date.now(), {
+                          connections: store.connections,
+                          store
+                        }).status;
                         return (
                           <tr key={`${h.id}-${idx}`}>
                             <td className="px-3 py-2 font-mono font-semibold">{h.id}</td>
@@ -2777,6 +3729,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
           initialTab={connDetailsState.tab}
           allBindings={store.hardwareBindings}
           allAllocations={store.resourceAllocations}
+          store={store}
           canEdit={canEdit}
           onClose={() => setConnDetailsState(null)}
           onEdit={() => {
@@ -2785,6 +3738,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
           }}
           onEndBinding={handleEndBindingFromResourceTab}
           onExportRecord={(c) => {
+            const effSt = computeEffectiveConnectionStatus(c, store).status;
             downloadModalCsv(
               `fleetrobo-${c.id}.csv`,
               [
@@ -2792,7 +3746,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                 { key: 'name', label: 'Connection Name', minWidth: '' },
                 { key: 'status', label: 'Status', minWidth: '' }
               ],
-              [{ id: c.id, name: c.name, status: c.status }]
+              [{ id: c.id, name: c.name, status: effSt }]
             );
             showToast(`Exported ${c.id}.`);
           }}

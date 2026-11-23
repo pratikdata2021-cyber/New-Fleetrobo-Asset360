@@ -27,6 +27,7 @@ import {
 import {
   ModalMasterStore,
   ConnectionRecord,
+  ConnectionLifecycleStatus,
   HardwareMembership,
   HardwareBinding,
   HardwareBindingMode,
@@ -40,17 +41,25 @@ import {
   MODAL_OWNERS,
   MODAL_LOCATIONS,
   SUPPORTED_TIMEZONES,
-  COMPANY_NAME_TO_ID,
-  loadModalMasterStore,
-  saveModalMasterStore,
+  computeHardwareBindingStatus,
+  computeResourceAllocationStatus,
+  validateHardwareBindingPair,
+  validateResourceRelationship,
+  loadResourceRelationshipRules,
+  getNextResourceAllocationId,
+  getNextResourceRelationshipId,
+  deriveDeviceStatus,
+  deriveSensorStatus,
   formatDateTimeWithTz,
   formatLocalInputParts,
   buildIsoWithTimezone
 } from '../../types/modalMaster';
 import {
   getEnabledModelsForCompanyName,
-  getAvailableClientCompanies
+  getAvailableClientCompanies,
+  resolveClientCompanyByNameOrId
 } from '../../types/companyModelEnablement';
+import { loadModelCategoryStore } from '../../types/modelCategoryMaster';
 import { Vehicle, loadVehicleMasterStore, saveVehicleMasterStore } from '../../types/vehicle';
 import { Driver, loadDriverMasterStore, saveDriverMasterStore } from '../../types/driver';
 import { Fleet, INITIAL_DEMO_FLEETS } from '../../types/fleet';
@@ -100,6 +109,7 @@ interface MappingFormDrawerProps {
     connection: ConnectionRecord;
     bindings: HardwareBinding[];
     allocations: ResourceAllocation[];
+    resourceRelationships?: ResourceRelationship[];
     addedDevices: DeviceRecord[];
     addedSensors: SensorRecord[];
     addedSims: SimRecord[];
@@ -234,7 +244,7 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
   const defaultClient =
     initialConnection?.companyName ||
     (activeCompanyScope === 'All Clients'
-      ? availableOrganizations[0] || MODAL_OWNERS[0]
+      ? availableOrganizations[0] || ''
       : activeCompanyScope);
 
   const [targetClient, setTargetClient] = useState<string>(defaultClient);
@@ -246,7 +256,7 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
     const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 1286;
     return `CON-${nextNum}`;
   });
-  const [site] = useState(initialConnection?.site || 'CT2-Mundra');
+  const [site] = useState(initialConnection?.site || '');
 
   const liveVersion = isEdit
     ? store.connections.find((c) => c.id === initialConnection!.id)?.version || initialConnection!.version
@@ -289,32 +299,27 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
     return getEnabledModelsForCompanyName(targetClient);
   }, [targetClient, modelAccessTick]);
 
-  // Unified Master Catalog keyed by ResourceType
+  // Unified Master Catalog keyed by ResourceType (strictly scoped to targetClient; no Adani fallback)
   const masterCatalogByType = useMemo<Record<ResourceType, MasterResourceItem[]>>(() => {
     const normClient = targetClient.trim().toLowerCase();
-    const isAdaniClient = normClient.includes('adani');
-    const matchesClient = (comp?: string) => {
+    const matchesClientStrict = (comp?: string) => {
+      const c = (comp || '').trim().toLowerCase();
+      return Boolean(normClient && c && c === normClient);
+    };
+    const matchesClientOrShared = (comp?: string) => {
       const c = (comp || '').trim().toLowerCase();
       if (!c) return true;
-      if (c === normClient) return true;
-      if (isAdaniClient && c.includes('adani')) return true;
-      return false;
+      return Boolean(normClient && c === normClient);
     };
-    const prioritize = (list: MasterResourceItem[]) =>
-      [...list].sort((a, b) => {
-        const am = matchesClient(a.company) ? 0 : 1;
-        const bm = matchesClient(b.company) ? 0 : 1;
-        if (am !== bm) return am - bm;
-        return a.displayName.localeCompare(b.displayName);
-      });
 
-    const vehicleItems: MasterResourceItem[] = prioritize(
-      vehicles.map((v) => ({
+    const vehicleItems: MasterResourceItem[] = vehicles
+      .filter((v) => matchesClientStrict(v.company || v.client))
+      .map((v) => ({
         id: v.id,
-        resourceType: 'Vehicle',
+        resourceType: 'Vehicle' as const,
         identifier: v.registration_number,
         displayName: `${v.machine_model || v.model || v.make || 'Vehicle'} · ${v.registration_number}`,
-        company: v.company || v.client || 'Adani Port',
+        company: v.company || v.client || '',
         subtitle: `${v.public_id} · ${v.transporter || 'No Transporter'} · ${v.status}`,
         status: v.status,
         details: {
@@ -325,17 +330,18 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
           Status: v.status
         }
       }))
-    );
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
-    const driverItems: MasterResourceItem[] = prioritize(
-      drivers.map((d) => {
+    const driverItems: MasterResourceItem[] = drivers
+      .filter((d) => matchesClientStrict(d.company))
+      .map((d) => {
         const phone = d.phone.startsWith('+') ? d.phone : `+91 ${d.phone}`;
         return {
           id: d.id,
-          resourceType: 'Driver',
+          resourceType: 'Driver' as const,
           identifier: phone,
           displayName: d.name,
-          company: d.company || 'Adani Port',
+          company: d.company || '',
           subtitle: `${d.licence} · ${d.transporter} · ${d.status}`,
           status: d.status,
           details: {
@@ -347,15 +353,16 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
           }
         };
       })
-    );
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
-    const fleetItems: MasterResourceItem[] = prioritize(
-      fleets.map((f) => ({
+    const fleetItems: MasterResourceItem[] = fleets
+      .filter((f) => matchesClientStrict(f.company))
+      .map((f) => ({
         id: f.id,
-        resourceType: 'Fleet',
+        resourceType: 'Fleet' as const,
         identifier: f.public_id,
         displayName: f.name,
-        company: f.company || 'Adani Port',
+        company: f.company || '',
         subtitle: `${f.public_id} · ${f.service_area || 'General'}${f.zone ? ` · ${f.zone}` : ''} · ${f.status}`,
         status: f.status,
         details: {
@@ -365,15 +372,16 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
           Status: f.status
         }
       }))
-    );
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
-    const vendorItems: MasterResourceItem[] = prioritize(
-      vendors.map((v) => ({
+    const vendorItems: MasterResourceItem[] = vendors
+      .filter((v) => matchesClientOrShared(v.company_name || v.company))
+      .map((v) => ({
         id: v.id,
-        resourceType: 'Vendor',
+        resourceType: 'Vendor' as const,
         identifier: v.public_id,
         displayName: v.name,
-        company: v.company_name || 'Shared Vendor Master',
+        company: v.company_name || v.company || 'Shared Vendor Master',
         subtitle: `${v.public_id} · ${v.type.toUpperCase()} · ${v.status}`,
         status: v.status,
         details: {
@@ -383,7 +391,7 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
           Status: v.status
         }
       }))
-    );
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
 
     const placeItems: MasterResourceItem[] = places.map((p) => ({
       id: p.id,
@@ -419,7 +427,7 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
       });
     });
     store.resourceAllocations
-      .filter((a) => a.resourceType === 'Equipment')
+      .filter((a) => a.resourceType === 'Equipment' && matchesClientStrict(a.companyName))
       .forEach((a) => {
         if (!equipmentMap.has(a.resourceId)) {
           equipmentMap.set(a.resourceId, {
@@ -1392,32 +1400,54 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
     setCreateNewResourceState({ resourceType: type, searchSeed });
   };
 
-  const computedTargetStatus = useMemo(() => {
-    const hasDevice = members.some((m) => m.category === 'Device');
-    const hasSim = members.some((m) => m.category === 'SIM');
-    if (hasDevice && hasSim) return 'Active';
-    if (hasDevice) return 'Scheduled';
-    return 'Draft';
-  }, [members]);
+  const resolvedClientCompany = useMemo(
+    () => resolveClientCompanyByNameOrId(targetClient),
+    [targetClient]
+  );
 
-  const executeCommit = (actionType: 'draft' | 'activate') => {
-    if (resourceNodes.length === 0 && members.length === 0) {
-      setFormError('Add at least one Resource or Hardware unit before saving or activating.');
-      return;
-    }
+  const computedTargetStatus = useMemo<ConnectionLifecycleStatus>(() => {
+    const nowMs = Date.now();
+    const activeBindings = draftBindings.filter(
+      (b) => !b.endedAt && b.statusOverride !== 'Canceled'
+    );
+    const bindingStatuses = activeBindings.map(
+      (b) => computeHardwareBindingStatus(b, allGlobalBindings, members, nowMs).status
+    );
 
-    const companyId = COMPANY_NAME_TO_ID[targetClient] || 'comp-adani-mundra';
-    const nowIso = new Date().toISOString();
+    if (bindingStatuses.includes('Conflict')) return 'Needs Attention';
 
-    const finalAllocations: ResourceAllocation[] = [];
+    const hasBlockedHardware = members.some((m) => {
+      if (m.category === 'Device') {
+        const dev = localDevices.find((d) => d.id === m.hardwareId);
+        if (!dev) return false;
+        const eff = deriveDeviceStatus(dev, store, nowMs);
+        return eff === 'Decommissioned' || eff === 'In Maintenance';
+      }
+      if (m.category === 'Sensor') {
+        const sen = localSensors.find((s) => s.id === m.hardwareId);
+        if (!sen) return false;
+        const eff = deriveSensorStatus(sen, store, nowMs);
+        return eff === 'Decommissioned' || eff === 'In Maintenance';
+      }
+      if (m.category === 'SIM') {
+        const sim = localSims.find((s) => s.id === m.hardwareId);
+        if (!sim) return false;
+        return sim.status === 'Retired' || sim.status === 'Suspended' || sim.status === 'Inactive';
+      }
+      return false;
+    });
+    if (hasBlockedHardware) return 'Needs Attention';
+
+    const compId = resolvedClientCompany?.id || '';
+    const allocCandidates: ResourceAllocation[] = [];
     resourceNodes.forEach((rn) => {
       const boundHwEdges = explicitNodeBindings.filter(
         (b) => b.fromNodeId === rn.nodeId && b.toNodeId.startsWith('hw::')
       );
       if (boundHwEdges.length === 0) {
-        finalAllocations.push({
-          id: `RCA-${Date.now()}-${finalAllocations.length + 1}`,
-          companyId,
+        allocCandidates.push({
+          id: `cand-${rn.nodeId}`,
+          companyId: compId,
           companyName: targetClient,
           connectionId: connId,
           resourceType: rn.resourceType,
@@ -1431,14 +1461,14 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
           effectiveEndAt: rn.mode === 'Temporal' ? rn.effectiveEndAt : null,
           endedAt: null,
           assignedBy: actorName,
-          assignedOn: nowIso,
-          updatedAt: nowIso
+          assignedOn: '',
+          updatedAt: ''
         });
       } else {
-        boundHwEdges.forEach((edge) => {
-          finalAllocations.push({
-            id: `RCA-${Date.now()}-${finalAllocations.length + 1}`,
-            companyId,
+        boundHwEdges.forEach((edge, idx) => {
+          allocCandidates.push({
+            id: `cand-${rn.nodeId}-${idx}`,
+            companyId: compId,
             companyName: targetClient,
             connectionId: connId,
             resourceType: rn.resourceType,
@@ -1452,73 +1482,530 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
             effectiveEndAt: edge.mode === 'Temporal' ? edge.effectiveEndAt : null,
             endedAt: null,
             assignedBy: actorName,
-            assignedOn: nowIso,
+            assignedOn: '',
+            updatedAt: ''
+          });
+        });
+      }
+    });
+    const otherAllocs = store.resourceAllocations.filter((a) => a.connectionId !== connId);
+    const allocStatuses = allocCandidates.map((a) =>
+      computeResourceAllocationStatus(a, [...otherAllocs, ...allocCandidates], nowMs).status
+    );
+    if (allocStatuses.includes('Conflict')) return 'Needs Attention';
+
+    if (bindingStatuses.includes('Active') || allocStatuses.includes('Active')) {
+      return 'Active';
+    }
+    if (bindingStatuses.includes('Scheduled') || allocStatuses.includes('Scheduled')) {
+      return 'Scheduled';
+    }
+    return 'Draft';
+  }, [
+    draftBindings,
+    allGlobalBindings,
+    members,
+    localDevices,
+    localSensors,
+    localSims,
+    store,
+    resolvedClientCompany,
+    targetClient,
+    resourceNodes,
+    explicitNodeBindings,
+    connId,
+    actorName
+  ]);
+
+  const executeCommit = (actionType: 'draft' | 'activate') => {
+    if (hasVersionConflict) {
+      setFormError(
+        `Version conflict: ${connId} was modified in another view (live v${liveVersion} vs opened v${initialConnection?.version}). Close and reopen this mapping to review the latest changes before saving.`
+      );
+      setConfirmAction(false);
+      return;
+    }
+
+    if (resourceNodes.length === 0 && members.length === 0) {
+      setFormError('Add at least one Resource or Hardware unit before saving or activating.');
+      setConfirmAction(false);
+      return;
+    }
+
+    const matchedCompany = resolveClientCompanyByNameOrId(targetClient);
+    const companyId = matchedCompany?.id || '';
+    if (!companyId || matchedCompany?.isPlatformOwner) {
+      setFormError(
+        `Cannot save mapping: "${targetClient || 'Unknown'}" is not a valid client company.`
+      );
+      setConfirmAction(false);
+      return;
+    }
+
+    if (
+      activeCompanyScope !== 'All Clients' &&
+      targetClient.trim().toLowerCase() !== activeCompanyScope.trim().toLowerCase()
+    ) {
+      setFormError(
+        `Access denied: You can only save mappings within your authorized organization (${activeCompanyScope}).`
+      );
+      setConfirmAction(false);
+      return;
+    }
+
+    const normTargetClient = targetClient.trim().toLowerCase();
+    const initialMemberIdSet = new Set(
+      (initialConnection?.members || []).map((m) => m.hardwareId)
+    );
+    const allModelCategories = loadModelCategoryStore();
+    const enabledModelIdSet = new Set(enabledModels.map((m) => m.id));
+
+    // Re-validate every hardware member at final commit
+    const nowMs = Date.now();
+    for (const m of members) {
+      const isNewlyAddedMember = !initialMemberIdSet.has(m.hardwareId);
+
+      if (m.category === 'Device') {
+        const dev = localDevices.find((d) => d.id === m.hardwareId);
+        if (!dev) {
+          setFormError(`Device ${m.identifierValue} could not be found in Devices Master.`);
+          setConfirmAction(false);
+          return;
+        }
+        if ((dev.company || '').trim().toLowerCase() !== normTargetClient) {
+          setFormError(
+            `Cross-tenant hardware blocked: Device ${dev.deviceId} belongs to "${dev.company}", not "${targetClient}".`
+          );
+          setConfirmAction(false);
+          return;
+        }
+        const effStatus = deriveDeviceStatus(dev, store, nowMs);
+        if (effStatus === 'Decommissioned') {
+          setFormError(`Device ${dev.deviceId} is Decommissioned and cannot be mapped.`);
+          setConfirmAction(false);
+          return;
+        }
+        if (effStatus === 'In Maintenance' && (isNewlyAddedMember || actionType === 'activate')) {
+          setFormError(
+            `Device ${dev.deviceId} is currently In Maintenance and cannot be used for an effective mapping.`
+          );
+          setConfirmAction(false);
+          return;
+        }
+        if (isNewlyAddedMember) {
+          const modelRec = allModelCategories.find((mc) => mc.id === dev.modelTypeId);
+          if (!dev.modelTypeId || !modelRec || modelRec.status !== 'Active' || !enabledModelIdSet.has(dev.modelTypeId)) {
+            setFormError(
+              `Model eligibility error: Device ${dev.deviceId} model "${dev.modelText}" is inactive or not enabled for ${targetClient}.`
+            );
+            setConfirmAction(false);
+            return;
+          }
+        }
+      } else if (m.category === 'Sensor') {
+        const sen = localSensors.find((s) => s.id === m.hardwareId);
+        if (!sen) {
+          setFormError(`Sensor ${m.identifierValue} could not be found in Sensors Master.`);
+          setConfirmAction(false);
+          return;
+        }
+        if ((sen.company || '').trim().toLowerCase() !== normTargetClient) {
+          setFormError(
+            `Cross-tenant hardware blocked: Sensor ${sen.deviceId} belongs to "${sen.company}", not "${targetClient}".`
+          );
+          setConfirmAction(false);
+          return;
+        }
+        const effStatus = deriveSensorStatus(sen, store, nowMs);
+        if (effStatus === 'Decommissioned') {
+          setFormError(`Sensor ${sen.deviceId} is Decommissioned and cannot be mapped.`);
+          setConfirmAction(false);
+          return;
+        }
+        if (effStatus === 'In Maintenance' && (isNewlyAddedMember || actionType === 'activate')) {
+          setFormError(
+            `Sensor ${sen.deviceId} is currently In Maintenance and cannot be used for an effective mapping.`
+          );
+          setConfirmAction(false);
+          return;
+        }
+        if (isNewlyAddedMember) {
+          const modelRec = allModelCategories.find((mc) => mc.id === sen.modelTypeId);
+          if (!sen.modelTypeId || !modelRec || modelRec.status !== 'Active' || !enabledModelIdSet.has(sen.modelTypeId)) {
+            setFormError(
+              `Model eligibility error: Sensor ${sen.deviceId} model "${sen.modelText}" is inactive or not enabled for ${targetClient}.`
+            );
+            setConfirmAction(false);
+            return;
+          }
+        }
+      } else if (m.category === 'SIM') {
+        const sim = localSims.find((s) => s.id === m.hardwareId);
+        if (!sim) {
+          setFormError(`SIM ${m.identifierValue} could not be found in SIM Master.`);
+          setConfirmAction(false);
+          return;
+        }
+        if ((sim.owner || '').trim().toLowerCase() !== normTargetClient) {
+          setFormError(
+            `Cross-tenant hardware blocked: SIM ${sim.iccid} belongs to "${sim.owner}", not "${targetClient}".`
+          );
+          setConfirmAction(false);
+          return;
+        }
+        if (sim.status === 'Retired') {
+          setFormError(`SIM ${sim.iccid} is Retired and cannot be mapped.`);
+          setConfirmAction(false);
+          return;
+        }
+        if (
+          (sim.status === 'Suspended' || sim.status === 'Inactive') &&
+          (isNewlyAddedMember || actionType === 'activate')
+        ) {
+          setFormError(
+            `SIM ${sim.iccid} has carrier lifecycle "${sim.status}" and cannot be activated in Asset Mapping.`
+          );
+          setConfirmAction(false);
+          return;
+        }
+        if (isNewlyAddedMember && sim.modelTypeId) {
+          const modelRec = allModelCategories.find((mc) => mc.id === sim.modelTypeId);
+          if (!modelRec || modelRec.status !== 'Active' || !enabledModelIdSet.has(sim.modelTypeId)) {
+            setFormError(
+              `Model eligibility error: SIM ${sim.iccid} model is inactive or not enabled for ${targetClient}.`
+            );
+            setConfirmAction(false);
+            return;
+          }
+        }
+      }
+    }
+
+    // Re-validate every Resource Node against actual master records for targetClient
+    const initialAllocResourceIds = new Set(
+      (initialConnection
+        ? store.resourceAllocations.filter((a) => a.connectionId === initialConnection.id)
+        : []
+      ).map((a) => `${a.resourceType}::${a.resourceId}`)
+    );
+
+    for (const rn of resourceNodes) {
+      const isHistoricalAllocNode = initialAllocResourceIds.has(
+        `${rn.resourceType}::${rn.resourceId}`
+      );
+      const catalogList = masterCatalogByType[rn.resourceType] || [];
+      const inCatalog = catalogList.some((item) => item.id === rn.resourceId);
+      if (!inCatalog && !isHistoricalAllocNode) {
+        setFormError(
+          `Resource validation failed: ${rn.resourceType} "${rn.identifier}" does not exist in ${targetClient}'s Master directory.`
+        );
+        setConfirmAction(false);
+        return;
+      }
+      const sMs = Date.parse(rn.effectiveStartAt);
+      if (Number.isNaN(sMs)) {
+        setFormError(
+          `Invalid Effective Start timestamp on ${rn.resourceType} ${rn.identifier}.`
+        );
+        setConfirmAction(false);
+        return;
+      }
+      if (rn.mode === 'Temporal') {
+        const eMs = rn.effectiveEndAt ? Date.parse(rn.effectiveEndAt) : NaN;
+        if (Number.isNaN(eMs) || eMs <= sMs) {
+          setFormError(
+            `Temporal Effective End must be strictly after Start on ${rn.resourceType} ${rn.identifier}.`
+          );
+          setConfirmAction(false);
+          return;
+        }
+      }
+    }
+
+    // Re-validate all active/scheduled Hardware Bindings at final commit
+    const openDraftBindings = draftBindings.filter(
+      (b) => !b.endedAt && b.statusOverride !== 'Canceled'
+    );
+    for (const b of openDraftBindings) {
+      const check = validateHardwareBindingPair(
+        b,
+        members,
+        openDraftBindings,
+        allGlobalBindings
+      );
+      if (check.errors.length > 0) {
+        setFormError(`Binding ${b.id} validation failed: ${check.errors[0]}`);
+        setConfirmAction(false);
+        return;
+      }
+    }
+
+    // Re-validate all explicit Node-to-Node bindings & Resource Relationships at final commit
+    const resToResBindings = explicitNodeBindings.filter(
+      (eb) => eb.fromNodeId.startsWith('res::') && eb.toNodeId.startsWith('res::')
+    );
+    const rules = loadResourceRelationshipRules();
+    const workingRels: ResourceRelationship[] = [...(store.resourceRelationships || [])];
+    let relOffset = 0;
+
+    for (const eb of explicitNodeBindings) {
+      const sMs = Date.parse(eb.effectiveStartAt);
+      if (Number.isNaN(sMs)) {
+        setFormError(`Invalid Effective Start timestamp on relationship ${eb.relationship}.`);
+        setConfirmAction(false);
+        return;
+      }
+      if (eb.mode === 'Temporal') {
+        const eMs = eb.effectiveEndAt ? Date.parse(eb.effectiveEndAt) : NaN;
+        if (Number.isNaN(eMs) || eMs <= sMs) {
+          setFormError(
+            `Temporal Effective End must be strictly after Start on relationship ${eb.relationship}.`
+          );
+          setConfirmAction(false);
+          return;
+        }
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+
+    for (let idx = 0; idx < resToResBindings.length; idx++) {
+      const eb = resToResBindings[idx];
+      const src = resourceNodeMap.get(eb.fromNodeId);
+      const tgt = resourceNodeMap.get(eb.toNodeId);
+      if (!src || !tgt) continue;
+
+      const existingMatch = workingRels.find(
+        (r) =>
+          !r.endedAt &&
+          r.sourceResourceType === src.resourceType &&
+          r.sourceResourceId === src.resourceId &&
+          r.targetResourceType === tgt.resourceType &&
+          r.targetResourceId === tgt.resourceId &&
+          (r.relationshipType === eb.relationship ||
+            r.relationshipCode === eb.relationship.toUpperCase().replace(/[^A-Z0-9]+/g, '_'))
+      );
+
+      if (existingMatch) {
+        continue;
+      }
+
+      const matchedRule =
+        rules.find(
+          (r) =>
+            r.enabled &&
+            r.sourceType === src.resourceType &&
+            r.targetType === tgt.resourceType &&
+            (r.label.toLowerCase() === eb.relationship.trim().toLowerCase() ||
+              r.code.toLowerCase() ===
+                eb.relationship.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'))
+        ) ||
+        rules.find(
+          (r) =>
+            r.enabled &&
+            r.sourceType === src.resourceType &&
+            r.targetType === tgt.resourceType
+        );
+
+      const relCode =
+        matchedRule?.code || eb.relationship.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+      const relLabel = matchedRule?.label || eb.relationship;
+
+      if (matchedRule) {
+        const relCheck = validateResourceRelationship(
+          {
+            sourceResourceType: src.resourceType,
+            sourceResourceId: src.resourceId,
+            sourceResourceIdentifier: src.identifier,
+            relationshipCode: relCode,
+            relationshipType: relLabel,
+            targetResourceType: tgt.resourceType,
+            targetResourceId: tgt.resourceId,
+            targetResourceIdentifier: tgt.identifier,
+            mode: eb.mode,
+            effectiveStartAt: eb.effectiveStartAt,
+            effectiveEndAt: eb.mode === 'Temporal' ? eb.effectiveEndAt : null
+          },
+          workingRels,
+          rules
+        );
+        if (relCheck.errors.length > 0) {
+          setFormError(relCheck.errors[0]);
+          setConfirmAction(false);
+          return;
+        }
+      }
+
+      const newRel: ResourceRelationship = {
+        id: getNextResourceRelationshipId(workingRels, relOffset++),
+        companyId,
+        companyName: targetClient,
+        sourceResourceType: src.resourceType,
+        sourceResourceId: src.resourceId,
+        sourceResourceIdentifier: src.identifier,
+        sourceResourceDisplayName: src.displayName,
+        relationshipCode: relCode,
+        relationshipType: relLabel,
+        targetResourceType: tgt.resourceType,
+        targetResourceId: tgt.resourceId,
+        targetResourceIdentifier: tgt.identifier,
+        targetResourceDisplayName: tgt.displayName,
+        mode: eb.mode,
+        effectiveStartAt: eb.effectiveStartAt,
+        effectiveEndAt: eb.mode === 'Temporal' ? eb.effectiveEndAt : null,
+        timezone: eb.timezone,
+        createdBy: actorName,
+        createdAt: nowIso,
+        updatedBy: actorName,
+        updatedAt: nowIso,
+        history: [
+          {
+            id: `relh-${Date.now()}-${idx}`,
+            timestamp: nowIso,
+            actor: actorName,
+            action: 'Created',
+            summary: `Created via ${connId}: ${src.identifier} (${relLabel}) → ${tgt.identifier}`
+          }
+        ]
+      };
+      workingRels.unshift(newRel);
+    }
+
+    // Reconcile Resource Allocations preserving existing open allocation IDs and metadata (MAP-P0-04)
+    const priorOpenAllocs = initialConnection
+      ? store.resourceAllocations.filter(
+          (a) => a.connectionId === initialConnection.id && !a.endedAt
+        )
+      : [];
+    const consumedPriorAllocIds = new Set<string>();
+    let allocOffset = 0;
+
+    const findAndConsumePriorAlloc = (
+      resType: ResourceType,
+      resId: string,
+      hwId: string | null
+    ): ResourceAllocation | undefined => {
+      const exact = priorOpenAllocs.find(
+        (a) =>
+          !consumedPriorAllocIds.has(a.id) &&
+          a.resourceType === resType &&
+          a.resourceId === resId &&
+          (a.hardwareId || null) === (hwId || null)
+      );
+      if (exact) {
+        consumedPriorAllocIds.add(exact.id);
+        return exact;
+      }
+      const fallbackSameResource = priorOpenAllocs.find(
+        (a) =>
+          !consumedPriorAllocIds.has(a.id) &&
+          a.resourceType === resType &&
+          a.resourceId === resId
+      );
+      if (fallbackSameResource) {
+        consumedPriorAllocIds.add(fallbackSameResource.id);
+        return fallbackSameResource;
+      }
+      return undefined;
+    };
+
+    const finalAllocations: ResourceAllocation[] = [];
+    resourceNodes.forEach((rn) => {
+      const boundHwEdges = explicitNodeBindings.filter(
+        (b) => b.fromNodeId === rn.nodeId && b.toNodeId.startsWith('hw::')
+      );
+      if (boundHwEdges.length === 0) {
+        const prior = findAndConsumePriorAlloc(rn.resourceType, rn.resourceId, null);
+        finalAllocations.push({
+          id:
+            prior?.id ||
+            getNextResourceAllocationId(
+              [...store.resourceAllocations, ...finalAllocations],
+              allocOffset++
+            ),
+          companyId,
+          companyName: targetClient,
+          connectionId: connId,
+          resourceType: rn.resourceType,
+          resourceId: rn.resourceId,
+          resourceIdentifier: rn.identifier,
+          resourceDisplayName: rn.displayName,
+          hardwareId: null,
+          mode: rn.mode,
+          timezone: rn.timezone,
+          effectiveStartAt: rn.effectiveStartAt,
+          effectiveEndAt: rn.mode === 'Temporal' ? rn.effectiveEndAt : null,
+          endedAt: null,
+          site: prior?.site || site || undefined,
+          notes: prior?.notes,
+          assignedBy: prior?.assignedBy || actorName,
+          assignedOn: prior?.assignedOn || nowIso,
+          updatedAt: nowIso
+        });
+      } else {
+        boundHwEdges.forEach((edge) => {
+          const hwId = edge.toNodeId.slice(4);
+          const prior = findAndConsumePriorAlloc(rn.resourceType, rn.resourceId, hwId);
+          finalAllocations.push({
+            id:
+              prior?.id ||
+              getNextResourceAllocationId(
+                [...store.resourceAllocations, ...finalAllocations],
+                allocOffset++
+              ),
+            companyId,
+            companyName: targetClient,
+            connectionId: connId,
+            resourceType: rn.resourceType,
+            resourceId: rn.resourceId,
+            resourceIdentifier: rn.identifier,
+            resourceDisplayName: rn.displayName,
+            hardwareId: hwId,
+            mode: edge.mode,
+            timezone: edge.timezone,
+            effectiveStartAt: edge.effectiveStartAt,
+            effectiveEndAt: edge.mode === 'Temporal' ? edge.effectiveEndAt : null,
+            endedAt: null,
+            site: prior?.site || site || undefined,
+            notes: prior?.notes,
+            assignedBy: prior?.assignedBy || actorName,
+            assignedOn: prior?.assignedOn || nowIso,
             updatedAt: nowIso
           });
         });
       }
     });
 
-    // Persist any Resource <-> Resource bindings into ResourceRelationship store
-    const resToResBindings = explicitNodeBindings.filter(
-      (eb) => eb.fromNodeId.startsWith('res::') && eb.toNodeId.startsWith('res::')
-    );
-    if (resToResBindings.length > 0) {
-      const currentStore = loadModalMasterStore();
-      const existingRels = [...(currentStore.resourceRelationships || [])];
-      resToResBindings.forEach((eb, idx) => {
-        const src = resourceNodeMap.get(eb.fromNodeId);
-        const tgt = resourceNodeMap.get(eb.toNodeId);
-        if (!src || !tgt) return;
-        const alreadyExists = existingRels.some(
-          (r) =>
-            !r.endedAt &&
-            r.sourceResourceType === src.resourceType &&
-            r.sourceResourceId === src.resourceId &&
-            r.targetResourceType === tgt.resourceType &&
-            r.targetResourceId === tgt.resourceId &&
-            r.relationshipType === eb.relationship
+    // Any previously open allocation removed during Edit is preserved as ended history instead of vanished (MAP-P0-04)
+    priorOpenAllocs.forEach((prior) => {
+      if (!consumedPriorAllocIds.has(prior.id)) {
+        finalAllocations.push({
+          ...prior,
+          endedAt: nowIso,
+          endReason: 'Removed during connection edit',
+          unassignedBy: actorName,
+          updatedAt: nowIso
+        });
+      }
+    });
+
+    // When activating, require at least one valid active/scheduled binding or resource allocation (MAP-P0-01)
+    if (actionType === 'activate') {
+      const openAllocations = finalAllocations.filter((a) => !a.endedAt);
+      if (openDraftBindings.length === 0 && openAllocations.length === 0) {
+        setFormError(
+          'Cannot activate mapping without an effective Hardware Binding or Resource Allocation. Add a binding/resource or use "Save as Draft".'
         );
-        if (!alreadyExists) {
-          const newRel: ResourceRelationship = {
-            id: `REL-${Date.now().toString().slice(-4)}-${idx + 1}`,
-            companyId,
-            companyName: targetClient,
-            sourceResourceType: src.resourceType,
-            sourceResourceId: src.resourceId,
-            sourceResourceIdentifier: src.identifier,
-            sourceResourceDisplayName: src.displayName,
-            relationshipCode: eb.relationship.toUpperCase().replace(/[^A-Z0-9]+/g, '_'),
-            relationshipType: eb.relationship,
-            targetResourceType: tgt.resourceType,
-            targetResourceId: tgt.resourceId,
-            targetResourceIdentifier: tgt.identifier,
-            targetResourceDisplayName: tgt.displayName,
-            mode: eb.mode,
-            effectiveStartAt: eb.effectiveStartAt,
-            effectiveEndAt: eb.mode === 'Temporal' ? eb.effectiveEndAt : null,
-            timezone: eb.timezone,
-            createdBy: actorName,
-            createdAt: nowIso,
-            updatedBy: actorName,
-            updatedAt: nowIso,
-            history: [
-              {
-                id: `relh-${Date.now()}-${idx}`,
-                timestamp: nowIso,
-                actor: actorName,
-                action: 'Created',
-                summary: `Created via ${connId}: ${src.identifier} (${eb.relationship}) → ${tgt.identifier}`
-              }
-            ]
-          };
-          existingRels.unshift(newRel);
-        }
-      });
-      saveModalMasterStore({
-        ...currentStore,
-        resourceRelationships: existingRels
-      });
+        setConfirmAction(false);
+        return;
+      }
+      if (computedTargetStatus === 'Needs Attention') {
+        setFormError(
+          'Cannot activate mapping while unresolved hardware or allocation conflicts exist. Resolve the conflict or save as Draft.'
+        );
+        setConfirmAction(false);
+        return;
+      }
     }
 
     const firstResLabel = resourceNodes[0]
@@ -1552,6 +2039,7 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
       connection: updatedConn,
       bindings: draftBindings,
       allocations: finalAllocations,
+      resourceRelationships: workingRels,
       addedDevices: localDevices.filter((d) => !existingDevIds.has(d.id)),
       addedSensors: localSensors.filter((s) => !existingSenIds.has(s.id)),
       addedSims: localSims.filter((s) => !existingSimIds.has(s.id)),
@@ -1631,7 +2119,17 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
                 {isPlatformAdmin && !isEdit ? (
                   <select
                     value={targetClient}
-                    onChange={(e) => setTargetClient(e.target.value)}
+                    onChange={(e) => {
+                      const nextClient = e.target.value;
+                      setTargetClient(nextClient);
+                      if (resourceNodes.length > 0 || members.length > 0) {
+                        setResourceNodes([]);
+                        setMembers([]);
+                        setDraftBindings([]);
+                        setExplicitNodeBindings([]);
+                        setFormError(null);
+                      }
+                    }}
                     className="h-7 px-2 rounded-md border border-slate-200 bg-white font-semibold text-slate-800 text-[11.5px]"
                   >
                     {availableOrganizations.map((org) => (
@@ -1913,7 +2411,6 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
                       <th className="px-3 py-2 w-10">#</th>
                       <th className="px-3 py-2 min-w-[270px]">Mapping / Node Hierarchy</th>
                       <th className="px-2.5 py-2 min-w-[105px]">Type</th>
-                      <th className="px-2.5 py-2 min-w-[155px]">Relationship</th>
                       <th className="px-2.5 py-2 min-w-[95px]">Validity</th>
                       <th className="px-2.5 py-2 min-w-[130px]">Effective Window</th>
                       <th className="px-3 py-2 text-right min-w-[165px]">Actions</th>
@@ -1998,9 +2495,6 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
                             >
                               {row.nodeType}
                             </span>
-                          </td>
-                          <td className="px-2.5 py-2 align-middle text-slate-700 font-medium">
-                            {row.relationshipLabel}
                           </td>
                           <td className="px-2.5 py-2 align-middle whitespace-nowrap">
                             {row.depth === 0 ? (
@@ -2234,6 +2728,7 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
           draftBindings={draftBindings}
           allGlobalBindings={allGlobalBindings}
           allConnections={store.connections}
+          allAllocations={store.resourceAllocations}
           localDevices={localDevices}
           localSensors={localSensors}
           localSims={localSims}

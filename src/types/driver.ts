@@ -1,3 +1,9 @@
+import {
+  ModalMasterStore,
+  getDriverMappingReferences,
+  loadModalMasterStore
+} from './modalMaster';
+
 export interface UserAccount {
   id: string;
   name: string;
@@ -552,8 +558,69 @@ export const INITIAL_DEMO_DRIVERS: Driver[] = [
 
 export const INITIAL_DRIVERS = INITIAL_DEMO_DRIVERS;
 
-// Helper to derive badges from a Driver record
-export function deriveDriverBadges(driver: Driver) {
+export function normalizeLicenceNumber(value?: string): string {
+  return (value || '').trim().toUpperCase();
+}
+
+export function isGlobalDriverAdminContext(companyContext?: string): boolean {
+  return (
+    !companyContext ||
+    companyContext === 'Platform Admin' ||
+    companyContext === 'Binary' ||
+    companyContext === 'All Clients'
+  );
+}
+
+export function getDriverOwningCompany(driver: Partial<Driver>): string {
+  return (driver.company || '').trim();
+}
+
+export function isDriverAuthorizedForCompany(
+  driver: Partial<Driver>,
+  companyContext?: string
+): boolean {
+  if (isGlobalDriverAdminContext(companyContext)) return true;
+  const owner = getDriverOwningCompany(driver).toLowerCase();
+  return owner !== '' && owner === (companyContext || '').trim().toLowerCase();
+}
+
+function parseLocalCalendarDate(dateStr?: string): Date | null {
+  const raw = (dateStr || '').trim();
+  if (!raw) return null;
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (ymd) {
+    const year = Number(ymd[1]);
+    const month = Number(ymd[2]);
+    const day = Number(ymd[3]);
+    const d = new Date(year, month - 1, day);
+    if (d.getFullYear() === year && d.getMonth() === month - 1 && d.getDate() === day) {
+      return d;
+    }
+    return null;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
+export interface DerivedDriverBadges {
+  accountStatus: 'Linked' | 'Not linked';
+  verification: 'Verified' | 'Pending';
+  documents: 'Complete' | 'Partial' | 'Missing';
+  expiry: 'Valid' | 'Expiring within 30 days' | 'Expired' | 'Missing';
+  mapping: 'Mapped' | 'Unmapped' | 'Expired';
+  mappedVehicleRegs: string[];
+  hasScheduledMapping: boolean;
+  hasAnyMappingReference: boolean;
+}
+
+// Helper to derive badges from a Driver record using live local calendar date and real Asset Mapping
+export function deriveDriverBadges(
+  driver: Driver,
+  modalStore?: Pick<ModalMasterStore, 'connections' | 'resourceAllocations' | 'resourceRelationships'>,
+  nowMs: number = Date.now(),
+  allDriverIds?: Set<string>
+): DerivedDriverBadges {
   // Account Status
   const accountStatus: 'Linked' | 'Not linked' = driver.userAccountId ? 'Linked' : 'Not linked';
 
@@ -571,15 +638,17 @@ export function deriveDriverBadges(driver: Driver) {
     documents = 'Partial';
   }
 
-  // Licence Expiry calculation against current date
+  // Licence Expiry calculation against actual current local calendar date
   let expiry: 'Valid' | 'Expiring within 30 days' | 'Expired' | 'Missing' = 'Valid';
-  if (!driver.licenceTo) {
+  const validToLocal = parseLocalCalendarDate(driver.licenceTo);
+  if (!validToLocal) {
     expiry = 'Missing';
   } else {
-    const today = new Date('2026-11-11T00:00:00Z');
-    const validToDate = new Date(driver.licenceTo);
-    const diffTime = validToDate.getTime() - today.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    const nowDate = new Date(nowMs);
+    const todayLocal = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+    const diffDays = Math.round(
+      (validToLocal.getTime() - todayLocal.getTime()) / (1000 * 60 * 60 * 24)
+    );
 
     if (diffDays < 0) {
       expiry = 'Expired';
@@ -590,18 +659,20 @@ export function deriveDriverBadges(driver: Driver) {
     }
   }
 
-  // Mapping Status
-  let mapping: 'Mapped' | 'Unmapped' | 'Expired' = 'Unmapped';
-  if (driver.reg) {
-    mapping = driver.mappingActive ? 'Mapped' : 'Expired';
-  }
+  // Real Mapping Status derived strictly from Asset Mapping allocations & relationships
+  const store = modalStore || loadModalMasterStore();
+  const mappingRefs = getDriverMappingReferences(driver, store, allDriverIds, nowMs);
 
   return {
     accountStatus,
     verification,
     documents,
     expiry,
-    mapping
+    mapping: mappingRefs.mapping,
+    mappedVehicleRegs: mappingRefs.activeVehicleRegs,
+    hasScheduledMapping:
+      mappingRefs.scheduledAllocations.length > 0 || mappingRefs.scheduledRelationships.length > 0,
+    hasAnyMappingReference: mappingRefs.hasAnyReference
   };
 }
 
@@ -618,21 +689,47 @@ export interface TransferHistoryJob {
 }
 
 export const DRIVER_MASTER_STORAGE_KEY = 'fleetrobo_driver_master_v1';
+export const DRIVER_MASTER_SEED_VERSION_KEY = 'fleetrobo_driver_master_seed_version_v1';
 
 export function loadDriverMasterStore(): Driver[] {
   try {
     const raw = localStorage.getItem(DRIVER_MASTER_STORAGE_KEY);
-    if (raw) {
+    if (raw !== null) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
+        try {
+          if (localStorage.getItem(DRIVER_MASTER_SEED_VERSION_KEY) !== '1') {
+            localStorage.setItem(DRIVER_MASTER_SEED_VERSION_KEY, '1');
+          }
+        } catch {
+          // ignore
+        }
         return parsed as Driver[];
       }
     }
   } catch {
-    // ignore
+    // ignore corrupt JSON and fall back to seed
   }
   try {
+    const alreadySeeded = localStorage.getItem(DRIVER_MASTER_SEED_VERSION_KEY) === '1';
+    if (alreadySeeded) {
+      return [];
+    }
     localStorage.setItem(DRIVER_MASTER_STORAGE_KEY, JSON.stringify(INITIAL_DEMO_DRIVERS));
+    localStorage.setItem(DRIVER_MASTER_SEED_VERSION_KEY, '1');
+  } catch {
+    // ignore
+  }
+  return INITIAL_DEMO_DRIVERS;
+}
+
+export function resetDriverMasterStore(): Driver[] {
+  try {
+    localStorage.setItem(DRIVER_MASTER_STORAGE_KEY, JSON.stringify(INITIAL_DEMO_DRIVERS));
+    localStorage.setItem(DRIVER_MASTER_SEED_VERSION_KEY, '1');
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('fleetrobo:resources-updated'));
+    }
   } catch {
     // ignore
   }
@@ -642,6 +739,7 @@ export function loadDriverMasterStore(): Driver[] {
 export function saveDriverMasterStore(drivers: Driver[]) {
   try {
     localStorage.setItem(DRIVER_MASTER_STORAGE_KEY, JSON.stringify(drivers));
+    localStorage.setItem(DRIVER_MASTER_SEED_VERSION_KEY, '1');
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('fleetrobo:resources-updated'));
     }

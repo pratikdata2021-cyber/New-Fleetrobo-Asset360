@@ -22,7 +22,10 @@ import {
   DEMO_LOOKUPS,
   DocumentAttachment,
   loadCustomVehicleSkills,
-  saveCustomVehicleSkill
+  saveCustomVehicleSkill,
+  validateVehicleCandidate,
+  syncVehicleOperationalActiveState,
+  getVehicleOwningCompany
 } from '../types/vehicle';
 import {
   ALL_VEHICLE_SEGMENTS,
@@ -268,7 +271,12 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
     if (isOpen) {
       setVehicleModels(loadVehicleModelStore());
       if (mode === 'create') {
-        const defaultCompany = companyContext || 'Adani Port';
+        const isTenantScoped =
+          companyContext &&
+          companyContext !== 'All Clients' &&
+          companyContext !== 'Platform Admin' &&
+          companyContext !== 'Binary';
+        const defaultCompany = isTenantScoped ? companyContext : 'Adani Port';
         setFormData({
           company: defaultCompany, // Inherited silently; not shown as form input
           client: defaultCompany,
@@ -334,21 +342,30 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
 
   const transporterOptions = React.useMemo(() => {
     void vendorRefreshTick;
-    const canonicalVendors = getCanonicalTransporterVendors(companyContext);
+    const isAdmin =
+      !companyContext ||
+      companyContext === 'All Clients' ||
+      companyContext === 'Platform Admin' ||
+      companyContext === 'Binary';
+    const canonicalVendors = getCanonicalTransporterVendors(isAdmin ? undefined : companyContext);
     const seen = new Set<string>();
     const list: Array<{ name: string; publicId?: string; id?: string }> = [];
-    canonicalVendors.forEach(v => {
-      if (!seen.has(v.name)) {
-        seen.add(v.name);
-        list.push({ name: v.name, publicId: v.public_id, id: v.id });
-      }
-    });
-    DEMO_LOOKUPS.transporters.forEach(t => {
-      if (!seen.has(t)) {
-        seen.add(t);
-        list.push({ name: t });
-      }
-    });
+    canonicalVendors
+      .filter((v) => v.is_active !== false && v.status !== 'blacklisted' && v.status !== 'terminated')
+      .forEach(v => {
+        if (!seen.has(v.name)) {
+          seen.add(v.name);
+          list.push({ name: v.name, publicId: v.public_id, id: v.id });
+        }
+      });
+    if (isAdmin || list.length === 0) {
+      DEMO_LOOKUPS.transporters.forEach(t => {
+        if (!seen.has(t)) {
+          seen.add(t);
+          list.push({ name: t });
+        }
+      });
+    }
     if (formData.transporter && !seen.has(formData.transporter)) {
       list.push({ name: formData.transporter });
     }
@@ -366,13 +383,12 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
     }
     const mm = (formData.machine_model || '').trim().toLowerCase();
     if (!mm) return null;
-    return (
-      vehicleModels.find(
-        (m) =>
-          formatVehicleModelLabel(m).toLowerCase() === mm ||
-          m.modelName.toLowerCase() === mm
-      ) || null
+    const matches = vehicleModels.filter(
+      (m) =>
+        formatVehicleModelLabel(m).toLowerCase() === mm ||
+        m.modelName.toLowerCase() === mm
     );
+    return matches.length === 1 ? matches[0] : null;
   }, [vehicleModels, formData.vehicle_model_id, formData.machine_model]);
 
   const filteredActiveModels = React.useMemo(() => {
@@ -442,7 +458,7 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
     setModelTypeFilter(nextType);
     setModelSegmentFilter(nextSegment);
 
-    // Revalidate already-selected model against changed type/segment filter (PRD §8)
+    // Revalidate already-selected model against changed type/segment filter without wiping selection (P0 fix)
     if (selectedMasterModel) {
       const typeMismatch =
         nextType !== 'All' && selectedMasterModel.vehicleType !== nextType;
@@ -450,20 +466,14 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
         nextSegment !== 'All' &&
         selectedMasterModel.vehicleSegment !== nextSegment;
       if (typeMismatch || segMismatch) {
-        setFormData((prev) => ({
-          ...prev,
-          vehicle_model_id: '',
-          machine_model: '',
-          model: '',
-          type: nextType !== 'All' ? nextType : prev.type,
-          vehicle_segment:
-            nextSegment !== 'All' ? nextSegment : prev.vehicle_segment,
-        }));
-        setPrefilledFromModelNotice('');
         setModelCompatibilityNotice(
-          `Cleared "${formatVehicleModelLabel(selectedMasterModel)}" because it does not match ${nextType !== 'All' ? nextType : ''} ${nextSegment !== 'All' ? nextSegment : ''}. Please pick a compatible model.`
+          `Notice: Currently selected model "${formatVehicleModelLabel(selectedMasterModel)}" does not match filter (${nextType !== 'All' ? nextType : ''} ${nextSegment !== 'All' ? nextSegment : ''}). Existing selection is preserved.`
         );
+      } else {
+        setModelCompatibilityNotice('');
       }
+    } else {
+      setModelCompatibilityNotice('');
     }
   };
 
@@ -569,34 +579,42 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
   // Validation
   const validateForm = (): boolean => {
     const errors: Record<string, string> = {};
+    const comp =
+      getVehicleOwningCompany({
+        company: formData.company || '',
+        client: formData.client
+      }) ||
+      (companyContext &&
+      companyContext !== 'All Clients' &&
+      companyContext !== 'Platform Admin' &&
+      companyContext !== 'Binary'
+        ? companyContext
+        : 'Adani Port');
 
-    // Section 1 Validations
-    const reg = formData.registration_number?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (!reg) {
-      errors.registration_number = 'Registration number is mandatory.';
-    } else {
-      // Uniqueness within owning company/client
-      const comp = formData.company || companyContext || 'Adani Port';
-      const duplicate = existingVehicles.find(
-        (v) =>
-          v.id !== formData.id &&
-          v.company.toLowerCase() === comp.toLowerCase() &&
-          v.registration_number.replace(/[^A-Z0-9]/g, '') === reg
-      );
-      if (duplicate) {
-        errors.registration_number = `Duplicate vehicle! Plate ${reg} is already registered under ${comp}.`;
-      }
-    }
+    const shared = validateVehicleCandidate(
+      {
+        mode: mode === 'create' ? 'create' : 'edit',
+        currentVehicleId: formData.id,
+        company: comp,
+        registration_number: formData.registration_number || '',
+        vehicle_model_id: formData.vehicle_model_id,
+        machine_model: formData.machine_model || formData.model,
+        chassis_number: formData.chassis_number,
+        vin: formData.vin,
+        status: formData.status,
+        active_status: formData.active_status,
+        insurance_from: formData.insurance_from,
+        insurance_to: formData.insurance_to,
+        warranty_from: formData.warranty_from,
+        warranty_to: formData.warranty_to,
+        extended_warranty_from: formData.extended_warranty_from,
+        extended_warranty_to: formData.extended_warranty_to
+      },
+      existingVehicles,
+      vehicleModels
+    );
 
-    const machineModel = formData.machine_model || formData.model;
-    if (!machineModel?.trim()) {
-      errors.machine_model = 'Machine Model is mandatory.';
-    }
-
-    const chassis = formData.chassis_number || formData.vin;
-    if (!chassis?.trim()) {
-      errors.chassis_number = 'Chassis No. is mandatory.';
-    }
+    Object.assign(errors, shared.errors);
 
     if (!formData.registration_date) {
       errors.registration_date = 'Registration Date is mandatory.';
@@ -664,7 +682,21 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
       generatedName = parts.length > 0 ? parts.join(' ') : formData.registration_number?.toUpperCase();
     }
 
-    const assignedCompany = formData.company || companyContext || 'Adani Port';
+    const isTenantScoped =
+      companyContext &&
+      companyContext !== 'All Clients' &&
+      companyContext !== 'Platform Admin' &&
+      companyContext !== 'Binary';
+    const assignedCompany =
+      formData.company || (isTenantScoped ? companyContext! : 'Adani Port');
+    const nextActiveStatus = formData.active_status !== false;
+    const nextOperationalStatus =
+      nextActiveStatus === false
+        ? 'Inactive'
+        : formData.status === 'Inactive'
+        ? 'Available'
+        : formData.status || 'Available';
+    const syncedActive = syncVehicleOperationalActiveState(nextOperationalStatus, nextActiveStatus);
 
     const payload: Vehicle = {
       id: formData.id || `veh-${Date.now()}`,
@@ -674,9 +706,9 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
       name: generatedName!,
 
       // Section 1 — Basic Vehicle Details
-      vehicle_model_id: formData.vehicle_model_id || undefined,
+      vehicle_model_id: formData.vehicle_model_id || selectedMasterModel?.id || undefined,
       machine_model: machineModelVal,
-      model: formData.model || machineModelVal,
+      model: formData.model || selectedMasterModel?.modelName || machineModelVal,
       type: formData.type || selectedMasterModel?.vehicleType || 'Truck',
       vehicle_segment: formData.vehicle_segment || selectedMasterModel?.vehicleSegment,
       client: formData.client || assignedCompany,
@@ -690,7 +722,7 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
         resolveTransporterVendor(formData.transporter || transporterOptions[0]?.name)?.id,
       year: formData.year ? Number(formData.year) : undefined,
       machine_owner: formData.machine_owner?.trim(),
-      active_status: formData.active_status !== undefined ? formData.active_status : true,
+      active_status: syncedActive,
 
       // Section 2 — Vehicle & Operational Settings
       overspeed_limit: Number(formData.overspeed_limit ?? 60),
@@ -726,7 +758,7 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
 
       // Section 6 — Additional Information
       internal_id: formData.internal_id?.trim(),
-      make: formData.make?.trim() || 'Tata Motors',
+      make: formData.make?.trim() || selectedMasterModel?.manufacturer || 'Tata Motors',
       trim: formData.trim?.trim(),
       color: formData.color?.trim(),
       class: formData.class?.trim() || 'HMV',
@@ -735,17 +767,17 @@ export const VehicleDrawer: React.FC<VehicleDrawerProps> = ({
       fuel_card_number: formData.fuel_card_number?.trim(),
 
       // Operational Status
-      status: formData.active_status === false ? 'Inactive' : (formData.status || 'Available'),
+      status: nextOperationalStatus,
       hub: formData.hub || DEMO_LOOKUPS.hubs[0],
       client_location: formData.location?.trim() || formData.client_location || '',
       vendor: formData.vendor || DEMO_LOOKUPS.vendors[0],
       driver: formData.driver || '',
-      fleets: formData.fleets || [DEMO_LOOKUPS.fleets[0]],
+      fleets: formData.fleets || [],
       trailers: formData.trailers || [],
       skills: formData.skills || [],
       routes: formData.routes || [],
       sharing: formData.sharing || [],
-      online: formData.online !== undefined ? formData.online : true,
+      online: formData.online,
       created_at: formData.created_at || new Date().toISOString().split('T')[0],
       updated_at: new Date().toISOString().split('T')[0]
     };

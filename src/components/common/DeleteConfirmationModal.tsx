@@ -35,6 +35,7 @@ export interface DeleteConfirmationModalProps {
   title: string;
   description: React.ReactNode;
   confirmLabel?: string;
+  confirmDisabled?: boolean;
   cancelLabel?: string;
   targetChips?: DeleteTargetChip[];
   confirmationChips?: DeleteStatusChip[];
@@ -72,6 +73,7 @@ export const DeleteConfirmationModal: React.FC<DeleteConfirmationModalProps> = (
   title,
   description,
   confirmLabel = 'Confirm Delete',
+  confirmDisabled = false,
   cancelLabel = 'Cancel',
   targetChips = [],
   confirmationChips = [],
@@ -256,8 +258,11 @@ export const DeleteConfirmationModal: React.FC<DeleteConfirmationModalProps> = (
           )}
           <button
             type="button"
-            onClick={() => onConfirm(selectedReason || undefined)}
-            className="px-4 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg shadow-sm cursor-pointer inline-flex items-center gap-1.5"
+            disabled={confirmDisabled}
+            onClick={() => {
+              if (!confirmDisabled) onConfirm(selectedReason || undefined);
+            }}
+            className="px-4 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-45 disabled:cursor-not-allowed rounded-lg shadow-sm cursor-pointer inline-flex items-center gap-1.5"
           >
             <Trash2 size={13} />
             <span>{confirmLabel}</span>
