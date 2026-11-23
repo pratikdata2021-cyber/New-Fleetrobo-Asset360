@@ -49,7 +49,8 @@ import {
   deriveSimEffectiveInventoryStatus,
   getSimMappingReferences,
   resolveSimComputedAssignment,
-  computeHardwareBindingStatus
+  computeHardwareBindingStatus,
+  computeEffectiveConnectionStatus
 } from '../types/modalMaster';
 import {
   getEnabledModelsForCompanyName,
@@ -124,17 +125,21 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
       if (!selfWriteRef.current) {
         setStoreState(loadModalMasterStore());
       }
+      setStatusTick((t) => t + 1);
     };
+    const handleFocus = () => setStatusTick((t) => t + 1);
     window.addEventListener('fleetrobo:model-access-updated', handleSync);
     window.addEventListener('fleetrobo:modal-store-updated', handleStoreSync);
     window.addEventListener('storage', handleSync);
     window.addEventListener('storage', handleStoreSync);
-    const interval = window.setInterval(() => setStatusTick((t) => t + 1), 60000);
+    window.addEventListener('focus', handleFocus);
+    const interval = window.setInterval(() => setStatusTick((t) => t + 1), 30000);
     return () => {
       window.removeEventListener('fleetrobo:model-access-updated', handleSync);
       window.removeEventListener('fleetrobo:modal-store-updated', handleStoreSync);
       window.removeEventListener('storage', handleSync);
       window.removeEventListener('storage', handleStoreSync);
+      window.removeEventListener('focus', handleFocus);
       window.clearInterval(interval);
     };
   }, []);
@@ -633,7 +638,10 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
         );
         return;
       }
-      if (refs.hasActiveOrScheduledReference && formStatus !== 'Active') {
+      if (
+        refs.hasActiveOrScheduledReference &&
+        (formStatus === 'Retired' || formStatus === 'Inventory')
+      ) {
         setFormError(
           `Cannot set carrier lifecycle to "${formStatus}" while this SIM has an active or scheduled Asset Mapping (${refs.activeOrScheduledConnections.map((c) => c.connectionId || c.id).join(', ') || 'binding'}). End the mapping first.`
         );
@@ -696,7 +704,14 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
         ...prev,
         sims: prev.sims.map((s) => (s.id === editingSim.id ? updatedRecord : s))
       }));
-      showToast(`SIM (${activeIdentifierType}: ${trimmedPrimaryId}) updated.`);
+      const flagsExistingMapping =
+        refs.hasActiveOrScheduledReference &&
+        (formStatus === 'Suspended' || formStatus === 'Inactive');
+      showToast(
+        flagsExistingMapping
+          ? `SIM (${activeIdentifierType}: ${trimmedPrimaryId}) updated (Carrier: ${formStatus}); affected open mappings are flagged Needs Attention.`
+          : `SIM (${activeIdentifierType}: ${trimmedPrimaryId}) updated.`
+      );
     } else {
       const generatedRecordId =
         formSimId.trim() && !store.sims.some((s) => s.id === formSimId.trim())
@@ -1047,7 +1062,12 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
         if (mode === 'update_lifecycle') {
           const nextLifecycle = options?.targetLifecycle;
           if (!nextLifecycle || s.status === nextLifecycle) return s;
-          if (refs.hasActiveOrScheduledReference && nextLifecycle !== 'Active') return s;
+          if (
+            refs.hasActiveOrScheduledReference &&
+            (nextLifecycle === 'Retired' || nextLifecycle === 'Inventory')
+          ) {
+            return s;
+          }
           updatedCount += 1;
           const projectedEff = deriveSimEffectiveInventoryStatus(
             { ...s, status: nextLifecycle },
@@ -1126,7 +1146,15 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
         return s;
       })
     }));
-    showToast(`Bulk operation updated ${updatedCount} eligible SIM(s).`);
+    const flaggedMapped =
+      mode === 'update_lifecycle' &&
+      (options?.targetLifecycle === 'Suspended' || options?.targetLifecycle === 'Inactive') &&
+      Array.from(safeIds).some((id) => getSimMappingReferences(id, store, nowMs).hasActiveOrScheduledReference);
+    showToast(
+      flaggedMapped
+        ? `Bulk operation updated ${updatedCount} eligible SIM(s); affected open mappings are flagged Needs Attention.`
+        : `Bulk operation updated ${updatedCount} eligible SIM(s).`
+    );
   };
 
   // Direct CSV/JSON upload execution (strict tenant/model validation; zero fabricated defaults)
@@ -1430,7 +1458,10 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
   };
 
   // Lifecycle / Effective Inventory pill styling
-  const renderSimStatusBadge = (status: SimLifecycleStatus | EffectiveSimInventoryStatus) => {
+  const renderSimStatusBadge = (
+    status: SimLifecycleStatus | EffectiveSimInventoryStatus,
+    tooltip?: string
+  ) => {
     const map: Record<
       SimLifecycleStatus,
       { bg: string; text: string; border: string; dot: string }
@@ -1469,6 +1500,7 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
     const style = map[status] || map.Inventory;
     return (
       <span
+        title={tooltip}
         className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${style.bg} ${style.text} ${style.border}`}
       >
         <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
@@ -2130,15 +2162,32 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                               );
                             }
                             if (col.key === 'status') {
+                              const statusTooltip = `Carrier lifecycle: ${row.status} · Effective Inventory: ${row.effectiveStatus} · Assignment: ${row.assignmentStatus}${
+                                row.computedAssignment.reason ? ` — ${row.computedAssignment.reason}` : ''
+                              }`;
                               return (
                                 <td key={col.key} className="px-3 py-2.5 whitespace-nowrap">
-                                  {renderSimStatusBadge(row.effectiveStatus)}
+                                  <div className="flex flex-col items-start">
+                                    {renderSimStatusBadge(row.effectiveStatus, statusTooltip)}
+                                    {row.status === 'Inactive' && (
+                                      <span
+                                        title={statusTooltip}
+                                        className="text-[10px] font-medium text-[#5c6b7a] mt-0.5 pl-0.5"
+                                      >
+                                        Carrier: Inactive
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                               );
                             }
                             if (col.key === 'assigned') {
                               return (
-                                <td key={col.key} className="px-3 py-2.5 whitespace-nowrap">
+                                <td
+                                  key={col.key}
+                                  title={row.computedAssignment.reason || undefined}
+                                  className="px-3 py-2.5 whitespace-nowrap"
+                                >
                                   {row.assigned === 'Unassigned' ? (
                                     <span className="text-[#8291a0]">Unassigned</span>
                                   ) : (
@@ -2153,6 +2202,7 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                               return (
                                 <td
                                   key={col.key}
+                                  title={row.computedAssignment.reason || undefined}
                                   className="px-3 py-2.5 font-mono text-[11.5px] text-[#5c6b7a] whitespace-nowrap"
                                 >
                                   {row.connection}
@@ -2783,7 +2833,12 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                     <h2 className="text-[16px] font-bold font-mono text-[#17212b]">
                       {inspectedSim.iccid}
                     </h2>
-                    {renderSimStatusBadge(inspectedSim.effectiveStatus)}
+                    {renderSimStatusBadge(
+                      inspectedSim.effectiveStatus,
+                      `Carrier lifecycle: ${inspectedSim.status} · Effective Inventory: ${inspectedSim.effectiveStatus} · Assignment: ${inspectedSim.assignmentStatus}${
+                        inspectedSim.computedAssignment.reason ? ` — ${inspectedSim.computedAssignment.reason}` : ''
+                      }`
+                    )}
                   </div>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5">
                     {inspectedSim.identifierType || 'ICCID'} · {inspectedSim.operator} ({inspectedSim.plan}) ·{' '}
@@ -2844,6 +2899,18 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
               <div className="flex-1 overflow-y-auto p-6 space-y-5">
                 {inspectorTab === 'overview' && (
                   <>
+                    {inspectedSim.computedAssignment.assignmentStatus === 'Conflict / Needs Attention' &&
+                      inspectedSim.computedAssignment.reason && (
+                        <div className="p-3.5 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-[12px] flex items-start gap-2.5">
+                          <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                          <div>
+                            <div className="font-semibold">Assignment Attention Required</div>
+                            <div className="text-amber-800 mt-0.5">
+                              {inspectedSim.computedAssignment.reason}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     <div className="grid grid-cols-2 gap-3.5 p-4 rounded-xl border border-[#e3e8ee] bg-[#f8fafc]">
                       {[
                         [inspectedSim.identifierType || 'ICCID', inspectedSim.iccid],
@@ -2853,7 +2920,9 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                         ['Plan / package', inspectedSim.plan],
                         ['Form factor', inspectedSim.formFactor],
                         ['Network', inspectedSim.network || '—'],
-                        ['Lifecycle', inspectedSim.status],
+                        ['Carrier lifecycle', inspectedSim.status],
+                        ['Effective Inventory status', inspectedSim.effectiveStatus],
+                        ['Assignment status', inspectedSim.assignmentStatus],
                         ['Assigned to', inspectedSim.assigned],
                         ['Assigned connection', inspectedSim.connection],
                         ['Activation date', inspectedSim.activationDate || '—'],
@@ -2890,27 +2959,35 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                           {inspectedSimRefs.allBindings.slice(0, 32).map((bnd) => {
                             const conn = store.connections.find((c) => c.id === bnd.connectionId);
                             const parentDev = store.devices.find((d) => d.id === bnd.fromHardwareId);
-                            const liveBndStatus = computeHardwareBindingStatus(
+                            const bndRes = computeHardwareBindingStatus(
                               bnd,
                               store.hardwareBindings || [],
                               conn?.members || [],
-                              Date.now()
-                            ).status;
+                              Date.now(),
+                              { connections: store.connections, store }
+                            );
+                            const liveBndStatus = bndRes.status;
                             return (
                               <div
                                 key={bnd.id}
-                                className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between text-[12px]"
+                                title={bndRes.reason || undefined}
+                                className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between gap-2 text-[12px]"
                               >
-                                <div>
+                                <div className="min-w-0">
                                   <div className="font-semibold text-[#17212b]">
                                     {conn?.connectionId || bnd.connectionId} · {parentDev?.name || bnd.fromHardwareId}
                                   </div>
                                   <div className="text-[11px] text-[#5c6b7a]">
                                     Effective: {bnd.effectiveStartAt} → {bnd.endedAt || bnd.effectiveEndAt || 'Open'}
                                   </div>
+                                  {liveBndStatus === 'Conflict' && bndRes.reason && (
+                                    <div className="text-[11px] text-amber-800 mt-0.5">
+                                      {bndRes.reason}
+                                    </div>
+                                  )}
                                 </div>
                                 <span
-                                  className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                                  className={`px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${
                                     liveBndStatus === 'Active'
                                       ? 'bg-[#eaf8f0] text-[#0f7b4b]'
                                       : liveBndStatus === 'Scheduled'
@@ -2926,24 +3003,49 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                             );
                           })}
                           {inspectedSimRefs.allBindings.length === 0 &&
-                            inspectedSimRefs.allSimAssignments.slice(0, 32).map((ev) => (
-                              <div
-                                key={ev.id}
-                                className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between text-[12px]"
-                              >
-                                <div>
-                                  <div className="font-semibold text-[#17212b]">
-                                    {ev.connectionId} · {ev.hardwareName}
+                            inspectedSimRefs.allSimAssignments.slice(0, 32).map((ev) => {
+                              const todayStr = new Date().toISOString().slice(0, 10);
+                              const evInvalid = Boolean(ev.start && ev.end && ev.end < ev.start);
+                              const evEnded = !evInvalid && Boolean(ev.end && ev.end < todayStr);
+                              const evStatus = evEnded
+                                ? 'Historical/Ended'
+                                : inspectedSim.computedAssignment.assignmentStatus;
+                              return (
+                                <div
+                                  key={ev.id}
+                                  title={inspectedSim.computedAssignment.reason || undefined}
+                                  className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between gap-2 text-[12px]"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="font-semibold text-[#17212b]">
+                                      {ev.connectionId} · {ev.hardwareName}
+                                    </div>
+                                    <div className="text-[11px] text-[#5c6b7a]">
+                                      Effective: {ev.start} → {ev.end || 'Open'}
+                                    </div>
+                                    {evStatus === 'Conflict / Needs Attention' &&
+                                      inspectedSim.computedAssignment.reason && (
+                                        <div className="text-[11px] text-amber-800 mt-0.5">
+                                          {inspectedSim.computedAssignment.reason}
+                                        </div>
+                                      )}
                                   </div>
-                                  <div className="text-[11px] text-[#5c6b7a]">
-                                    Effective: {ev.start} → {ev.end || 'Open'}
-                                  </div>
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${
+                                      evStatus === 'Active Mapping'
+                                        ? 'bg-[#eaf8f0] text-[#0f7b4b]'
+                                        : evStatus === 'Scheduled'
+                                        ? 'bg-sky-50 text-sky-700'
+                                        : evStatus === 'Conflict / Needs Attention'
+                                        ? 'bg-amber-50 text-amber-800'
+                                        : 'bg-slate-100 text-slate-600'
+                                    }`}
+                                  >
+                                    {evEnded ? 'Ended' : evStatus}
+                                  </span>
                                 </div>
-                                <span className="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-600">
-                                  {ev.end ? 'Ended' : inspectedSim.computedAssignment.assignmentStatus}
-                                </span>
-                              </div>
-                            ))}
+                              );
+                            })}
                         </div>
                       )}
                     </div>
@@ -2961,33 +3063,40 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                         const peerBindings = inspectedSimRefs.allBindings.filter(
                           (b) => b.connectionId === conn.id
                         );
+                        const effConn = computeEffectiveConnectionStatus(conn, store, Date.now());
                         return (
                           <div
                             key={conn.id}
                             className="p-3.5 rounded-lg border border-[#e3e8ee] bg-white space-y-1.5 text-[12px]"
                           >
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-2">
                               <span className="font-bold font-mono text-[#17212b]">
                                 {conn.connectionId} · {conn.name}
                               </span>
                               <span
-                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                                  conn.status === 'Active'
+                                title={effConn.reason || undefined}
+                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${
+                                  effConn.status === 'Active'
                                     ? 'bg-[#eaf8f0] text-[#0f7b4b]'
-                                    : conn.status === 'Scheduled'
+                                    : effConn.status === 'Scheduled'
                                     ? 'bg-sky-50 text-sky-700'
-                                    : conn.status === 'Needs Attention'
+                                    : effConn.status === 'Needs Attention'
                                     ? 'bg-amber-50 text-amber-800'
                                     : 'bg-slate-100 text-slate-600'
                                 }`}
                               >
-                                {conn.status}
+                                {effConn.status}
                               </span>
                             </div>
                             <div className="text-[#5c6b7a]">
                               Client: <strong className="text-[#17212b]">{conn.companyName}</strong> · Pairwise bindings:{' '}
                               <strong className="text-[#17212b]">{peerBindings.length}</strong>
                             </div>
+                            {effConn.status === 'Needs Attention' && effConn.reason && (
+                              <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5">
+                                {effConn.reason}
+                              </div>
+                            )}
                           </div>
                         );
                       })
@@ -3043,7 +3152,8 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
                               bnd,
                               store.hardwareBindings || [],
                               conn?.members || [],
-                              Date.now()
+                              Date.now(),
+                              { connections: store.connections, store }
                             ).status;
                             return (
                               <div

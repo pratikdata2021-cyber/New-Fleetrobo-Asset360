@@ -234,13 +234,16 @@ export const SimBulkDrawer: React.FC<SimBulkDrawerProps> = ({
             targetOutcomeLabel: 'Skipped'
           };
         }
-        if (refs.hasActiveOrScheduledReference && targetLifecycle !== 'Active') {
+        if (
+          refs.hasActiveOrScheduledReference &&
+          (targetLifecycle === 'Retired' || targetLifecycle === 'Inventory')
+        ) {
           return {
             record: rec,
             effectiveStatus: eff,
             refs,
             eligible: false,
-            reason: `Active/Scheduled SIM mapping (${activeConnLabels || 'Asset Mapping'}); resolve mapping before setting carrier to ${targetLifecycle}`,
+            reason: `Active/Scheduled SIM mapping (${activeConnLabels || 'Asset Mapping'}); end mapping before setting carrier to ${targetLifecycle}`,
             targetOutcomeLabel: 'Protected'
           };
         }
@@ -249,13 +252,18 @@ export const SimBulkDrawer: React.FC<SimBulkDrawerProps> = ({
           store,
           nowMs
         );
+        const flagsExisting =
+          refs.hasActiveOrScheduledReference &&
+          (targetLifecycle === 'Suspended' || targetLifecycle === 'Inactive');
         return {
           record: rec,
           effectiveStatus: eff,
           refs,
           eligible: true,
           reason: '',
-          targetOutcomeLabel: `Carrier: ${targetLifecycle} · Eff: ${projectedEff}`
+          targetOutcomeLabel: flagsExisting
+            ? `Carrier: ${targetLifecycle} · Eff: ${projectedEff} (flags mapping)`
+            : `Carrier: ${targetLifecycle} · Eff: ${projectedEff}`
         };
       }
 
@@ -728,7 +736,7 @@ export const SimBulkDrawer: React.FC<SimBulkDrawerProps> = ({
                   ))}
                 </select>
                 <p className="text-[11px] text-slate-500">
-                  Updates stored carrier service lifecycle only. Unassigned SIMs set to carrier <strong>Active</strong> still display effective inventory status <strong>Inventory</strong> until mapped.
+                  Updates stored carrier service lifecycle only (retaining <strong>Inactive</strong> vs <strong>Suspended</strong> distinctly). Setting a mapped SIM to <strong>Suspended</strong> or <strong>Inactive</strong> flags affected open mappings as <strong>Needs Attention</strong>; unassigned SIMs set to carrier <strong>Active</strong> stay <strong>Inventory</strong> until mapped.
                 </p>
               </div>
             )}
@@ -790,7 +798,7 @@ export const SimBulkDrawer: React.FC<SimBulkDrawerProps> = ({
             <div className="flex items-start gap-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px] text-slate-600">
               <Info className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
               <span>
-                Effective inventory <strong>Active</strong> requires both carrier lifecycle <strong>Active</strong> and a valid current hardware mapping. Unassigned SIMs stay <strong>Inventory</strong>.
+                Effective inventory <strong>Active</strong> requires both carrier lifecycle <strong>Active</strong> and a valid current hardware mapping. Carrier <strong>Inactive</strong> and <strong>Suspended</strong> both derive effective inventory <strong>Suspended</strong> while preserving the underlying carrier state.
               </span>
             </div>
           </div>

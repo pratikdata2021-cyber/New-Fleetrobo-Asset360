@@ -41,12 +41,15 @@ import {
   HardwareLifecycleStatus,
   EffectiveDeviceStatus,
   DeviceMappingFilterStatus,
+  HardwareMappingDetails,
   DEVICE_CATALOGUE,
   DEVICE_COLUMNS,
   MODAL_FIELD_TOOLTIPS,
   SavedModalView,
   deriveDeviceStatus,
   deriveDeviceMappingFilterStatus,
+  deriveHardwareMappingDetails,
+  computeEffectiveConnectionStatus,
   getDeviceMappingReferences,
   loadModalMasterStore,
   saveModalMasterStore,
@@ -138,16 +141,19 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       }
       setStatusTick((t) => t + 1);
     };
+    const handleFocus = () => setStatusTick((t) => t + 1);
     window.addEventListener('fleetrobo:model-access-updated', handleSync);
     window.addEventListener('fleetrobo:modal-store-updated', handleStoreSync);
     window.addEventListener('storage', handleSync);
     window.addEventListener('storage', handleStoreSync);
+    window.addEventListener('focus', handleFocus);
     const timer = window.setInterval(() => setStatusTick((t) => t + 1), 30000);
     return () => {
       window.removeEventListener('fleetrobo:model-access-updated', handleSync);
       window.removeEventListener('fleetrobo:modal-store-updated', handleStoreSync);
       window.removeEventListener('storage', handleSync);
       window.removeEventListener('storage', handleStoreSync);
+      window.removeEventListener('focus', handleFocus);
       window.clearInterval(timer);
     };
   }, []);
@@ -183,16 +189,23 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   }, [store.devices, currentCompany, isPlatformAdmin, filterCompany]);
 
   // Derived effective Device status & mapping filter status
-  const { effectiveStatusById, mappingStatusById } = useMemo(() => {
+  const { effectiveStatusById, mappingStatusById, mappingDetailsById } = useMemo(() => {
     void statusTick;
     const nowMs = Date.now();
     const statusMap = new Map<string, EffectiveDeviceStatus>();
     const mappingMap = new Map<string, DeviceMappingFilterStatus>();
+    const detailsMap = new Map<string, HardwareMappingDetails>();
     store.devices.forEach((d) => {
       statusMap.set(d.id, deriveDeviceStatus(d, store, nowMs));
-      mappingMap.set(d.id, deriveDeviceMappingFilterStatus(d.id, store, nowMs));
+      const details = deriveHardwareMappingDetails(d.id, store, nowMs);
+      detailsMap.set(d.id, details);
+      mappingMap.set(d.id, details.mappingStatus);
     });
-    return { effectiveStatusById: statusMap, mappingStatusById: mappingMap };
+    return {
+      effectiveStatusById: statusMap,
+      mappingStatusById: mappingMap,
+      mappingDetailsById: detailsMap
+    };
   }, [store, statusTick]);
 
   const getEffectiveStatus = (device: DeviceRecord): EffectiveDeviceStatus =>
@@ -1245,7 +1258,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
         const eff = deriveDeviceStatus(d, prev, nowMs);
 
         if (mode === 'send_maintenance') {
-          if (eff === 'Decommissioned' || eff === 'In Maintenance' || refs.hasActiveOrScheduledReference) {
+          if (eff === 'Decommissioned' || eff === 'In Maintenance') {
             return d;
           }
           return {
@@ -1293,7 +1306,14 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     }));
 
     if (mode === 'send_maintenance') {
-      showToast(`Moved ${safeIds.size} device(s) to In Maintenance.`);
+      const flaggedMapped = Array.from(safeIds).some(
+        (id) => getDeviceMappingReferences(id, store, nowMs).hasActiveOrScheduledReference
+      );
+      showToast(
+        flaggedMapped
+          ? `Moved ${safeIds.size} device(s) to In Maintenance; affected open mappings are flagged Needs Attention.`
+          : `Moved ${safeIds.size} device(s) to In Maintenance.`
+      );
     } else if (mode === 'return_service') {
       showToast(`Returned ${safeIds.size} device(s) to service and recalculated status.`);
     } else if (mode === 'update_location') {
@@ -1599,7 +1619,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   };
 
   // Lifecycle pill styling matching specification
-  const renderLifecycleBadge = (status: HardwareLifecycleStatus) => {
+  const renderLifecycleBadge = (status: HardwareLifecycleStatus, tooltip?: string) => {
     const map: Record<
       HardwareLifecycleStatus,
       { bg: string; text: string; border: string; dot: string }
@@ -1644,6 +1664,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     const style = map[status] || map.Inventory;
     return (
       <span
+        title={tooltip}
         className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${style.bg} ${style.text} ${style.border}`}
       >
         <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
@@ -1656,13 +1677,8 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
   // Linked connections for inspected device
   const inspectedConnections = useMemo(() => {
     if (!inspectedDevice) return [];
-    return store.connections.filter(
-      (c) =>
-        c.memberIds?.includes(inspectedDevice.id) ||
-        c.hardwareId === inspectedDevice.id ||
-        c.parentId === inspectedDevice.id
-    );
-  }, [inspectedDevice, store.connections]);
+    return getDeviceMappingReferences(inspectedDevice.id, store).allConnections;
+  }, [inspectedDevice, store]);
 
   return (
     <div className="h-full flex flex-col bg-[#f5f7fa] text-[#17212b] overflow-hidden relative">
@@ -2239,9 +2255,13 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                             );
                           }
                           if (col.key === 'hardwareLifecycle') {
+                            const mapDetails = mappingDetailsById.get(row.id);
+                            const badgeTip = mapDetails
+                              ? `Mapping: ${mapDetails.mappingStatus}${mapDetails.reason ? ` — ${mapDetails.reason}` : ''}`
+                              : undefined;
                             return (
                               <td key={col.key} className="px-3 py-2.5 whitespace-nowrap">
-                                {renderLifecycleBadge(getEffectiveStatus(row))}
+                                {renderLifecycleBadge(getEffectiveStatus(row), badgeTip)}
                               </td>
                             );
                           }
@@ -3236,6 +3256,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                     <h2 className="text-[16px] font-bold text-[#17212b]">
                       {inspectedDevice.name}
                     </h2>
+                    {renderLifecycleBadge(getEffectiveStatus(inspectedDevice))}
                   </div>
                   <p className="text-[12px] text-[#5c6b7a] mt-0.5 font-mono">
                     {inspectedDevice.deviceId} · {inspectedDevice.kind} · {inspectedDevice.manufacturer}{' '}
@@ -3294,8 +3315,23 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
               </div>
 
               <div className="flex-1 overflow-y-auto p-6 space-y-5">
+                {(() => {
+                  const inspectedMapDetails = mappingDetailsById.get(inspectedDevice.id);
+                  const inspectedMapStatus = inspectedMapDetails?.mappingStatus || 'Unmapped';
+                  const conflictReason = inspectedMapDetails?.reason;
+                  return (
+                    <>
                 {inspectorTab === 'overview' && (
                   <>
+                    {inspectedMapStatus === 'Needs Attention' && conflictReason && (
+                      <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[12px] flex items-start gap-2">
+                        <AlertTriangle size={15} className="text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <div className="font-semibold">Mapping Attention Required</div>
+                          <div className="text-[11px] mt-0.5">{conflictReason}</div>
+                        </div>
+                      </div>
+                    )}
                     <div className="grid grid-cols-2 gap-3.5 p-4 rounded-xl border border-[#e3e8ee] bg-[#f8fafc]">
                       {[
                         ['Device name', inspectedDevice.name],
@@ -3305,6 +3341,8 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                         ['Model', inspectedDevice.modelText],
                         ['Mode', inspectedDevice.mode],
                         ['Platform protocol', inspectedDevice.platformProtocol || '—'],
+                        ['Device status', getEffectiveStatus(inspectedDevice)],
+                        ['Mapping status', inspectedMapStatus],
                         ...(inspectedDevice.imei ? [['IMEI', inspectedDevice.imei]] : []),
                         ...(inspectedDevice.serial ? [['Serial number', inspectedDevice.serial]] : []),
                         ...(!inspectedDevice.imei && !inspectedDevice.serial
@@ -3349,10 +3387,13 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          {inspectedConnections.slice(0, 32).map((conn) => (
+                          {inspectedConnections.slice(0, 32).map((conn) => {
+                            const effConn = computeEffectiveConnectionStatus(conn, store, Date.now());
+                            return (
                             <div
                               key={conn.id}
-                              className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between text-[12px]"
+                              className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between gap-2 text-[12px]"
+                              title={effConn.reason}
                             >
                                <div>
                                  <div className="font-semibold text-[#17212b]">
@@ -3361,18 +3402,26 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                                  <div className="text-[11px] text-[#5c6b7a]">
                                    Members: {conn.members?.length || 1} unit(s) · Updated: {conn.updatedAt?.slice(0, 10)}
                                  </div>
+                                 {effConn.status === 'Needs Attention' && effConn.reason && (
+                                   <div className="text-[11px] text-amber-800 mt-0.5">{effConn.reason}</div>
+                                 )}
                                </div>
                                <span
-                                 className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                                   conn.status === 'Active'
+                                 className={`px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${
+                                   effConn.status === 'Active'
                                      ? 'bg-[#eaf8f0] text-[#0f7b4b]'
+                                     : effConn.status === 'Scheduled'
+                                     ? 'bg-sky-50 text-sky-700'
+                                     : effConn.status === 'Needs Attention'
+                                     ? 'bg-amber-50 text-amber-800'
                                      : 'bg-slate-100 text-slate-600'
                                  }`}
                                >
-                                 {conn.status}
+                                 {effConn.status}
                                </span>
                              </div>
-                           ))}
+                            );
+                          })}
                          </div>
                        )}
                      </div>
@@ -3381,6 +3430,15 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
 
                  {inspectorTab === 'linked' && (
                    <div className="space-y-3">
+                     {inspectedMapStatus === 'Needs Attention' && conflictReason && (
+                       <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[12px] flex items-start gap-2">
+                         <AlertTriangle size={15} className="text-amber-600 shrink-0 mt-0.5" />
+                         <div>
+                           <div className="font-semibold">Mapping Attention Required</div>
+                           <div className="text-[11px] mt-0.5">{conflictReason}</div>
+                         </div>
+                       </div>
+                     )}
                      <div className="text-[12px] text-[#5c6b7a]">
                        Showing all Modal Mapping connections where{' '}
                        <strong className="text-[#17212b]">{inspectedDevice.deviceId}</strong> is a member or bound endpoint.
@@ -3391,6 +3449,7 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                        </div>
                      ) : (
                        inspectedConnections.map((conn) => {
+                         const effConn = computeEffectiveConnectionStatus(conn, store, Date.now());
                          const peerBindings = (store.hardwareBindings || []).filter(
                            (b) =>
                              b.connectionId === conn.id &&
@@ -3401,18 +3460,22 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                              key={conn.id}
                              className="p-3.5 rounded-lg border border-[#e3e8ee] bg-white space-y-1.5 text-[12px]"
                            >
-                             <div className="flex items-center justify-between">
+                             <div className="flex items-center justify-between gap-2">
                                <span className="font-bold text-[#17212b] font-mono">
                                  {conn.connectionId} · {conn.name}
                                </span>
                                <span
-                                 className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                                   conn.status === 'Active'
+                                 className={`px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${
+                                   effConn.status === 'Active'
                                      ? 'bg-[#eaf8f0] text-[#0f7b4b]'
+                                     : effConn.status === 'Scheduled'
+                                     ? 'bg-sky-50 text-sky-700'
+                                     : effConn.status === 'Needs Attention'
+                                     ? 'bg-amber-50 text-amber-800'
                                      : 'bg-slate-100 text-slate-600'
                                  }`}
                                >
-                                 {conn.status}
+                                 {effConn.status}
                                </span>
                              </div>
                              <div className="text-[#5c6b7a]">
@@ -3420,12 +3483,20 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                                <strong className="text-[#17212b]">{conn.members?.length || 1}</strong> · Pairwise bindings:{' '}
                                <strong className="text-[#17212b]">{peerBindings.length}</strong>
                              </div>
+                             {effConn.status === 'Needs Attention' && effConn.reason && (
+                               <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                                 {effConn.reason}
+                               </div>
+                             )}
                            </div>
                          );
                        })
                      )}
                   </div>
                 )}
+                    </>
+                  );
+                })()}
 
                 {inspectorTab === 'activity' && (
                   <div className="space-y-3">

@@ -107,7 +107,7 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
     );
   };
 
-  const bindingStatusBadge = (st: HardwareBindingStatus) => {
+  const bindingStatusBadge = (st: HardwareBindingStatus, reason?: string) => {
     const map: Record<HardwareBindingStatus, string> = {
       Active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
       Scheduled: 'bg-sky-50 text-sky-700 border-sky-200',
@@ -116,13 +116,16 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
       Canceled: 'bg-zinc-100 text-zinc-500 border-zinc-200'
     };
     return (
-      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${map[st]}`}>
+      <span
+        title={reason || undefined}
+        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${map[st]}`}
+      >
         {st}
       </span>
     );
   };
 
-  const allocStatusBadge = (st: ResourceAllocationStatus) => {
+  const allocStatusBadge = (st: ResourceAllocationStatus, reason?: string) => {
     const map: Record<ResourceAllocationStatus, string> = {
       Active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
       Scheduled: 'bg-sky-50 text-sky-700 border-sky-200',
@@ -130,7 +133,10 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
       Conflict: 'bg-rose-50 text-rose-700 border-rose-200'
     };
     return (
-      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${map[st]}`}>
+      <span
+        title={reason || undefined}
+        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${map[st]}`}
+      >
         {st}
       </span>
     );
@@ -387,7 +393,10 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
                       connBindings.map((b) => {
                         const fromMem = memberMap.get(b.fromHardwareId);
                         const toMem = memberMap.get(b.toHardwareId);
-                        const st = computeHardwareBindingStatus(b, allBindings, liveMembers);
+                        const st = computeHardwareBindingStatus(b, allBindings, liveMembers, Date.now(), {
+                          connections: resolvedStore.connections,
+                          store: resolvedStore
+                        });
                         return (
                           <tr key={b.id} className="hover:bg-slate-50/60">
                             <td className="px-3 py-2.5 font-mono font-semibold text-slate-800">{b.id}</td>
@@ -410,7 +419,7 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
                                 ? formatDateTimeWithTz(b.endedAt || b.effectiveEndAt, b.timezone, true)
                                 : 'Open-ended'}
                             </td>
-                            <td className="px-3 py-2.5">{bindingStatusBadge(st.status)}</td>
+                            <td className="px-3 py-2.5">{bindingStatusBadge(st.status, st.reason)}</td>
                             {canEdit && (
                               <td className="px-3 py-2.5 text-right">
                                 {st.status !== 'Ended' && st.status !== 'Canceled' ? (
@@ -495,7 +504,7 @@ export const ConnectionDetailsDrawer: React.FC<ConnectionDetailsDrawerProps> = (
                                 ? formatDateTimeWithTz(a.endedAt || a.effectiveEndAt, a.timezone)
                                 : 'Open-ended'}
                             </td>
-                            <td className="px-3 py-2.5">{allocStatusBadge(st.status)}</td>
+                            <td className="px-3 py-2.5">{allocStatusBadge(st.status, st.reason)}</td>
                           </tr>
                         );
                       })

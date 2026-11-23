@@ -1410,8 +1410,19 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
     const activeBindings = draftBindings.filter(
       (b) => !b.endedAt && b.statusOverride !== 'Canceled'
     );
+    const liveHwStore = {
+      connections: store.connections,
+      hardwareBindings: allGlobalBindings,
+      devices: localDevices,
+      sensors: localSensors,
+      sims: localSims
+    };
     const bindingStatuses = activeBindings.map(
-      (b) => computeHardwareBindingStatus(b, allGlobalBindings, members, nowMs).status
+      (b) =>
+        computeHardwareBindingStatus(b, allGlobalBindings, members, nowMs, {
+          connections: store.connections,
+          store: liveHwStore
+        }).status
     );
 
     if (bindingStatuses.includes('Conflict')) return 'Needs Attention';
@@ -1490,7 +1501,10 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
     });
     const otherAllocs = store.resourceAllocations.filter((a) => a.connectionId !== connId);
     const allocStatuses = allocCandidates.map((a) =>
-      computeResourceAllocationStatus(a, [...otherAllocs, ...allocCandidates], nowMs).status
+      computeResourceAllocationStatus(a, [...otherAllocs, ...allocCandidates], nowMs, {
+        connections: store.connections,
+        store: liveHwStore
+      }).status
     );
     if (allocStatuses.includes('Conflict')) return 'Needs Attention';
 

@@ -205,6 +205,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   const [vendors, setVendors] = useState<VendorRecord[]>(() => loadCanonicalVendors());
   const [places, setPlaces] = useState<PlaceRecord[]>(() => loadMasterPlaces());
   const [fleets] = useState<Fleet[]>(() => INITIAL_DEMO_FLEETS);
+  const [statusTick, setStatusTick] = useState(0);
 
   useEffect(() => {
     const syncRes = () => {
@@ -212,14 +213,22 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       setDrivers(loadDriverMasterStore());
       setVendors(loadCanonicalVendors());
       setPlaces(loadMasterPlaces());
+      setStatusTick((t) => t + 1);
     };
+    const bumpTick = () => setStatusTick((t) => t + 1);
     window.addEventListener('fleetrobo:resources-updated', syncRes);
     window.addEventListener('fleetrobo:vendors-updated', syncRes);
+    window.addEventListener('fleetrobo:modal-store-updated', bumpTick);
     window.addEventListener('storage', syncRes);
+    window.addEventListener('focus', bumpTick);
+    const interval = window.setInterval(bumpTick, 30000);
     return () => {
       window.removeEventListener('fleetrobo:resources-updated', syncRes);
       window.removeEventListener('fleetrobo:vendors-updated', syncRes);
+      window.removeEventListener('fleetrobo:modal-store-updated', bumpTick);
       window.removeEventListener('storage', syncRes);
+      window.removeEventListener('focus', bumpTick);
+      window.clearInterval(interval);
     };
   }, []);
 
@@ -346,6 +355,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
 
   // Enrich allocations with derived status, scoped hardware & bindings
   const enrichedAllocations = useMemo(() => {
+    void statusTick;
     const nowMs = Date.now();
     const hasScopedCompany = Boolean(activeCompanyScope && activeCompanyScope !== 'All Clients');
     const allocContext = { connections: store.connections, store };
@@ -383,7 +393,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
           vehicleDisplayName: a.resourceType === 'Vehicle' ? a.resourceDisplayName : '—'
         };
       });
-  }, [store, connectionsMap, bindingsByConn, activeCompanyScope]);
+  }, [store, connectionsMap, bindingsByConn, activeCompanyScope, statusTick]);
 
   const organizationOptions = useMemo(() => {
     const set = new Set<string>();
@@ -1651,7 +1661,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
     showToast(`Saved view "${view.name}".`);
   };
 
-  const renderStatusPill = (status: ResourceAllocationStatus) => {
+  const renderStatusPill = (status: ResourceAllocationStatus, reason?: string) => {
     const styles: Record<ResourceAllocationStatus, string> = {
       Active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
       Scheduled: 'bg-sky-50 text-sky-700 border-sky-200',
@@ -1659,7 +1669,10 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       Conflict: 'bg-rose-50 text-rose-700 border-rose-200'
     };
     return (
-      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${styles[status]}`}>
+      <span
+        title={reason || undefined}
+        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border ${styles[status]}`}
+      >
         <span
           className={`w-1.5 h-1.5 rounded-full ${
             status === 'Active'
@@ -2130,7 +2143,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                               );
                               break;
                             case 'status':
-                              cell = renderStatusPill(row.computedStatus);
+                              cell = renderStatusPill(row.computedStatus, row.statusReason);
                               break;
                             case 'companyName':
                               cell = (

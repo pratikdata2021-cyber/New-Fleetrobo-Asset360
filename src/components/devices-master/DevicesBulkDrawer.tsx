@@ -124,23 +124,15 @@ export const DevicesBulkDrawer: React.FC<DevicesBulkDrawerProps> = ({
             targetOutcomeLabel: 'Skipped'
           };
         }
-        if (refs.hasActiveOrScheduledReference) {
-          return {
-            record: rec,
-            effectiveStatus: eff,
-            refs,
-            eligible: false,
-            reason: `Linked to Active/Scheduled mapping (${activeConnLabels || 'Asset Mapping'}); resolve mapping first`,
-            targetOutcomeLabel: 'Protected'
-          };
-        }
         return {
           record: rec,
           effectiveStatus: eff,
           refs,
           eligible: true,
           reason: '',
-          targetOutcomeLabel: '→ In Maintenance'
+          targetOutcomeLabel: refs.hasActiveOrScheduledReference
+            ? '→ In Maintenance (flags mapping)'
+            : '→ In Maintenance'
         };
       }
 

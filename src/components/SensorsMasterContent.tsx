@@ -32,6 +32,7 @@ import {
   SensorCategory,
   EffectiveSensorStatus,
   SensorMappingFilterStatus,
+  HardwareMappingDetails,
   SENSOR_COLUMNS,
   MODAL_FIELD_TOOLTIPS,
   SavedModalView,
@@ -44,6 +45,8 @@ import {
   parseCsvLine,
   deriveSensorStatus,
   deriveSensorMappingFilterStatus,
+  deriveHardwareMappingDetails,
+  computeEffectiveConnectionStatus,
   getSensorMappingReferences,
   SENSOR_EFFECTIVE_STATUS_OPTIONS
 } from '../types/modalMaster';
@@ -133,16 +136,19 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
       }
       setStatusTick((t) => t + 1);
     };
+    const handleFocus = () => setStatusTick((t) => t + 1);
     window.addEventListener('fleetrobo:model-access-updated', handleSync);
     window.addEventListener('fleetrobo:modal-store-updated', handleStoreSync);
     window.addEventListener('storage', handleSync);
     window.addEventListener('storage', handleStoreSync);
-    const timer = window.setInterval(() => setStatusTick((t) => t + 1), 60000);
+    window.addEventListener('focus', handleFocus);
+    const timer = window.setInterval(() => setStatusTick((t) => t + 1), 30000);
     return () => {
       window.removeEventListener('fleetrobo:model-access-updated', handleSync);
       window.removeEventListener('fleetrobo:modal-store-updated', handleStoreSync);
       window.removeEventListener('storage', handleSync);
       window.removeEventListener('storage', handleStoreSync);
+      window.removeEventListener('focus', handleFocus);
       window.clearInterval(timer);
     };
   }, []);
@@ -178,16 +184,23 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
   }, [store.sensors, currentCompany, isPlatformAdmin, filterCompany]);
 
   // Derived effective Sensor status & mapping filter status
-  const { effectiveStatusById, mappingStatusById } = useMemo(() => {
+  const { effectiveStatusById, mappingStatusById, mappingDetailsById } = useMemo(() => {
     void statusTick;
     const nowMs = Date.now();
     const statusMap = new Map<string, EffectiveSensorStatus>();
     const mappingMap = new Map<string, SensorMappingFilterStatus>();
+    const detailsMap = new Map<string, HardwareMappingDetails>();
     store.sensors.forEach((s) => {
       statusMap.set(s.id, deriveSensorStatus(s, store, nowMs));
-      mappingMap.set(s.id, deriveSensorMappingFilterStatus(s.id, store, nowMs));
+      const details = deriveHardwareMappingDetails(s.id, store, nowMs);
+      detailsMap.set(s.id, details);
+      mappingMap.set(s.id, details.mappingStatus);
     });
-    return { effectiveStatusById: statusMap, mappingStatusById: mappingMap };
+    return {
+      effectiveStatusById: statusMap,
+      mappingStatusById: mappingMap,
+      mappingDetailsById: detailsMap
+    };
   }, [store, statusTick]);
 
   const getEffectiveStatus = (sensor: SensorRecord): EffectiveSensorStatus =>
@@ -995,7 +1008,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
         const eff = deriveSensorStatus(s, prev, nowMs);
 
         if (mode === 'send_maintenance') {
-          if (eff === 'Decommissioned' || eff === 'In Maintenance' || refs.hasActiveOrScheduledReference) {
+          if (eff === 'Decommissioned' || eff === 'In Maintenance') {
             return s;
           }
           updatedCount += 1;
@@ -1079,7 +1092,14 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     }));
 
     if (mode === 'send_maintenance') {
-      showToast(`Moved ${updatedCount} sensor(s) to In Maintenance.`);
+      const flaggedMapped = Array.from(safeIds).some(
+        (id) => getSensorMappingReferences(id, store, nowMs).hasActiveOrScheduledReference
+      );
+      showToast(
+        flaggedMapped
+          ? `Moved ${updatedCount} sensor(s) to In Maintenance; affected open mappings are flagged Needs Attention.`
+          : `Moved ${updatedCount} sensor(s) to In Maintenance.`
+      );
     } else if (mode === 'return_service') {
       showToast(`Returned ${updatedCount} sensor(s) to service and recalculated status.`);
     } else if (mode === 'update_location') {
@@ -1356,7 +1376,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
   };
 
   // Lifecycle pill styling (4 effective statuses only)
-  const renderLifecycleBadge = (status: EffectiveSensorStatus) => {
+  const renderLifecycleBadge = (status: EffectiveSensorStatus, tooltip?: string) => {
     const map: Record<
       EffectiveSensorStatus,
       { bg: string; text: string; border: string; dot: string }
@@ -1389,6 +1409,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
     const style = map[status] || map.Inventory;
     return (
       <span
+        title={tooltip}
         className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${style.bg} ${style.text} ${style.border}`}
       >
         <span className={`w-1.5 h-1.5 rounded-full ${style.dot}`} />
@@ -2014,9 +2035,13 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                             );
                           }
                           if (col.key === 'hardwareLifecycle') {
+                            const mapDetails = mappingDetailsById.get(row.id);
+                            const badgeTip = mapDetails
+                              ? `Mapping: ${mapDetails.mappingStatus}${mapDetails.reason ? ` — ${mapDetails.reason}` : ''}`
+                              : undefined;
                             return (
                               <td key={col.key} className="px-3 py-2.5 whitespace-nowrap">
-                                {renderLifecycleBadge(getEffectiveStatus(row))}
+                                {renderLifecycleBadge(getEffectiveStatus(row), badgeTip)}
                               </td>
                             );
                           }
@@ -2654,8 +2679,23 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
               </div>
 
               <div className="flex-1 overflow-y-auto p-6 space-y-5">
+                {(() => {
+                  const inspectedMapDetails = mappingDetailsById.get(inspectedSensor.id);
+                  const inspectedMapStatus = inspectedMapDetails?.mappingStatus || 'Unmapped';
+                  const conflictReason = inspectedMapDetails?.reason;
+                  return (
+                    <>
                 {inspectorTab === 'overview' && (
                   <>
+                    {inspectedMapStatus === 'Needs Attention' && conflictReason && (
+                      <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[12px] flex items-start gap-2">
+                        <AlertTriangle size={15} className="text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <div className="font-semibold">Mapping Attention Required</div>
+                          <div className="text-[11px] mt-0.5">{conflictReason}</div>
+                        </div>
+                      </div>
+                    )}
                     <div className="grid grid-cols-2 gap-3.5 p-4 rounded-xl border border-[#e3e8ee] bg-[#f8fafc]">
                       {[
                         ['Sensor name', inspectedSensor.name],
@@ -2670,7 +2710,7 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                         ['Measurement unit', inspectedSensor.measurementUnit || '—'],
                         ['Range', inspectedSensor.measurementRange || '—'],
                         ['Sensor status', getEffectiveStatus(inspectedSensor)],
-                        ['Mapping status', mappingStatusById.get(inspectedSensor.id) || 'Unmapped'],
+                        ['Mapping status', inspectedMapStatus],
                         ['Registered', inspectedSensor.registeredAt],
                         ['Updated', inspectedSensor.updatedAt]
                       ].map(([k, v]) => (
@@ -2718,10 +2758,13 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                         </div>
                       ) : (
                         <div className="space-y-2">
-                          {inspectedConnections.slice(0, 32).map((conn) => (
+                          {inspectedConnections.slice(0, 32).map((conn) => {
+                            const effConn = computeEffectiveConnectionStatus(conn, store, Date.now());
+                            return (
                             <div
                               key={conn.id}
-                              className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between text-[12px]"
+                              className="p-3 rounded-lg border border-[#e3e8ee] flex items-center justify-between gap-2 text-[12px]"
+                              title={effConn.reason}
                             >
                               <div>
                                 <div className="font-semibold text-[#17212b]">
@@ -2730,20 +2773,26 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                                 <div className="text-[11px] text-[#5c6b7a]">
                                   Client: {conn.companyName} · Members: {conn.members?.length || 1}
                                 </div>
+                                {effConn.status === 'Needs Attention' && effConn.reason && (
+                                  <div className="text-[11px] text-amber-800 mt-0.5">{effConn.reason}</div>
+                                )}
                               </div>
                               <span
-                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                                  conn.status === 'Active'
+                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${
+                                  effConn.status === 'Active'
                                     ? 'bg-[#eaf8f0] text-[#0f7b4b]'
-                                    : conn.status === 'Scheduled'
+                                    : effConn.status === 'Scheduled'
                                     ? 'bg-sky-50 text-sky-700'
+                                    : effConn.status === 'Needs Attention'
+                                    ? 'bg-amber-50 text-amber-800'
                                     : 'bg-slate-100 text-slate-600'
                                 }`}
                               >
-                                {conn.status}
+                                {effConn.status}
                               </span>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -2752,12 +2801,22 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
 
                 {inspectorTab === 'linked' && (
                   <div className="space-y-3">
+                    {inspectedMapStatus === 'Needs Attention' && conflictReason && (
+                      <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[12px] flex items-start gap-2">
+                        <AlertTriangle size={15} className="text-amber-600 shrink-0 mt-0.5" />
+                        <div>
+                          <div className="font-semibold">Mapping Attention Required</div>
+                          <div className="text-[11px] mt-0.5">{conflictReason}</div>
+                        </div>
+                      </div>
+                    )}
                     {inspectedConnections.length === 0 ? (
                       <div className="p-6 text-center rounded-lg border border-[#e3e8ee] text-[12px] text-[#5c6b7a]">
                         No linked connections found for this Sensor.
                       </div>
                     ) : (
                       inspectedConnections.map((conn) => {
+                        const effConn = computeEffectiveConnectionStatus(conn, store, Date.now());
                         const peerBindings = (store.hardwareBindings || []).filter(
                           (b) =>
                             b.connectionId === conn.id &&
@@ -2768,32 +2827,42 @@ export const SensorsMasterContent: React.FC<SensorsMasterContentProps> = ({ curr
                             key={conn.id}
                             className="p-3.5 rounded-lg border border-[#e3e8ee] bg-white space-y-1.5 text-[12px]"
                           >
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-2">
                               <span className="font-bold text-[#17212b] font-mono">
                                 {conn.connectionId} · {conn.name}
                               </span>
                               <span
-                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                                  conn.status === 'Active'
+                                className={`px-2 py-0.5 rounded-full text-[11px] font-semibold shrink-0 ${
+                                  effConn.status === 'Active'
                                     ? 'bg-[#eaf8f0] text-[#0f7b4b]'
-                                    : conn.status === 'Scheduled'
+                                    : effConn.status === 'Scheduled'
                                     ? 'bg-sky-50 text-sky-700'
+                                    : effConn.status === 'Needs Attention'
+                                    ? 'bg-amber-50 text-amber-800'
                                     : 'bg-slate-100 text-slate-600'
                                 }`}
                               >
-                                {conn.status}
+                                {effConn.status}
                               </span>
                             </div>
                             <div className="text-[#5c6b7a]">
                               Client: <strong className="text-[#17212b]">{conn.companyName}</strong> · Pairwise bindings:{' '}
                               <strong className="text-[#17212b]">{peerBindings.length}</strong>
                             </div>
+                            {effConn.status === 'Needs Attention' && effConn.reason && (
+                              <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+                                {effConn.reason}
+                              </div>
+                            )}
                           </div>
                         );
                       })
                     )}
                   </div>
                 )}
+                    </>
+                  );
+                })()}
 
                 {inspectorTab === 'activity' && (
                   <div className="space-y-3">

@@ -247,9 +247,11 @@ export const ExpandableHardwareRows: React.FC<ExpandableHardwareRowsProps> = ({
         liveMembers,
         connectionBindings,
         allGlobalBindings,
-        scopeHardwareId
+        scopeHardwareId,
+        Date.now(),
+        { connections: resolvedStore.connections, store: resolvedStore }
       ),
-    [liveMembers, connectionBindings, allGlobalBindings, scopeHardwareId]
+    [liveMembers, connectionBindings, allGlobalBindings, scopeHardwareId, resolvedStore]
   );
 
   const openEditBindingModal = (b: HardwareBinding) => {

@@ -137,6 +137,21 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
   >(null);
   const [newViewName, setNewViewName] = useState('');
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set(['CON-1277']));
+  const [statusTick, setStatusTick] = useState(0);
+
+  useEffect(() => {
+    const bump = () => setStatusTick((t) => t + 1);
+    window.addEventListener('fleetrobo:modal-store-updated', bump);
+    window.addEventListener('storage', bump);
+    window.addEventListener('focus', bump);
+    const interval = window.setInterval(bump, 30000);
+    return () => {
+      window.removeEventListener('fleetrobo:modal-store-updated', bump);
+      window.removeEventListener('storage', bump);
+      window.removeEventListener('focus', bump);
+      window.clearInterval(interval);
+    };
+  }, []);
 
   // Drawers
   const [detailsState, setDetailsState] = useState<{
@@ -238,6 +253,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
 
   // Enrich each parent Connection record (strictly 1 row per Connection!)
   const enrichedConnections = useMemo(() => {
+    void statusTick;
     const nowMs = Date.now();
     const hasScopedCompany = Boolean(activeCompanyScope && activeCompanyScope !== 'All Clients');
 
@@ -283,7 +299,10 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         const effectiveStatusInfo = computeEffectiveConnectionStatus(conn, store, nowMs);
         const primaryUnit = members.find((m) => m.isPrimary) || members[0] || null;
         const bindingStatuses = cBindings.map((b) =>
-          computeHardwareBindingStatus(b, store.hardwareBindings, liveMembers, nowMs)
+          computeHardwareBindingStatus(b, store.hardwareBindings, liveMembers, nowMs, {
+            connections: store.connections,
+            store
+          })
         );
         const activeBindCount = bindingStatuses.filter((s) => s.status === 'Active').length;
         const schedBindCount = bindingStatuses.filter((s) => s.status === 'Scheduled').length;
@@ -357,7 +376,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
           hardwareIdentifiers: members.map((m) => m.identifierValue).join(', ') || '—'
         };
       });
-  }, [store, bindingsByConn, allocationsByConn, activeCompanyScope]);
+  }, [store, bindingsByConn, allocationsByConn, activeCompanyScope, statusTick]);
 
   const organizationOptions = useMemo(() => {
     const set = new Set<string>();
@@ -1312,7 +1331,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
     setActiveOverlay(null);
   };
 
-  const statusChip = (status: ConnectionLifecycleStatus) => {
+  const statusChip = (status: ConnectionLifecycleStatus, reason?: string) => {
     const map: Record<ConnectionLifecycleStatus, string> = {
       Active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
       Draft: 'bg-slate-100 text-slate-700 border-slate-200',
@@ -1328,7 +1347,10 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
       'Needs Attention': 'bg-amber-500'
     };
     return (
-      <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border whitespace-nowrap ${map[status]}`}>
+      <span
+        title={reason || undefined}
+        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border whitespace-nowrap ${map[status]}`}
+      >
         <span className={`w-1.5 h-1.5 rounded-full ${dot[status]}`} />
         {status}
       </span>
@@ -1837,7 +1859,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
                         if (col.key === 'status') {
                           return (
                             <td key={col.key} className={`px-3 ${rowPad}`} title={row.statusReason}>
-                              {statusChip(row.effectiveStatus)}
+                              {statusChip(row.effectiveStatus, row.statusReason)}
                             </td>
                           );
                         }
