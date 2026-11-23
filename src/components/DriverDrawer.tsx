@@ -32,7 +32,8 @@ import {
   DRIVER_LOOKUPS,
   deriveDriverBadges,
   isGlobalDriverAdminContext,
-  normalizeLicenceNumber
+  normalizeLicenceNumber,
+  canDriverBeActivated
 } from '../types/driver';
 import {
   getCanonicalTransporterVendors,
@@ -496,6 +497,14 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
         newErrors.licenceTo = 'License To date must be on or after License From date.';
       }
     }
+    const intendedStatus = (formData.status || 'Active') as Driver['status'];
+    if (intendedStatus === 'Active' && formData.licenceTo && !newErrors.licenceTo) {
+      const licenceCheck = canDriverBeActivated({ licenceTo: formData.licenceTo });
+      if (!licenceCheck.allowed) {
+        newErrors.licenceTo =
+          'Cannot save driver as Active with an expired licence. Renew License To date or uncheck Active.';
+      }
+    }
 
     // Optional fields format checks
     if (formData.alternate && formData.alternate.replace(/\D/g, '').length !== 10) {
@@ -579,7 +588,7 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
       licence: normalizeLicenceNumber(formData.licence),
       licenceFrom: formData.licenceFrom!,
       licenceTo: formData.licenceTo!,
-      licenceType: formData.licenceType || 'HMV',
+      licenceType: formData.licenceType?.trim() || undefined,
       blood: formData.blood || undefined,
       experience: rawExperience !== undefined && Number.isFinite(rawExperience) ? rawExperience : undefined,
       father: formData.father?.trim() || undefined,
@@ -1621,10 +1630,11 @@ export const DriverDrawer: React.FC<DriverDrawerProps> = ({
                   </label>
                   <select
                     disabled={isReadOnly}
-                    value={formData.licenceType || 'HMV'}
-                    onChange={(e) => updateField('licenceType', e.target.value)}
+                    value={formData.licenceType || ''}
+                    onChange={(e) => updateField('licenceType', e.target.value || undefined)}
                     className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs text-slate-900 focus:outline-none focus:border-[#FA8A63]"
                   >
+                    <option value="">Select licence type (unspecified)</option>
                     <option value="HMV">HMV (Heavy Motor Vehicle)</option>
                     <option value="HGMV">HGMV (Heavy Goods Motor Vehicle)</option>
                     <option value="LMV">LMV (Light Motor Vehicle)</option>

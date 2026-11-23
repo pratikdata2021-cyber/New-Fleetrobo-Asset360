@@ -52,7 +52,8 @@ import {
   deriveSensorStatus,
   formatDateTimeWithTz,
   formatLocalInputParts,
-  buildIsoWithTimezone
+  buildIsoWithTimezone,
+  reconcileEditedConnectionBindings
 } from '../../types/modalMaster';
 import {
   getEnabledModelsForCompanyName,
@@ -61,7 +62,12 @@ import {
 } from '../../types/companyModelEnablement';
 import { loadModelCategoryStore } from '../../types/modelCategoryMaster';
 import { Vehicle, loadVehicleMasterStore, saveVehicleMasterStore } from '../../types/vehicle';
-import { Driver, loadDriverMasterStore, saveDriverMasterStore } from '../../types/driver';
+import {
+  Driver,
+  loadDriverMasterStore,
+  saveDriverMasterStore,
+  canDriverBeActivated
+} from '../../types/driver';
 import { Fleet, INITIAL_DEMO_FLEETS } from '../../types/fleet';
 import {
   VendorRecord,
@@ -1716,6 +1722,26 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
         setConfirmAction(false);
         return;
       }
+      if (rn.resourceType === 'Driver' && (!isHistoricalAllocNode || actionType === 'activate')) {
+        const canonicalDriver = drivers.find((d) => d.id === rn.resourceId);
+        if (canonicalDriver) {
+          if (canonicalDriver.status !== 'Active') {
+            setFormError(
+              `Driver "${rn.identifier}" has status "${canonicalDriver.status}" and cannot be allocated/activated in Asset Mapping.`
+            );
+            setConfirmAction(false);
+            return;
+          }
+          const licenceEligibility = canDriverBeActivated(canonicalDriver, nowMs);
+          if (!licenceEligibility.allowed) {
+            setFormError(
+              `Driver "${rn.identifier}" cannot be allocated: ${licenceEligibility.reason}`
+            );
+            setConfirmAction(false);
+            return;
+          }
+        }
+      }
       const sMs = Date.parse(rn.effectiveStartAt);
       if (Number.isNaN(sMs)) {
         setFormError(
@@ -1888,7 +1914,10 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
     // Reconcile Resource Allocations preserving existing open allocation IDs and metadata (MAP-P0-04)
     const priorOpenAllocs = initialConnection
       ? store.resourceAllocations.filter(
-          (a) => a.connectionId === initialConnection.id && !a.endedAt
+          (a) =>
+            a.connectionId === initialConnection.id &&
+            !a.endedAt &&
+            a.statusOverride !== 'Canceled'
         )
       : [];
     const consumedPriorAllocIds = new Set<string>();
@@ -2005,7 +2034,9 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
 
     // When activating, require at least one valid active/scheduled binding or resource allocation (MAP-P0-01)
     if (actionType === 'activate') {
-      const openAllocations = finalAllocations.filter((a) => !a.endedAt);
+      const openAllocations = finalAllocations.filter(
+        (a) => !a.endedAt && a.statusOverride !== 'Canceled'
+      );
       if (openDraftBindings.length === 0 && openAllocations.length === 0) {
         setFormError(
           'Cannot activate mapping without an effective Hardware Binding or Resource Allocation. Add a binding/resource or use "Save as Draft".'
@@ -2021,6 +2052,25 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
         return;
       }
     }
+
+    // Reconcile hardware bindings against pre-edit history so removed bindings become Ended/Canceled history (MAP-HISTORY-01)
+    const priorConnectionBindings = initialConnection
+      ? store.hardwareBindings.filter((b) => b.connectionId === initialConnection.id)
+      : [];
+    const { finalBindings, archivedRemovedBindings } = reconcileEditedConnectionBindings({
+      connectionId: connId,
+      priorConnectionBindings,
+      draftBindings,
+      nowIso,
+      actorName,
+      reason: 'Removed during connection edit'
+    });
+    const newlyArchivedBindingsCount = archivedRemovedBindings.filter(
+      (b) =>
+        !priorConnectionBindings.some(
+          (p) => p.id === b.id && (Boolean(p.endedAt) || p.statusOverride === 'Canceled')
+        )
+    ).length;
 
     const firstResLabel = resourceNodes[0]
       ? `${resourceNodes[0].identifier}`
@@ -2042,7 +2092,20 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
       updatedAt: nowIso,
       createdBy: initialConnection?.createdBy || actorName,
       updatedBy: actorName,
-      activity: initialConnection?.activity || []
+      activity: [
+        ...(newlyArchivedBindingsCount > 0
+          ? [
+              {
+                id: `act-${Date.now()}-bind-hist`,
+                timestamp: nowIso,
+                actor: actorName,
+                action: `Archived ${newlyArchivedBindingsCount} removed hardware binding(s)`,
+                afterSummary: `Preserved historical binding record(s) with original ID(s) on ${connId} edit.`
+              }
+            ]
+          : []),
+        ...(initialConnection?.activity || [])
+      ]
     };
 
     const existingDevIds = new Set(store.devices.map((d) => d.id));
@@ -2051,7 +2114,7 @@ export const MappingFormDrawer: React.FC<MappingFormDrawerProps> = ({
 
     onCommit({
       connection: updatedConn,
-      bindings: draftBindings,
+      bindings: finalBindings,
       allocations: finalAllocations,
       resourceRelationships: workingRels,
       addedDevices: localDevices.filter((d) => !existingDevIds.has(d.id)),

@@ -614,6 +614,40 @@ export interface DerivedDriverBadges {
   hasAnyMappingReference: boolean;
 }
 
+export function canDriverBeActivated(
+  driver: Pick<Driver, 'licenceTo'>,
+  nowMs: number = Date.now()
+): {
+  allowed: boolean;
+  expiry: DerivedDriverBadges['expiry'];
+  reason?: string;
+} {
+  const validToLocal = parseLocalCalendarDate(driver.licenceTo);
+  if (!validToLocal) {
+    return {
+      allowed: false,
+      expiry: 'Missing',
+      reason: 'Cannot activate driver: Driving licence validity date is missing.'
+    };
+  }
+  const nowDate = new Date(nowMs);
+  const todayLocal = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
+  const diffDays = Math.round(
+    (validToLocal.getTime() - todayLocal.getTime()) / (1000 * 60 * 60 * 24)
+  );
+  if (diffDays < 0) {
+    return {
+      allowed: false,
+      expiry: 'Expired',
+      reason: 'Cannot activate driver: Driving licence is expired. Update Licence Valid To before activating.'
+    };
+  }
+  return {
+    allowed: true,
+    expiry: diffDays <= 30 ? 'Expiring within 30 days' : 'Valid'
+  };
+}
+
 // Helper to derive badges from a Driver record using live local calendar date and real Asset Mapping
 export function deriveDriverBadges(
   driver: Driver,

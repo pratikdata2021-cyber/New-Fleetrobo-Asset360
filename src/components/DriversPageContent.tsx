@@ -41,6 +41,7 @@ import {
   saveDriverMasterStore,
   deriveDriverBadges,
   isDriverAuthorizedForCompany,
+  canDriverBeActivated,
   TransferHistoryJob
 } from '../types/driver';
 import {
@@ -564,19 +565,16 @@ export const DriversPageContent: React.FC<DriversPageContentProps> = ({
       return;
     }
     const nextStatus = driver.status === 'Active' ? 'Inactive' : 'Active';
-    setDrivers((prev) =>
-      prev.map((d) => (d.id === driver.id ? { ...d, status: nextStatus } : d))
-    );
     if (nextStatus === 'Active') {
-      const badges = deriveDriverBadges(driver, modalStore, Date.now(), allDriverIds);
-      if (badges.expiry === 'Expired' || badges.expiry === 'Missing') {
-        showToast(
-          `Driver ${driver.name} set to Active (Note: Licence ${badges.expiry.toLowerCase()})`,
-          'info'
-        );
+      const licenceCheck = canDriverBeActivated(driver);
+      if (!licenceCheck.allowed) {
+        showToast(licenceCheck.reason || `Cannot activate driver ${driver.name}: licence is ${licenceCheck.expiry.toLowerCase()}.`, 'error');
         return;
       }
     }
+    setDrivers((prev) =>
+      prev.map((d) => (d.id === driver.id ? { ...d, status: nextStatus } : d))
+    );
     showToast(`Driver ${driver.name} is now ${nextStatus}`);
   };
 

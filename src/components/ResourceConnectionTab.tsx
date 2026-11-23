@@ -73,7 +73,8 @@ import {
   compareConnectionIds,
   downloadModalCsv,
   parseCsvLine,
-  getNextResourceAllocationId
+  getNextResourceAllocationId,
+  cancelOrEndResourceAllocation
 } from '../types/modalMaster';
 import {
   resolveClientCompanyByNameOrId,
@@ -1277,26 +1278,24 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
   );
 
   const handleBulkEndAllocations = () => {
-    const eligible = selectedRows.filter((r) => r.computedStatus !== 'Ended');
+    const eligible = selectedRows.filter(
+      (r) => r.computedStatus !== 'Ended' && r.computedStatus !== 'Canceled'
+    );
     if (eligible.length === 0) return;
     const eligibleIds = new Set(eligible.map((r) => r.id));
     const affectedConnIds = new Set(eligible.map((r) => r.connectionId));
     const nowIso = new Date().toISOString();
+    const canceledCount = eligible.filter((r) => {
+      const startMs = Date.parse(r.effectiveStartAt);
+      return !Number.isNaN(startMs) && Date.parse(nowIso) <= startMs;
+    }).length;
+    const endedCount = eligible.length - canceledCount;
+
     setStore((prev) => ({
       ...prev,
       resourceAllocations: prev.resourceAllocations.map((a) => {
         if (!eligibleIds.has(a.id)) return a;
-        const startMs = Date.parse(a.effectiveStartAt);
-        const nowMs = Date.parse(nowIso);
-        const safeEndIso = !Number.isNaN(startMs) && nowMs <= startMs ? new Date(startMs + 1000).toISOString() : nowIso;
-        return {
-          ...a,
-          endedAt: safeEndIso,
-          effectiveEndAt: safeEndIso,
-          endReason: bulkEndReason.trim() || 'Bulk ended',
-          unassignedBy: actorName,
-          updatedAt: nowIso
-        };
+        return cancelOrEndResourceAllocation(a, nowIso, actorName, bulkEndReason);
       }),
       connections: prev.connections.map((c) =>
         affectedConnIds.has(c.id)
@@ -1310,8 +1309,11 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                   id: `act-${Date.now()}-${c.id}`,
                   timestamp: nowIso,
                   actor: actorName,
-                  action: 'Bulk ended resource allocation(s)',
-                  afterSummary: `Reason: ${bulkEndReason.trim() || 'Bulk ended'}`
+                  action:
+                    canceledCount > 0 && endedCount === 0
+                      ? 'Bulk canceled scheduled resource allocation(s)'
+                      : 'Bulk ended/canceled resource allocation(s)',
+                  afterSummary: `Reason: ${bulkEndReason.trim() || (canceledCount > 0 && endedCount === 0 ? 'Bulk canceled before start' : 'Bulk ended')}`
                 },
                 ...(c.activity || [])
               ]
@@ -1319,7 +1321,13 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
           : c
       )
     }));
-    showToast(`Ended ${eligible.length} resource allocation(s) (${selectedRows.length - eligible.length} already ended).`);
+    const skippedCount = selectedRows.length - eligible.length;
+    const summaryParts: string[] = [];
+    if (endedCount > 0) summaryParts.push(`Ended ${endedCount}`);
+    if (canceledCount > 0) summaryParts.push(`Canceled ${canceledCount} scheduled`);
+    showToast(
+      `${summaryParts.join(', ')} resource allocation(s)${skippedCount > 0 ? ` (${skippedCount} already closed)` : ''}.`
+    );
     setSelectedIds(new Set());
     setActiveDrawer(null);
   };
@@ -1341,7 +1349,14 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       assignedHardware: r.assignedHardware,
       bindingCount: r.bindingCount,
       effectiveStartAt: formatDateTimeWithTz(r.effectiveStartAt, r.timezone, true),
-      effectiveEndAt: r.endedAt || r.effectiveEndAt ? formatDateTimeWithTz(r.endedAt || r.effectiveEndAt, r.timezone, true) : 'Open-ended',
+      effectiveEndAt:
+        r.statusOverride === 'Canceled'
+          ? r.effectiveEndAt
+            ? formatDateTimeWithTz(r.effectiveEndAt, r.timezone, true)
+            : 'Open-ended'
+          : r.endedAt || r.effectiveEndAt
+          ? formatDateTimeWithTz(r.endedAt || r.effectiveEndAt, r.timezone, true)
+          : 'Open-ended',
       status: r.computedStatus,
       companyName: r.companyName,
       site: r.site || '—',
@@ -1666,6 +1681,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
       Active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
       Scheduled: 'bg-sky-50 text-sky-700 border-sky-200',
       Ended: 'bg-slate-100 text-slate-600 border-slate-200',
+      Canceled: 'bg-zinc-100 text-zinc-500 border-zinc-200',
       Conflict: 'bg-rose-50 text-rose-700 border-rose-200'
     };
     return (
@@ -2136,7 +2152,11 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                             case 'effectiveEndAt':
                               cell = (
                                 <span className="text-slate-600 whitespace-nowrap tabular-nums">
-                                  {row.endedAt || row.effectiveEndAt
+                                  {row.statusOverride === 'Canceled'
+                                    ? row.effectiveEndAt
+                                      ? formatDateTimeWithTz(row.effectiveEndAt, row.timezone)
+                                      : 'Open-ended'
+                                    : row.endedAt || row.effectiveEndAt
                                     ? formatDateTimeWithTz(row.endedAt || row.effectiveEndAt, row.timezone)
                                     : '—'}
                                 </span>
@@ -2267,7 +2287,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                                   label: 'End Allocation',
                                   icon: <StopCircle className="w-3.5 h-3.5" />,
                                   tone: 'danger',
-                                  hidden: !canEdit || row.computedStatus === 'Ended',
+                                  hidden: !canEdit || row.computedStatus === 'Ended' || row.computedStatus === 'Canceled',
                                   dividerBefore: true,
                                   onClick: () => {
                                     const tz = row.timezone || 'Asia/Kolkata';
@@ -2544,6 +2564,7 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                           <option value="Active">Active</option>
                           <option value="Scheduled">Scheduled</option>
                           <option value="Ended">Ended</option>
+                          <option value="Canceled">Canceled</option>
                           <option value="Conflict">Conflict</option>
                         </select>
                       </div>
@@ -2718,22 +2739,27 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
               reason: 'Ready for CSV export with timezone & text-safe identifiers'
             };
           }
-          if (row.computedStatus === 'Ended') {
+          if (row.computedStatus === 'Ended' || row.computedStatus === 'Canceled') {
             return {
               row,
               eligible: false,
-              reason: 'Skipped — Allocation is already Ended (history preserved)'
+              reason: `Skipped — Allocation is already ${row.computedStatus} (history preserved)`
             };
           }
           return {
             row,
             eligible: true,
-            reason: `Will end ${row.computedStatus.toLowerCase()} allocation on ${row.connectionId}`
+            reason:
+              row.computedStatus === 'Scheduled'
+                ? `Will cancel scheduled allocation on ${row.connectionId} at current time (planned window preserved)`
+                : `Will end ${row.computedStatus.toLowerCase()} allocation on ${row.connectionId}`
           };
         });
         const eligibleList = evaluation.filter((e) => e.eligible);
         const skippedList = evaluation.filter((e) => !e.eligible);
-        const endEligibleCount = selectedRows.filter((r) => r.computedStatus !== 'Ended').length;
+        const endEligibleCount = selectedRows.filter(
+          (r) => r.computedStatus !== 'Ended' && r.computedStatus !== 'Canceled'
+        ).length;
 
         return (
           <div className="fixed inset-0 z-[70] flex justify-end bg-slate-900/35 backdrop-blur-[1px]">
@@ -3593,7 +3619,26 @@ export const ResourceConnectionTab: React.FC<ResourceConnectionTabProps> = ({
                     ['Display Name', inspectedAlloc.resourceDisplayName],
                     ['Validity Mode', inspectedAlloc.mode],
                     ['Effective Start', formatDateTimeWithTz(inspectedAlloc.effectiveStartAt, inspectedAlloc.timezone, true)],
-                    ['Effective End', inspectedAlloc.endedAt || inspectedAlloc.effectiveEndAt ? formatDateTimeWithTz(inspectedAlloc.endedAt || inspectedAlloc.effectiveEndAt, inspectedAlloc.timezone, true) : 'Open-ended'],
+                    [
+                      'Effective End',
+                      inspectedAlloc.statusOverride === 'Canceled'
+                        ? `${
+                            inspectedAlloc.effectiveEndAt
+                              ? formatDateTimeWithTz(inspectedAlloc.effectiveEndAt, inspectedAlloc.timezone, true)
+                              : 'Open-ended'
+                          } (Canceled ${formatDateTimeWithTz(
+                            inspectedAlloc.canceledAt || inspectedAlloc.endedAt,
+                            inspectedAlloc.timezone,
+                            true
+                          )})`
+                        : inspectedAlloc.endedAt || inspectedAlloc.effectiveEndAt
+                        ? formatDateTimeWithTz(
+                            inspectedAlloc.endedAt || inspectedAlloc.effectiveEndAt,
+                            inspectedAlloc.timezone,
+                            true
+                          )
+                        : 'Open-ended'
+                    ],
                     ['Assigned By', inspectedAlloc.assignedBy],
                     ['Unassigned By', inspectedAlloc.unassignedBy || '—'],
                     ['End Reason', inspectedAlloc.endReason || '—']

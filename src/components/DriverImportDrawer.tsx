@@ -4,7 +4,8 @@ import {
   Driver,
   DRIVER_LOOKUPS,
   isGlobalDriverAdminContext,
-  normalizeLicenceNumber
+  normalizeLicenceNumber,
+  canDriverBeActivated
 } from '../types/driver';
 import { parseCsvLine } from '../types/modalMaster';
 import {
@@ -66,6 +67,202 @@ function parseExplicitBooleanFlag(raw?: string): boolean {
   return ['yes', 'true', '1', 'y', 'verified', 'certified', 'completed'].includes(val);
 }
 
+export interface ParsedDriverImportResult {
+  created: Driver[];
+  skipped: number;
+  skippedReasons: Array<{ line: number; reason: string }>;
+  error?: string;
+}
+
+export function parseDriverImportCsv(
+  text: string,
+  existingDrivers: Driver[],
+  companyContext?: string,
+  nowMs: number = Date.now()
+): ParsedDriverImportResult {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) {
+    return {
+      created: [],
+      skipped: 0,
+      skippedReasons: [],
+      error: 'CSV must contain a header line and at least one data row.'
+    };
+  }
+
+  const isGlobalAdmin = isGlobalDriverAdminContext(companyContext);
+  const headers = parseCsvLine(lines[0]).map((h) => h.trim());
+  const created: Driver[] = [];
+  const seenDlInFile = new Set<string>();
+  const existingDls = new Set(existingDrivers.map((d) => normalizeLicenceNumber(d.licence)));
+  const skippedReasons: Array<{ line: number; reason: string }> = [];
+  let skipped = 0;
+
+  const todayLocal = new Date(nowMs);
+  const todayMidnight = new Date(
+    todayLocal.getFullYear(),
+    todayLocal.getMonth(),
+    todayLocal.getDate()
+  ).getTime();
+
+  for (let i = 1; i < lines.length; i++) {
+    if (i > 1000) break;
+    const values = parseCsvLine(lines[i]);
+    const raw: Record<string, string> = {};
+    headers.forEach((h, idx) => {
+      raw[h] = (values[idx] || '').trim();
+    });
+
+    const driverName = (raw['Driver Name'] || raw['Name'] || raw['First Name'] || '').trim();
+    const phone = (raw['Mobile Number'] || raw['Mobile No.'] || raw['Phone'] || '').replace(/\D/g, '');
+    const dob = parseStrictIsoOrSlashDate(
+      raw['Date of Birth'] || raw['Date of Birth (dd/mm/yyyy)'] || raw['DOB']
+    );
+    const licence = normalizeLicenceNumber(
+      raw['Licence Number'] || raw['License No.'] || raw['Licence']
+    );
+    const licenceFrom = parseStrictIsoOrSlashDate(
+      raw['Licence Valid From'] || raw['Licence Valid From (dd/mm/yyyy)']
+    );
+    const licenceTo = parseStrictIsoOrSlashDate(
+      raw['Licence Valid To'] || raw['License Valid To (dd/mm/yyyy)']
+    );
+
+    if (!driverName || driverName.length < 2 || phone.length !== 10 || !dob) {
+      skipped++;
+      skippedReasons.push({ line: i + 1, reason: 'Missing or invalid Driver Name, Mobile Number, or DOB' });
+      continue;
+    }
+    const dobMs = new Date(`${dob}T00:00:00`).getTime();
+    if (Number.isNaN(dobMs) || dobMs > todayMidnight) {
+      skipped++;
+      skippedReasons.push({ line: i + 1, reason: 'Invalid or future Date of Birth' });
+      continue;
+    }
+
+    if (!licence || licence.length < 6 || !licenceFrom || !licenceTo) {
+      skipped++;
+      skippedReasons.push({ line: i + 1, reason: 'Missing or invalid Licence Number / validity dates' });
+      continue;
+    }
+    if (new Date(`${licenceTo}T00:00:00`).getTime() < new Date(`${licenceFrom}T00:00:00`).getTime()) {
+      skipped++;
+      skippedReasons.push({ line: i + 1, reason: 'Licence Valid To is earlier than Licence Valid From' });
+      continue;
+    }
+
+    if (seenDlInFile.has(licence) || existingDls.has(licence)) {
+      skipped++;
+      skippedReasons.push({ line: i + 1, reason: `Duplicate Licence Number (${licence})` });
+      continue;
+    }
+
+    const rawCompany = (raw['Company'] || '').trim();
+    let resolvedCompany = '';
+    if (!isGlobalAdmin && companyContext) {
+      if (rawCompany && rawCompany.toLowerCase() !== companyContext.trim().toLowerCase()) {
+        skipped++;
+        skippedReasons.push({ line: i + 1, reason: `Cross-tenant company "${rawCompany}" blocked` });
+        continue;
+      }
+      resolvedCompany = companyContext.trim();
+    } else {
+      if (!rawCompany || isGlobalDriverAdminContext(rawCompany)) {
+        skipped++;
+        skippedReasons.push({ line: i + 1, reason: 'Valid client Company is required' });
+        continue;
+      }
+      resolvedCompany = rawCompany;
+    }
+
+    const rawTransporter = (raw['Transporter'] || '').trim();
+    const rawBlood = (raw['Blood Group'] || '').trim();
+    const resolvedBlood = DRIVER_LOOKUPS.bloodGroups.includes(rawBlood as any)
+      ? (rawBlood as Driver['blood'])
+      : undefined;
+
+    const expRaw = raw['Experience'] ?? raw['Driving Experience'];
+    const parsedExp =
+      expRaw !== undefined && expRaw !== '' && Number.isFinite(Number(expRaw)) && Number(expRaw) >= 0
+        ? Number(expRaw)
+        : undefined;
+
+    // DRIVER-IMPORT-01: Do not fabricate 'HMV' or 'Active' defaults when CSV cells are omitted
+    const rawLicenceType = (raw['Licence Type'] || raw['License Type'] || '').trim();
+    let resolvedLicenceType: string | undefined;
+    if (rawLicenceType) {
+      const matchedLicType = DRIVER_LOOKUPS.licenceTypes.find(
+        (lt) => lt.toLowerCase() === rawLicenceType.toLowerCase()
+      );
+      if (!matchedLicType) {
+        skipped++;
+        skippedReasons.push({ line: i + 1, reason: `Unrecognized Licence Type "${rawLicenceType}"` });
+        continue;
+      }
+      resolvedLicenceType = matchedLicType;
+    }
+
+    const rawStatus = (raw['Driver Status'] || raw['Status'] || '').trim();
+    let status: Driver['status'] = 'Inactive';
+    if (rawStatus) {
+      const matchedStatus = DRIVER_LOOKUPS.driverStatuses.find(
+        (st) => st.toLowerCase() === rawStatus.toLowerCase()
+      );
+      if (!matchedStatus) {
+        skipped++;
+        skippedReasons.push({ line: i + 1, reason: `Unrecognized Driver Status "${rawStatus}"` });
+        continue;
+      }
+      status = matchedStatus;
+    }
+
+    // DRIVER-LICENCE-01: Active status requires a compliant non-expired licence
+    if (status === 'Active') {
+      const licenceCheck = canDriverBeActivated({ licenceTo }, nowMs);
+      if (!licenceCheck.allowed) {
+        skipped++;
+        skippedReasons.push({
+          line: i + 1,
+          reason: licenceCheck.reason || 'Cannot import Active driver with expired licence'
+        });
+        continue;
+      }
+    }
+
+    const parts = driverName.split(/\s+/);
+    const first = parts[0] || driverName;
+    const last = parts.length > 1 ? parts.slice(1).join(' ') : undefined;
+
+    seenDlInFile.add(licence);
+    created.push({
+      id: `drv-imp-${nowMs}-${i}`,
+      name: driverName,
+      first,
+      firstName: first,
+      last,
+      lastName: last,
+      phone,
+      dob,
+      licence,
+      ...(resolvedLicenceType ? { licenceType: resolvedLicenceType } : {}),
+      licenceFrom,
+      licenceTo,
+      company: resolvedCompany,
+      ...(rawTransporter ? { transporter: rawTransporter } : {}),
+      ...(resolvedBlood ? { blood: resolvedBlood } : {}),
+      ...(parsedExp !== undefined ? { experience: parsedExp } : {}),
+      status,
+      rto: parseExplicitBooleanFlag(raw['RTO Certified'] || raw['RTO']),
+      police: parseExplicitBooleanFlag(raw['Police Verified'] || raw['Police']),
+      training: parseExplicitBooleanFlag(raw['Training Completed'] || raw['Training']),
+      rfid: parseExplicitBooleanFlag(raw['RFID Enabled'] || raw['RFID']),
+      vendor: parseExplicitBooleanFlag(raw['Vendor Linked'] || raw['Vendor'])
+    });
+  }
+
+  return { created, skipped, skippedReasons };
+}
+
 export const DriverImportDrawer: React.FC<DriverImportDrawerProps> = ({
   isOpen,
   onClose,
@@ -105,141 +302,16 @@ Gurpreet Singh,9812301234,1986-11-20,PB0220130099887,2013-04-12,2029-04-11,${tar
   };
 
   const processCsvText = (text: string, name: string, size?: number) => {
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    if (lines.length < 2) {
-      upload.fail('CSV must contain a header line and at least one data row.');
+    const result = parseDriverImportCsv(text, existingDrivers, companyContext);
+    if (result.error) {
+      upload.fail(result.error);
       return;
     }
 
-    const headers = parseCsvLine(lines[0]).map((h) => h.trim());
-    const created: Driver[] = [];
-    const seenDlInFile = new Set<string>();
-    const existingDls = new Set(existingDrivers.map((d) => normalizeLicenceNumber(d.licence)));
-    let skipped = 0;
-
-    const todayLocal = new Date();
-    const todayMidnight = new Date(
-      todayLocal.getFullYear(),
-      todayLocal.getMonth(),
-      todayLocal.getDate()
-    ).getTime();
-
-    for (let i = 1; i < lines.length; i++) {
-      if (i > 1000) break;
-      const values = parseCsvLine(lines[i]);
-      const raw: Record<string, string> = {};
-      headers.forEach((h, idx) => {
-        raw[h] = (values[idx] || '').trim();
-      });
-
-      const driverName = (raw['Driver Name'] || raw['Name'] || raw['First Name'] || '').trim();
-      const phone = (raw['Mobile Number'] || raw['Mobile No.'] || raw['Phone'] || '').replace(/\D/g, '');
-      const dob = parseStrictIsoOrSlashDate(
-        raw['Date of Birth'] || raw['Date of Birth (dd/mm/yyyy)'] || raw['DOB']
-      );
-      const licence = normalizeLicenceNumber(
-        raw['Licence Number'] || raw['License No.'] || raw['Licence']
-      );
-      const licenceFrom = parseStrictIsoOrSlashDate(
-        raw['Licence Valid From'] || raw['Licence Valid From (dd/mm/yyyy)']
-      );
-      const licenceTo = parseStrictIsoOrSlashDate(
-        raw['Licence Valid To'] || raw['License Valid To (dd/mm/yyyy)']
-      );
-
-      // Require real mandatory identity and licence dates without fabricating defaults
-      if (!driverName || driverName.length < 2 || phone.length !== 10 || !dob) {
-        skipped++;
-        continue;
-      }
-      const dobMs = new Date(`${dob}T00:00:00`).getTime();
-      if (Number.isNaN(dobMs) || dobMs > todayMidnight) {
-        skipped++;
-        continue;
-      }
-
-      if (!licence || licence.length < 6 || !licenceFrom || !licenceTo) {
-        skipped++;
-        continue;
-      }
-      if (new Date(`${licenceTo}T00:00:00`).getTime() < new Date(`${licenceFrom}T00:00:00`).getTime()) {
-        skipped++;
-        continue;
-      }
-
-      if (seenDlInFile.has(licence) || existingDls.has(licence)) {
-        skipped++;
-        continue;
-      }
-
-      // Enforce strict tenant isolation without fabricating 'Adani Pvt Ltd'
-      const rawCompany = (raw['Company'] || '').trim();
-      let resolvedCompany = '';
-      if (!isGlobalAdmin && companyContext) {
-        if (rawCompany && rawCompany.toLowerCase() !== companyContext.trim().toLowerCase()) {
-          skipped++;
-          continue;
-        }
-        resolvedCompany = companyContext.trim();
-      } else {
-        if (!rawCompany || isGlobalDriverAdminContext(rawCompany)) {
-          skipped++;
-          continue;
-        }
-        resolvedCompany = rawCompany;
-      }
-
-      const rawTransporter = (raw['Transporter'] || '').trim();
-      const rawBlood = (raw['Blood Group'] || '').trim();
-      const resolvedBlood = DRIVER_LOOKUPS.bloodGroups.includes(rawBlood as any)
-        ? (rawBlood as Driver['blood'])
-        : undefined;
-
-      const expRaw = raw['Experience'] ?? raw['Driving Experience'];
-      const parsedExp =
-        expRaw !== undefined && expRaw !== '' && Number.isFinite(Number(expRaw)) && Number(expRaw) >= 0
-          ? Number(expRaw)
-          : undefined;
-
-      const rawStatus = (raw['Driver Status'] || raw['Status'] || '').trim();
-      const status: Driver['status'] = DRIVER_LOOKUPS.driverStatuses.includes(rawStatus as any)
-        ? (rawStatus as Driver['status'])
-        : 'Active';
-
-      const parts = driverName.split(/\s+/);
-      const first = parts[0] || driverName;
-      const last = parts.length > 1 ? parts.slice(1).join(' ') : undefined;
-
-      seenDlInFile.add(licence);
-      created.push({
-        id: `drv-imp-${Date.now()}-${i}`,
-        name: driverName,
-        first,
-        firstName: first,
-        last,
-        lastName: last,
-        phone,
-        dob,
-        licence,
-        licenceType: raw['Licence Type'] || 'HMV',
-        licenceFrom,
-        licenceTo,
-        company: resolvedCompany,
-        ...(rawTransporter ? { transporter: rawTransporter } : {}),
-        ...(resolvedBlood ? { blood: resolvedBlood } : {}),
-        ...(parsedExp !== undefined ? { experience: parsedExp } : {}),
-        status,
-        rto: parseExplicitBooleanFlag(raw['RTO Certified'] || raw['RTO']),
-        police: parseExplicitBooleanFlag(raw['Police Verified'] || raw['Police']),
-        training: parseExplicitBooleanFlag(raw['Training Completed'] || raw['Training']),
-        rfid: parseExplicitBooleanFlag(raw['RFID Enabled'] || raw['RFID']),
-        vendor: parseExplicitBooleanFlag(raw['Vendor Linked'] || raw['Vendor'])
-      });
-    }
-
+    const { created, skipped } = result;
     if (created.length === 0) {
       upload.fail(
-        'No valid driver rows found (check missing/invalid dates, duplicate licences, or unauthorized company rows).'
+        'No valid driver rows found (check missing/invalid dates, duplicate licences, expired active rows, or unauthorized company rows).'
       );
       return;
     }

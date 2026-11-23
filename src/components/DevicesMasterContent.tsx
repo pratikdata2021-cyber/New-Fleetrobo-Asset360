@@ -56,7 +56,8 @@ import {
   loadSavedModalViews,
   saveSavedModalViews,
   downloadModalCsv,
-  parseCsvLine
+  parseCsvLine,
+  applyDevicesBulkDelete
 } from '../types/modalMaster';
 import {
   DevicesFilterDrawer,
@@ -86,6 +87,34 @@ import {
   saveCustomPlatformProtocol
 } from '../types/modelCategoryMaster';
 import { ColumnCataloguePopover } from './ColumnCataloguePopover';
+
+function normalizeDeviceProtocolLabel(val?: string): string {
+  const trimmed = (val || '').trim();
+  if (!trimmed) return '';
+  return trimmed.toUpperCase() === 'METTA' ? 'Metta' : trimmed;
+}
+
+export function doesDeviceModelRequireProtocol(
+  spec?: { supportedProtocols?: string[] } | null,
+  legacyCategoryProtocols?: string[]
+): { required: boolean; allowedProtocols: string[] } {
+  if (spec) {
+    const specProtocols = Array.from(
+      new Set((spec.supportedProtocols || []).map(normalizeDeviceProtocolLabel).filter(Boolean))
+    );
+    return {
+      required: specProtocols.length > 0,
+      allowedProtocols: specProtocols
+    };
+  }
+  const legacyProtocols = Array.from(
+    new Set((legacyCategoryProtocols || []).map(normalizeDeviceProtocolLabel).filter(Boolean))
+  );
+  return {
+    required: legacyProtocols.length > 0,
+    allowedProtocols: legacyProtocols
+  };
+}
 
 const FieldLabel: React.FC<{
   label: string;
@@ -508,15 +537,11 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     return Array.from(new Set([...customDeviceModes, ...formModes].filter(Boolean)));
   }, [selectedModelSpec, editingDevice, formKind, formModes, customDeviceModes]);
 
-  const normalizeProtocol = (val?: string) => {
-    const trimmed = (val || '').trim();
-    if (!trimmed) return '';
-    return trimmed.toUpperCase() === 'METTA' ? 'Metta' : trimmed;
-  };
+  const normalizeProtocol = normalizeDeviceProtocolLabel;
 
   const availableProtocols = useMemo<string[]>(() => {
     const fromSpec = selectedModelSpec?.supportedProtocols || [];
-    const fromCatDef = editingDevice ? DEVICE_CATALOGUE[formKind]?.protocols || [] : [];
+    const fromCatDef = !selectedModelSpec && editingDevice ? DEVICE_CATALOGUE[formKind]?.protocols || [] : [];
     const fromPresets = selectedModelSpec
       ? getPlatformProtocolPresets(selectedModelSpec.typeName, selectedModelSpec.deviceFunction)
       : editingDevice
@@ -569,15 +594,11 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
 
   const resolveDefaultProtocolsForModel = (
     modelSupported?: string[],
-    typeName?: string,
-    deviceFunction?: string,
+    _typeName?: string,
+    _deviceFunction?: string,
     fallbackProtocol?: string
   ): string[] => {
-    const list =
-      modelSupported && modelSupported.length > 0
-        ? modelSupported
-        : DEVICE_CATALOGUE[typeName || '']?.protocols ||
-          getPlatformProtocolPresets(typeName, deviceFunction);
+    const list = modelSupported && modelSupported.length > 0 ? modelSupported : [];
     const normalized = Array.from(new Set(list.map(normalizeProtocol).filter(Boolean)));
     if (normalized.length >= 1) return [normalized[0]];
     const fb = normalizeProtocol(fallbackProtocol);
@@ -887,13 +908,34 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
       (t) => t.toUpperCase() !== 'IMEI' && t.toUpperCase() !== 'DEVICE ID'
     );
 
-    const singleProtocol = formProtocols[0] ? formProtocols[0].trim() : '';
+    const protocolContract = doesDeviceModelRequireProtocol(
+      matchedSpec,
+      !matchedSpec && editingDevice ? DEVICE_CATALOGUE[formKind]?.protocols : undefined
+    );
+    const singleProtocol = formProtocols[0] ? normalizeProtocol(formProtocols[0]) : '';
 
-    if (!trimmedName || !trimmedId || !singleProtocol) {
+    if (!trimmedName || !trimmedId || (protocolContract.required && !singleProtocol)) {
       setFormError(
-        'Please complete all required fields marked with * (select Platform Protocol).'
+        protocolContract.required
+          ? 'Please complete all required fields marked with * (select Platform Protocol).'
+          : 'Please complete all required fields marked with *.'
       );
       return;
+    }
+
+    if (protocolContract.required && singleProtocol) {
+      const allowedSet = new Set(
+        [...protocolContract.allowedProtocols, ...customDeviceProtocols]
+          .map(normalizeProtocol)
+          .filter(Boolean)
+          .map((p) => p.toLowerCase())
+      );
+      if (allowedSet.size > 0 && !allowedSet.has(singleProtocol.toLowerCase())) {
+        setFormError(
+          `Platform Protocol "${singleProtocol}" is not supported by ${matchedSpec?.modelReference || formKind}. Allowed: ${protocolContract.allowedProtocols.join(', ')}.`
+        );
+        return;
+      }
     }
 
     if (supportsImei && !supportsNonImei && !effectiveImei) {
@@ -1227,28 +1269,47 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     const todayStr = new Date().toISOString().slice(0, 10);
 
     if (mode === 'delete') {
-      const actuallyDeleted = new Set<string>();
-      setStore((prev) => ({
-        ...prev,
-        devices: prev.devices.filter((d) => {
-          if (!safeIds.has(d.id)) return true;
-          const refs = getDeviceMappingReferences(d.id, prev, nowMs);
-          if (refs.hasAnyReference) return true;
-          actuallyDeleted.add(d.id);
-          return false;
-        })
-      }));
+      const previewResult = applyDevicesBulkDelete(store, safeIds, allowedScopeIds, nowMs);
+      setStore((prev) => applyDevicesBulkDelete(prev, safeIds, allowedScopeIds, nowMs).nextStore);
+      const deletedSet = new Set(previewResult.deletedIds);
       setSelectedIds((prev) => {
         const next = new Set(prev);
-        safeIds.forEach((id) => next.delete(id));
+        deletedSet.forEach((id) => next.delete(id));
         return next;
       });
-      if (inspectedDevice && safeIds.has(inspectedDevice.id)) {
+      if (inspectedDevice && deletedSet.has(inspectedDevice.id)) {
+        setActiveDrawer(null);
         setInspectedDevice(null);
       }
-      showToast(`Deleted ${safeIds.size} unreferenced device(s).`);
+      if (previewResult.blocked.length > 0 && previewResult.deletedIds.length > 0) {
+        showToast(
+          `Deleted ${previewResult.deletedIds.length} unreferenced device(s); ${previewResult.blocked.length} referenced device(s) skipped and kept selected.`
+        );
+      } else if (previewResult.blocked.length > 0) {
+        showToast(
+          `Deleted 0 devices: ${previewResult.blocked.length} selected device(s) blocked (${previewResult.blocked[0].deviceId}: ${previewResult.blocked[0].reason}).`,
+          'error'
+        );
+      } else {
+        showToast(`Deleted ${previewResult.deletedIds.length} unreferenced device(s).`);
+      }
       return;
     }
+
+    const appliedIds = store.devices
+      .filter((d) => {
+        if (!safeIds.has(d.id)) return false;
+        const refs = getDeviceMappingReferences(d.id, store, nowMs);
+        const eff = deriveDeviceStatus(d, store, nowMs);
+        if (mode === 'send_maintenance') return eff !== 'Decommissioned' && eff !== 'In Maintenance';
+        if (mode === 'return_service') return eff === 'In Maintenance';
+        if (mode === 'update_location') {
+          return eff !== 'Decommissioned' && Boolean((options?.targetLocation || '').trim());
+        }
+        if (mode === 'decommission') return eff !== 'Decommissioned' && !refs.hasActiveOrScheduledReference;
+        return false;
+      })
+      .map((d) => d.id);
 
     setStore((prev) => ({
       ...prev,
@@ -1306,20 +1367,20 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
     }));
 
     if (mode === 'send_maintenance') {
-      const flaggedMapped = Array.from(safeIds).some(
+      const flaggedMapped = appliedIds.some(
         (id) => getDeviceMappingReferences(id, store, nowMs).hasActiveOrScheduledReference
       );
       showToast(
         flaggedMapped
-          ? `Moved ${safeIds.size} device(s) to In Maintenance; affected open mappings are flagged Needs Attention.`
-          : `Moved ${safeIds.size} device(s) to In Maintenance.`
+          ? `Moved ${appliedIds.length} device(s) to In Maintenance; affected open mappings are flagged Needs Attention.`
+          : `Moved ${appliedIds.length} device(s) to In Maintenance.`
       );
     } else if (mode === 'return_service') {
-      showToast(`Returned ${safeIds.size} device(s) to service and recalculated status.`);
+      showToast(`Returned ${appliedIds.length} device(s) to service and recalculated status.`);
     } else if (mode === 'update_location') {
-      showToast(`Updated Inventory Location on ${safeIds.size} device(s).`);
+      showToast(`Updated Inventory Location on ${appliedIds.length} device(s).`);
     } else if (mode === 'decommission') {
-      showToast(`Decommissioned ${safeIds.size} device(s).`);
+      showToast(`Decommissioned ${appliedIds.length} device(s).`);
     }
   };
 
@@ -3018,7 +3079,12 @@ export const DevicesMasterContent: React.FC<{ currentCompany?: string }> = ({
                     <div>
                       <FieldLabel
                         label="Platform Protocol"
-                        required
+                        required={
+                          doesDeviceModelRequireProtocol(
+                            selectedModelSpec,
+                            !selectedModelSpec && editingDevice ? DEVICE_CATALOGUE[formKind]?.protocols : undefined
+                          ).required
+                        }
                         tooltip={MODAL_FIELD_TOOLTIPS.device.platformProtocol}
                       />
                       <div ref={deviceProtocolDropdownRef} className="relative">

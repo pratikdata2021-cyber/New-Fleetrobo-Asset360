@@ -58,7 +58,11 @@ import {
   isCompanyEligibleForNewRegistration,
   resolveClientCompanyByNameOrId
 } from '../types/companyModelEnablement';
-import { getModelCategoryById, getRecordIdentifierTypes } from '../types/modelCategoryMaster';
+import {
+  getModelCategoryById,
+  getRecordIdentifierTypes,
+  ModelCategoryRecord
+} from '../types/modelCategoryMaster';
 import { ColumnCataloguePopover } from './ColumnCataloguePopover';
 import {
   SimFilterDrawer,
@@ -69,6 +73,51 @@ import {
   resolveSimCategoryLabel
 } from './sim-master/SimFilterDrawer';
 import { SimBulkDrawer, SimBulkActionMode } from './sim-master/SimBulkDrawer';
+
+export function resolveSimImportModel(
+  companyModels: ModelCategoryRecord[],
+  input: { category?: string; operator?: string; modelRef?: string },
+  ownerName: string
+): { model?: ModelCategoryRecord; error?: string } {
+  const opInput = (input.operator || '').trim();
+  const catInput = (input.category || '').trim();
+  const refInput = (input.modelRef || '').trim();
+
+  if (!opInput && !refInput && !catInput) {
+    return { error: 'Network operator / SIM model is required' };
+  }
+
+  const matchedModels = companyModels.filter((m) => {
+    if (opInput && m.manufacturer.trim().toLowerCase() !== opInput.toLowerCase()) return false;
+    if (catInput && m.typeName.trim().toLowerCase() !== catInput.toLowerCase()) return false;
+    if (refInput && (m.modelReference || '').trim().toLowerCase() !== refInput.toLowerCase()) {
+      return false;
+    }
+    return true;
+  });
+
+  if (matchedModels.length === 0) {
+    return {
+      error: `No enabled SIM model matches (${[catInput, opInput, refInput].filter(Boolean).join(' · ')}) for "${ownerName}"`
+    };
+  }
+
+  if (matchedModels.length > 1) {
+    const refs = matchedModels
+      .map((m) => m.modelReference || `${m.typeName} (${m.id})`)
+      .join(', ');
+    return {
+      error: `Ambiguous SIM model: ${matchedModels.length} enabled models match (${[
+        catInput,
+        opInput
+      ]
+        .filter(Boolean)
+        .join(' · ')}: ${refs}). Provide an exact Model reference.`
+    };
+  }
+
+  return { model: matchedModels[0] };
+}
 
 const FieldLabel: React.FC<{
   label: string;
@@ -1232,36 +1281,25 @@ export const SimMasterContent: React.FC<SimMasterContentProps> = ({ currentCompa
         return;
       }
 
-      const opInput = input.operator.trim();
-      const catInput = input.category.trim();
-      const refInput = input.modelRef.trim();
+      const modelResolution = resolveSimImportModel(
+        companyModels,
+        {
+          category: input.category,
+          operator: input.operator,
+          modelRef: input.modelRef
+        },
+        ownerCompany.name
+      );
 
-      if (!opInput && !refInput && !catInput) {
+      if (modelResolution.error || !modelResolution.model) {
         invalid.push({
           line: lineNo,
-          reason: 'Network operator / SIM model is required'
+          reason: modelResolution.error || `Unable to resolve SIM model for "${ownerCompany.name}"`
         });
         return;
       }
 
-      const matchedModels = companyModels.filter((m) => {
-        if (opInput && m.manufacturer.trim().toLowerCase() !== opInput.toLowerCase()) return false;
-        if (catInput && m.typeName.trim().toLowerCase() !== catInput.toLowerCase()) return false;
-        if (refInput && (m.modelReference || '').trim().toLowerCase() !== refInput.toLowerCase()) {
-          return false;
-        }
-        return true;
-      });
-
-      if (matchedModels.length === 0) {
-        invalid.push({
-          line: lineNo,
-          reason: `No enabled SIM model matches (${[catInput, opInput, refInput].filter(Boolean).join(' · ')}) for "${ownerCompany.name}"`
-        });
-        return;
-      }
-
-      const resolvedModel = matchedModels[0];
+      const resolvedModel = modelResolution.model;
       const allowedIdTypes = getRecordIdentifierTypes(resolvedModel);
       const requestedIdType = input.identifierType.trim();
       const idType = requestedIdType

@@ -56,7 +56,8 @@ import {
   compareConnectionIds,
   downloadModalCsv,
   parseCsvLine,
-  resolveHardwareIdentifierValue
+  resolveHardwareIdentifierValue,
+  reconcileEditedConnectionBindings
 } from '../types/modalMaster';
 import { loadModelCategoryStore } from '../types/modelCategoryMaster';
 import {
@@ -625,13 +626,17 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
     setStore((prev) => {
       const otherConnections = prev.connections.filter((c) => c.id !== payload.connection.id);
       const otherBindings = prev.hardwareBindings.filter((b) => b.connectionId !== payload.connection.id);
-      const payloadBindingIds = new Set(payload.bindings.map((b) => b.id));
-      const preservedEndedBindings = prev.hardwareBindings.filter(
-        (b) =>
-          b.connectionId === payload.connection.id &&
-          !payloadBindingIds.has(b.id) &&
-          (Boolean(b.endedAt) || b.statusOverride === 'Canceled')
+      const priorConnectionBindings = prev.hardwareBindings.filter(
+        (b) => b.connectionId === payload.connection.id
       );
+      const { finalBindings } = reconcileEditedConnectionBindings({
+        connectionId: payload.connection.id,
+        priorConnectionBindings,
+        draftBindings: payload.bindings,
+        nowIso: payload.connection.updatedAt || new Date().toISOString(),
+        actorName: payload.connection.updatedBy || actorName,
+        reason: 'Removed during connection edit'
+      });
 
       const otherAllocs = prev.resourceAllocations.filter((a) => a.connectionId !== payload.connection.id);
       const payloadAllocIds = new Set(payload.allocations.map((a) => a.id));
@@ -639,7 +644,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         (a) =>
           a.connectionId === payload.connection.id &&
           !payloadAllocIds.has(a.id) &&
-          Boolean(a.endedAt)
+          (Boolean(a.endedAt) || a.statusOverride === 'Canceled')
       );
 
       const existingDevIds = new Set(prev.devices.map((d) => d.id));
@@ -654,7 +659,7 @@ export const ModalConnectionTab: React.FC<ModalConnectionTabProps> = ({
         connections: payload.isEdit
           ? prev.connections.map((c) => (c.id === payload.connection.id ? payload.connection : c))
           : [payload.connection, ...otherConnections],
-        hardwareBindings: [...payload.bindings, ...preservedEndedBindings, ...otherBindings],
+        hardwareBindings: [...finalBindings, ...otherBindings],
         resourceAllocations: [...payload.allocations, ...preservedEndedAllocs, ...otherAllocs],
         resourceRelationships: payload.resourceRelationships ?? prev.resourceRelationships
       };

@@ -204,7 +204,7 @@ export type HardwareCategory = 'Device' | 'Sensor' | 'SIM';
 export type HardwareBindingMode = 'Permanent' | 'Temporal';
 export type HardwareBindingStatus = 'Scheduled' | 'Active' | 'Ended' | 'Conflict' | 'Canceled';
 export type ConnectionLifecycleStatus = 'Draft' | 'Scheduled' | 'Active' | 'Inactive' | 'Needs Attention';
-export type ResourceAllocationStatus = 'Scheduled' | 'Active' | 'Ended' | 'Conflict';
+export type ResourceAllocationStatus = 'Scheduled' | 'Active' | 'Ended' | 'Conflict' | 'Canceled';
 export type ResourceType = 'Vehicle' | 'Driver' | 'Fleet' | 'Vendor' | 'Place' | 'Equipment';
 
 export interface HardwareMembership {
@@ -266,6 +266,7 @@ export interface HardwareBinding {
   portOrSlot?: string | null;
   notes?: string;
   statusOverride?: 'Canceled';
+  endedBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -284,6 +285,8 @@ export interface ResourceAllocation {
   effectiveStartAt: string;
   effectiveEndAt?: string | null;
   endedAt?: string | null;
+  canceledAt?: string | null;
+  statusOverride?: 'Canceled';
   endReason?: string;
   unassignedBy?: string;
   timezone: string;
@@ -1456,6 +1459,7 @@ export function computeResourceAllocationStatus(
   nowMs: number = Date.now(),
   context?: ResourceAllocationEvaluationContext
 ): { status: ResourceAllocationStatus; reason?: string } {
+  if (alloc.statusOverride === 'Canceled') return { status: 'Canceled' };
   if (alloc.endedAt) return { status: 'Ended' };
   const startMs = Date.parse(alloc.effectiveStartAt);
   const endMs = alloc.effectiveEndAt ? Date.parse(alloc.effectiveEndAt) : null;
@@ -1547,7 +1551,7 @@ export function computeResourceAllocationStatus(
   const allocScope = alloc.hardwareId || 'ALL';
 
   const duplicateOverlap = allAllocations.find((other) => {
-    if (other.id === alloc.id || other.endedAt) return false;
+    if (other.id === alloc.id || other.endedAt || other.statusOverride === 'Canceled') return false;
     if (other.connectionId !== alloc.connectionId || other.resourceType !== alloc.resourceType) {
       return false;
     }
@@ -2267,7 +2271,12 @@ export function getVehicleMappingReferences(
       connections,
       store: store as any
     }).status;
-    if (computed === 'Ended' || conn?.status === 'Inactive' || effConnStatus === 'Inactive') {
+    if (
+      computed === 'Ended' ||
+      computed === 'Canceled' ||
+      conn?.status === 'Inactive' ||
+      effConnStatus === 'Inactive'
+    ) {
       endedAllocations.push(a);
     } else if (
       computed === 'Scheduled' ||
@@ -2441,7 +2450,12 @@ export function getDriverMappingReferences(
       connections,
       store: store as any
     }).status;
-    if (computed === 'Ended' || conn?.status === 'Inactive' || effConnStatus === 'Inactive') {
+    if (
+      computed === 'Ended' ||
+      computed === 'Canceled' ||
+      conn?.status === 'Inactive' ||
+      effConnStatus === 'Inactive'
+    ) {
       endedAllocations.push(a);
     } else if (
       computed === 'Scheduled' ||
@@ -6128,3 +6142,153 @@ export function parseCsvLine(line: string): string[] {
   result.push(current.trim());
   return result;
 }
+
+/**
+ * MAP-HISTORY-01: Reconcile pre-edit hardware bindings against draft bindings on save/edit.
+ * Any prior open (active or future scheduled) binding omitted from draftBindings is converted
+ * into a historical Ended/Canceled record preserving its original ID, start timestamp, actor, and reason.
+ */
+export function reconcileEditedConnectionBindings(params: {
+  connectionId: string;
+  priorConnectionBindings: HardwareBinding[];
+  draftBindings: HardwareBinding[];
+  nowIso: string;
+  actorName: string;
+  reason?: string;
+}): { finalBindings: HardwareBinding[]; archivedRemovedBindings: HardwareBinding[] } {
+  const {
+    connectionId,
+    priorConnectionBindings,
+    draftBindings,
+    nowIso,
+    actorName,
+    reason = 'Removed during connection edit'
+  } = params;
+  const draftIds = new Set(draftBindings.map((b) => b.id));
+  const nowMs = Date.parse(nowIso);
+  const archivedRemovedBindings: HardwareBinding[] = [];
+
+  priorConnectionBindings.forEach((prior) => {
+    if (prior.connectionId !== connectionId) return;
+    if (draftIds.has(prior.id)) return;
+
+    if (prior.endedAt || prior.statusOverride === 'Canceled') {
+      archivedRemovedBindings.push(prior);
+      return;
+    }
+
+    const startMs = Date.parse(prior.effectiveStartAt);
+    const isScheduledBeforeStart = !Number.isNaN(startMs) && !Number.isNaN(nowMs) && nowMs <= startMs;
+
+    if (isScheduledBeforeStart) {
+      archivedRemovedBindings.push({
+        ...prior,
+        statusOverride: 'Canceled',
+        endedAt: nowIso,
+        endReason: reason,
+        endedBy: actorName,
+        updatedAt: nowIso
+      });
+    } else {
+      archivedRemovedBindings.push({
+        ...prior,
+        endedAt: nowIso,
+        effectiveEndAt: nowIso,
+        endReason: reason,
+        endedBy: actorName,
+        updatedAt: nowIso
+      });
+    }
+  });
+
+  return {
+    finalBindings: [...draftBindings, ...archivedRemovedBindings],
+    archivedRemovedBindings
+  };
+}
+
+/**
+ * DEVICE-BULK-01: Pure pre-mutation eligibility re-validation and bulk delete execution.
+ * Only unreferenced, in-scope devices are deleted; referenced devices are preserved and reported as blocked.
+ */
+export function applyDevicesBulkDelete<
+  T extends Pick<
+    ModalMasterStore,
+    'devices' | 'sensors' | 'sims' | 'connections' | 'hardwareBindings' | 'resourceAllocations'
+  >
+>(
+  prevStore: T,
+  candidateIds: Iterable<string>,
+  allowedScopeIds: Set<string>,
+  nowMs: number = Date.now()
+): {
+  nextStore: T;
+  deletedIds: string[];
+  blocked: Array<{ id: string; deviceId: string; reason: string }>;
+} {
+  const candidateSet = new Set(Array.from(candidateIds).filter((id) => allowedScopeIds.has(id)));
+  const deletedIds: string[] = [];
+  const blocked: Array<{ id: string; deviceId: string; reason: string }> = [];
+
+  const nextDevices = prevStore.devices.filter((d) => {
+    if (!candidateSet.has(d.id)) return true;
+    const refs = getDeviceMappingReferences(d.id, prevStore, nowMs);
+    if (refs.hasAnyReference) {
+      blocked.push({
+        id: d.id,
+        deviceId: d.deviceId,
+        reason: `Referenced in Asset Mapping (${refs.allConnections.length} connection(s) / ${refs.allBindings.length} binding(s))`
+      });
+      return true;
+    }
+    deletedIds.push(d.id);
+    return false;
+  });
+
+  return {
+    nextStore: {
+      ...prevStore,
+      devices: nextDevices
+    },
+    deletedIds,
+    blocked
+  };
+}
+
+/**
+ * RESOURCE-BULK-01: Distinguish future scheduled cancellation (before effective start)
+ * from ending an already-active allocation without fabricating a future end timestamp.
+ */
+export function cancelOrEndResourceAllocation(
+  alloc: ResourceAllocation,
+  nowIso: string,
+  actorName: string,
+  reason?: string
+): ResourceAllocation {
+  const startMs = Date.parse(alloc.effectiveStartAt);
+  const nowMs = Date.parse(nowIso);
+  const isScheduledBeforeStart = !Number.isNaN(startMs) && !Number.isNaN(nowMs) && nowMs <= startMs;
+
+  if (isScheduledBeforeStart) {
+    return {
+      ...alloc,
+      statusOverride: 'Canceled',
+      canceledAt: nowIso,
+      endedAt: nowIso,
+      // Preserve original planned effectiveStartAt and effectiveEndAt untouched in history
+      endReason: reason?.trim() || 'Bulk canceled before start',
+      unassignedBy: actorName,
+      updatedAt: nowIso
+    };
+  }
+
+  return {
+    ...alloc,
+    endedAt: nowIso,
+    effectiveEndAt: nowIso,
+    endReason: reason?.trim() || 'Bulk ended',
+    unassignedBy: actorName,
+    updatedAt: nowIso
+  };
+}
+

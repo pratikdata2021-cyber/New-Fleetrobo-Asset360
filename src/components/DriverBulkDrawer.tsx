@@ -19,7 +19,8 @@ import {
   deriveDriverBadges,
   getDriverOwningCompany,
   isDriverAuthorizedForCompany,
-  isGlobalDriverAdminContext
+  isGlobalDriverAdminContext,
+  canDriverBeActivated
 } from '../types/driver';
 import {
   getCanonicalTransporterNames,
@@ -78,6 +79,7 @@ export function evaluateDriverBulkEligibility(
     const badges = deriveDriverBadges(driver, store, nowMs, ctx?.allDriverIds);
 
     if (action === 'activate') {
+      const licenceCheck = canDriverBeActivated(driver, nowMs);
       if (driver.status === 'Active') {
         skipped.push({ driver, reason: 'Already active' });
       } else if (driver.status === 'Archived') {
@@ -85,17 +87,22 @@ export function evaluateDriverBulkEligibility(
           driver,
           reason: 'Archived record — restore individually from View/Edit profile'
         });
+      } else if (!licenceCheck.allowed) {
+        skipped.push({
+          driver,
+          reason:
+            licenceCheck.expiry === 'Expired'
+              ? 'Licence expired — update Licence Valid To before activating'
+              : 'Licence validity date missing — update Licence Valid To before activating'
+        });
       } else {
-        const licenceWarning =
-          badges.expiry === 'Expired'
-            ? 'Licence expired (compliance review needed before dispatch)'
-            : badges.expiry === 'Missing'
-            ? 'Licence validity date missing'
-            : undefined;
         eligible.push({
           driver,
           changeNote: 'Status → Active',
-          warningNote: licenceWarning
+          warningNote:
+            badges.expiry === 'Expiring within 30 days'
+              ? 'Licence expiring within 30 days'
+              : undefined
         });
       }
       return;
